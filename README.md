@@ -19,7 +19,7 @@ API keys are read from environment variables (a `.env` file), never from the rep
 ## Roadmap progress
 
 - [x] **Phase 1: data and exchange adapters**: one `ExchangeAdapter` interface, Binance and HTX adapters (ccxt), `PaperExchange`, SQLite candle store, resumable downloader, websocket feed with reconnect and stale-price heartbeat, request throttling, data-quality checks
-- [ ] Phase 2: strategy rules, technical/fundamental modules, economic-calendar and crypto event filters
+- [~] **Phase 2: strategies and filters**: technical indicators, 3 ebook strategies as explicit rules ([docs/strategies.md](docs/strategies.md)), signal log, economic-calendar no-trade filter. Still to do: funding/open-interest context and crypto event feeds
 - [ ] Phase 3: backtest lab and walk-forward validation
 - [ ] Phase 4: AI signal filter and model registry
 - [ ] Phase 5: paper/testnet loop, dashboard, Telegram alerts
@@ -37,6 +37,9 @@ src/aitrader/
     base.py          ExchangeAdapter interface
     ccxt_adapter.py  BinanceAdapter, HtxAdapter
     paper.py         PaperExchange simulator
+  indicators/        EMA/SMA, RSI, MACD, ATR, Bollinger, ADX, structure, S/R, volume profile
+  strategies/        rule cards + signal generators for the ebook strategies
+  events/            economic-calendar no-trade windows
   data/
     store.py         SQLite candle store
     downloader.py    paginated, resumable history download
@@ -56,6 +59,9 @@ aitrader status
 aitrader paper-smoke --exchange binance --symbol BTC/USDT --usdt 100
 aitrader download --since 2024-01-01 --exchange binance --symbol BTC/USDT --timeframe 1h
 aitrader check-data
+aitrader strategies
+aitrader signals --strategy trend_pullback --symbol BTC/USDT --timeframe 1h
+aitrader calendar
 aitrader stream --exchange binance --symbol BTC/USDT --seconds 20
 ```
 

@@ -138,6 +138,63 @@ async def cmd_paper_smoke(s: Settings, args) -> int:
         await market.close()
 
 
+def cmd_signals(s: Settings, args) -> int:
+    """Run a strategy over stored candles and write its signal log (Phase 2 exit check)."""
+    import csv
+
+    from .indicators import candles_to_frame
+    from .strategies import STRATEGIES
+
+    store = CandleStore(s.db_path)
+    candles = store.load(args.exchange, args.symbol, args.timeframe,
+                         _ms(args.since) if args.since else None)
+    store.close()
+    if not candles:
+        print("no candles stored for that series; run `aitrader download` first", file=sys.stderr)
+        return 1
+    strat = STRATEGIES[args.strategy]()
+    sigs = strat.generate(candles_to_frame(candles), args.exchange, args.symbol, args.timeframe)
+    rows = [sig.as_row() for sig in sigs]
+    out = args.out or f"data/signals_{args.strategy}_{args.exchange}_{args.symbol.replace('/', '')}_{args.timeframe}.csv"
+    with open(out, "w", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=list(rows[0]) if rows else ["ts"])
+        w.writeheader()
+        w.writerows(rows)
+    for sig in sigs[-args.show:]:
+        print(f"{_fmt(sig.ts)} {sig.side.value} {sig.symbol} entry={sig.entry:.6g} "
+              f"stop={sig.stop:.6g} target={sig.target:.6g}  {sig.reason}")
+    print(f"{len(sigs)} signals over {len(candles)} bars -> {out}")
+    return 0
+
+
+def cmd_strategies(_s: Settings, _args) -> int:
+    from .strategies import STRATEGIES
+
+    for cls in STRATEGIES.values():
+        sp = cls.spec
+        print(f"== {sp.name} ({sp.source}); timeframes {', '.join(sp.timeframes)}")
+        for label in ("setup", "entry", "stop", "target", "filter", "size"):
+            print(f"  {label:7} {getattr(sp, label)}")
+        print()
+    return 0
+
+
+def cmd_calendar(_s: Settings, args) -> int:
+    from .events import CalendarFilter
+
+    cal = CalendarFilter()
+    ok = cal.refresh(force=True)
+    now = datetime.now(timezone.utc)
+    if not ok:
+        print("calendar feed unavailable")
+    for ev in cal.upcoming(now, args.hours):
+        print(f"{ev.time:%a %Y-%m-%d %H:%M} UTC  {ev.country:4} {ev.impact:6} {ev.title}"
+              f"  (forecast {ev.forecast or '-'}, previous {ev.previous or '-'})")
+    d = cal.decide(now)
+    print(f"now: entries {'allowed' if d.allow_entries else 'BLOCKED'}, size x{d.size_multiplier:g}: {d.reason}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="aitrader", description=__doc__)
     p.add_argument("--env-file", default=".env")
@@ -170,6 +227,20 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--exchange", default="binance", choices=EXCHANGES)
     ps.add_argument("--symbol", default="BTC/USDT")
     ps.add_argument("--usdt", type=float, default=100.0)
+
+    sg = sub.add_parser("signals", help="run a strategy over stored candles and save its signal log")
+    sg.add_argument("--strategy", required=True)
+    sg.add_argument("--exchange", default="binance", choices=EXCHANGES)
+    sg.add_argument("--symbol", default="BTC/USDT")
+    sg.add_argument("--timeframe", default="4h")
+    sg.add_argument("--since", help="UTC date")
+    sg.add_argument("--out", help="CSV path")
+    sg.add_argument("--show", type=int, default=10, help="print the last N signals")
+
+    sub.add_parser("strategies", help="print every strategy's rule card")
+
+    ca = sub.add_parser("calendar", help="show upcoming high-impact events and the current decision")
+    ca.add_argument("--hours", type=float, default=72)
     return p
 
 
@@ -187,6 +258,9 @@ def main(argv: list[str] | None = None) -> int:
         "collect": cmd_collect,
         "stream": cmd_stream,
         "paper-smoke": cmd_paper_smoke,
+        "signals": cmd_signals,
+        "strategies": cmd_strategies,
+        "calendar": cmd_calendar,
     }[args.cmd]
     result = handler(settings, args)
     if asyncio.iscoroutine(result):
