@@ -18,7 +18,7 @@ import urllib.request
 from fastapi import Form, Request
 from fastapi.responses import PlainTextResponse, RedirectResponse
 
-from ..accounts import AccountError, KeyRejected, verify_keys
+from ..accounts import AccountError, KeyRejected, KeyUnverified, verify_keys
 from ..ops import secrets
 from .app import _csrf, _e, _q
 
@@ -35,16 +35,32 @@ GROUPS = [
 ]
 
 
+def _api_error(exc) -> str:
+    """Anthropic's own error message from an HTTPError body (never contains the key)."""
+    try:
+        return str(json.loads(exc.read())["error"]["message"])[:200]
+    except Exception:
+        return ""
+
+
 def check_anthropic(key: str, opener=urllib.request.urlopen) -> None:
+    """Reject only when Anthropic says the key is bad; anything else means 'couldn't check'."""
+    if not key.startswith("sk-ant-"):
+        raise KeyRejected("that isn't an Anthropic API key: it should start with sk-ant- (create one "
+                          "at console.anthropic.com, Settings, API keys)")
     req = urllib.request.Request("https://api.anthropic.com/v1/models?limit=1", headers={
-        "x-api-key": key, "anthropic-version": "2023-06-01"})
+        "x-api-key": key, "anthropic-version": "2023-06-01", "user-agent": "aitrader"})
     try:
         with opener(req, timeout=15) as resp:
             json.loads(resp.read())
     except Exception as exc:
         code = getattr(exc, "code", None)
-        raise KeyRejected("Anthropic refused that key (check you copied all of it)" if code in (401, 403)
-                          else f"couldn't reach Anthropic to check the key ({type(exc).__name__})") from None
+        detail = _api_error(exc) if code else ""
+        if code == 401:
+            raise KeyRejected("Anthropic says this key is invalid; copy it again, or create a new "
+                              "one at console.anthropic.com") from None
+        what = f"HTTP {code}" if code else type(exc).__name__
+        raise KeyUnverified(f"Anthropic didn't confirm the key ({what}{': ' + detail if detail else ''})") from None
 
 
 def check_telegram(token: str, chat_id: str, opener=urllib.request.urlopen) -> None:
@@ -53,8 +69,11 @@ def check_telegram(token: str, chat_id: str, opener=urllib.request.urlopen) -> N
     try:
         Telegram(token, chat_id, opener=opener).send("aitrader: Telegram alerts are connected.")
     except Exception as exc:
-        raise KeyRejected("Telegram refused it: check the bot token, and that you sent your bot a "
-                          f"message first so it may write to you ({type(exc).__name__})") from None
+        code = getattr(exc, "code", None)
+        if code in (400, 401, 403, 404):
+            raise KeyRejected("Telegram refused it: check the bot token and chat ID, and that you sent "
+                              f"your bot a message first so it may write to you (HTTP {code})") from None
+        raise KeyUnverified(f"couldn't reach Telegram to check it ({type(exc).__name__})") from None
 
 
 def add_settings_routes(app, *, settings, auth, paths, jobs, keys_secret: str, page, guard,
@@ -148,6 +167,7 @@ def add_settings_routes(app, *, settings, auth, paths, jobs, keys_secret: str, p
         if not any(given.values()):
             return done(error="paste the key first")
         values = {f.name: given[f.name] or current.get(f.name, "") for f in fields}
+        warning = ""
         try:
             if group == "anthropic":
                 await asyncio.to_thread(checkers["anthropic"], values["ANTHROPIC_API_KEY"])
@@ -163,12 +183,19 @@ def add_settings_routes(app, *, settings, auth, paths, jobs, keys_secret: str, p
                 if not (key and secret):
                     return done(error="Binance needs both the API key and the secret key")
                 await checkers["binance"]("binance", testnet, key, secret, settings)
-            save({k: v for k, v in values.items() if given[k]})
+        except KeyUnverified as exc:
+            if group == "binance":  # a real-money key is saved only once its permissions are confirmed
+                return done(error=f"Not saved: {exc}. Try again in a minute.")
+            warning = f" (Couldn't confirm it yet: {exc}. Saved anyway; it is used as soon as the service can reach it.)"
         except KeyRejected as exc:
             return done(error=f"Not saved: {exc}")
+        try:
+            save({k: v for k, v in values.items() if given[k]})
         except AccountError as exc:
             return done(error=str(exc))
         title = dict((g, t) for g, t, _ in GROUPS)[group]
+        if warning:
+            return done(msg=f"{title}: saved.{warning}")
         extra = " Telegram sent you a test message." if group == "telegram" else ""
         return done(msg=f"{title}: checked and saved.{extra} Services using it restart by themselves "
                         f"within a minute.")

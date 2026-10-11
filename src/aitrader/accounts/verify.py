@@ -17,6 +17,17 @@ class KeyRejected(ValueError):
     pass
 
 
+class KeyUnverified(KeyRejected):
+    """The check couldn't run (network, exchange down, region block): the key may be fine."""
+
+
+_AUTH_ERRORS = ("AuthenticationError", "PermissionDenied", "AccountNotEnabled", "AccountSuspended")
+
+
+def _is_auth_error(exc: Exception) -> bool:
+    return any(c.__name__ in _AUTH_ERRORS for c in type(exc).__mro__)
+
+
 async def verify_keys(exchange: str, testnet: bool, api_key: str, secret: str,
                       settings: Settings, client=None) -> dict:
     """Return the key's permissions, or raise KeyRejected with a reason a user can act on."""
@@ -31,9 +42,14 @@ async def verify_keys(exchange: str, testnet: bool, api_key: str, secret: str,
     try:
         try:
             bal = await adapter.balance()
-        except Exception as exc:  # wrong key, wrong IP, or not a testnet key
-            raise KeyRejected(f"the exchange refused the key ({type(exc).__name__}). Check that you "
-                              f"copied a {'testnet' if testnet else 'real-account'} key and secret") from None
+        except Exception as exc:
+            if _is_auth_error(exc):  # wrong key, wrong IP, or a real key on the testnet (or back)
+                raise KeyRejected(f"Binance refused the key ({type(exc).__name__}). Check that you "
+                                  f"copied a {'testnet' if testnet else 'real-account'} key and its "
+                                  f"secret in full") from None
+            # never echo the exception text: ccxt puts the signed request URL in it
+            raise KeyUnverified(f"couldn't reach Binance{' testnet' if testnet else ''} to check the "
+                                f"key ({type(exc).__name__})") from None
         perms = {"balance_assets": len([a for a, v in bal.free.items() if v])}
         if testnet:
             return perms
