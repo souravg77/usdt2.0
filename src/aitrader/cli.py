@@ -561,6 +561,36 @@ def cmd_ai(s: Settings, args) -> int:
     raise ValueError(f"unknown ai command {cmd}")
 
 
+def cmd_migrate(s: Settings, _args) -> int:
+    """Bring the database schema up to date (run by deploy/update.sh after each update)."""
+    store = CandleStore(s.db_path)
+    try:
+        applied = store.migrate()
+        print(f"database {s.db_path}: schema v{store.schema_version()}"
+              + (f" (applied {', '.join(f'v{v}' for v in applied)})" if applied else " (up to date)"))
+    finally:
+        store.close()
+    return 0
+
+
+def cmd_backup(s: Settings, args) -> int:
+    """Copy the database and the strategy/model registries into a folder."""
+    import shutil
+
+    os.makedirs(args.dest, exist_ok=True)
+    store = CandleStore(s.db_path)
+    try:
+        store.backup(os.path.join(args.dest, os.path.basename(s.db_path)))
+    finally:
+        store.close()
+    for path in ("data/learn/registry.json", "data/learn/paper_state.json", "data/ai/models/registry.json"):
+        if os.path.exists(path):
+            target = os.path.join(args.dest, path.replace("/", "__"))
+            shutil.copy2(path, target)
+    print(f"backup written to {args.dest}")
+    return 0
+
+
 def cmd_web(s: Settings, args) -> int:
     """Serve the dashboard (login from AITRADER_WEB_USER / AITRADER_WEB_PASSWORD)."""
     try:
@@ -685,6 +715,10 @@ def build_parser() -> argparse.ArgumentParser:
     lp.add_argument("--no-ai", action="store_true", help="ignore the active AI trade filter")
     lp.add_argument("--models", default="data/ai/models", help="trade-filter model registry folder")
 
+    sub.add_parser("migrate", help="bring the database schema up to date")
+    bk = sub.add_parser("backup", help="copy the database and registries into a folder")
+    bk.add_argument("dest")
+
     w = sub.add_parser("web", help="dashboard: submit books, see strategies and results (login required)")
     w.add_argument("--host", default="127.0.0.1", help="0.0.0.0 only inside Docker or behind a proxy")
     w.add_argument("--port", type=int, default=8080)
@@ -748,6 +782,8 @@ def main(argv: list[str] | None = None) -> int:
         "learn": cmd_learn,
         "ai": cmd_ai,
         "web": cmd_web,
+        "migrate": cmd_migrate,
+        "backup": cmd_backup,
     }[args.cmd]
     result = handler(settings, args)
     if asyncio.iscoroutine(result):
