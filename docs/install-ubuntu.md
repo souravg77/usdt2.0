@@ -94,8 +94,10 @@ What the installer does:
 
 1. Updates Ubuntu and turns on automatic security updates and **fail2ban**, which blocks
    addresses that keep guessing SSH passwords.
-2. Turns on the **firewall** (ufw). Only SSH and HTTPS are allowed in, and HTTPS only from your
-   local network.
+2. Turns on the **firewall** (ufw): only SSH and the dashboard's HTTPS port are open. On a
+   computer at home, only your own network can reach it, because your router doesn't let the
+   internet in. On a **rented server** (a VPS with a public IP), the dashboard is reachable from
+   the internet, protected by its password and the login lockout.
 3. Installs **Docker** from Docker's own repository.
 4. Downloads the code into `~/AI_crypto_trader`.
 5. Creates `.env` (readable only by you) with strong random secrets: the dashboard password,
@@ -249,7 +251,7 @@ services come back by themselves.
 
 ## 11. Reaching the dashboard from outside your network
 
-The installer only lets devices on your local network reach the dashboard. To use it from your
+On a computer at home, only devices on your local network reach the dashboard. To use it from your
 phone on mobile data, **don't open ports on your router**. Use one of these instead:
 
 - **Tailscale** (simplest, free for personal use). Install it on the server

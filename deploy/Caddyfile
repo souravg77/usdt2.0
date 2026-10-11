@@ -5,6 +5,12 @@
 #     Caddy makes its own certificate; the browser warns once until you trust it (see the guide).
 #   - with a domain:             trader.example.com    with AITRADER_TLS=you@example.com
 #     Let's Encrypt certificate, automatic; the domain's DNS must point at this server.
+{
+	# Browsers send no server name (SNI) when you open an IP address like https://192.168.1.50;
+	# without this Caddy can't pick a certificate and the browser shows ERR_SSL_PROTOCOL_ERROR.
+	default_sni {$AITRADER_HOST}
+}
+
 {$AITRADER_SITE} {
 	tls {$AITRADER_TLS}
 	encode zstd gzip
