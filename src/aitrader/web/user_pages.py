@@ -369,6 +369,8 @@ stored encrypted and never shown again.</p>
             u = users.get(uid)
             if u is None:
                 return "No such user."
+            if status not in ("active", "disabled", "pending"):
+                return "Unknown status."
             users.set_status(uid, status)
             users.log(uid, "admin", status)
             if status == "disabled":

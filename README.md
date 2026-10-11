@@ -76,9 +76,16 @@ aitrader ai retrain && aitrader ai list
 aitrader stream --exchange binance --symbol BTC/USDT --seconds 20
 ```
 
-## Deploying on an Ubuntu VPS
+## Deploying on an Ubuntu server
+
+**Start here: [docs/install-ubuntu.md](docs/install-ubuntu.md).** `deploy/install.sh` sets up a
+fresh Ubuntu server in one go: firewall, fail2ban, Docker, `.env` with random secrets, the
+services, and HTTPS through Caddy (on the server's LAN IP, or a domain with Let's Encrypt).
+
+- Health check: `docker compose run --rm collector doctor`
+- Backups: `./deploy/backup.sh` (daily from cron; see the guide)
 
 Updates: `./deploy/update.sh` pulls the latest `main`, rebuilds, migrates the database, restarts
 the services and rolls back on its own if the health check fails.
 
-We deploy with **Docker Compose**. See [docs/ubuntu-setup.md](docs/ubuntu-setup.md).
+Manual reference for every step: [docs/ubuntu-setup.md](docs/ubuntu-setup.md).
