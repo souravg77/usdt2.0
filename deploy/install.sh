@@ -129,6 +129,8 @@ if [ "$SITE_GIVEN" = 1 ] || ! grep -qE '^AITRADER_SITE=.+' .env; then
 fi
 SITE="$(grep -E '^AITRADER_SITE=' .env | cut -d= -f2-)"
 TLS="$(grep -E '^AITRADER_TLS=' .env | cut -d= -f2-)"
+HOST="${SITE#*://}"; HOST="${HOST%%/*}"; HOST="${HOST%:*}"
+sed -i '/^AITRADER_HOST=/d' .env; echo "AITRADER_HOST=$HOST" >> .env
 for kv in AITRADER_WEB_SECURE_COOKIE=true AITRADER_WEB_TRUST_PROXY=true "AITRADER_UID=$(id -u)"; do
   name="${kv%%=*}"; sed -i "/^${name}=/d" .env; echo "$kv" >> .env
 done
@@ -138,7 +140,7 @@ say "Building and starting (the first build takes a few minutes)"
 $DOCKER compose build
 $DOCKER compose run --rm -T collector migrate
 $DOCKER compose up -d collector context paper web
-$DOCKER compose --profile https up -d caddy
+$DOCKER compose --profile https up -d --force-recreate caddy  # picks up Caddyfile changes
 
 say "Health check"
 sleep 10

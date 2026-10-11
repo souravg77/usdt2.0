@@ -78,6 +78,7 @@ services:
     environment:  # only these two; the app secrets in .env stay out of this container
       AITRADER_SITE: ${AITRADER_SITE:-}
       AITRADER_TLS: ${AITRADER_TLS:-internal}
+      AITRADER_HOST: ${AITRADER_HOST:-localhost}  # AITRADER_SITE without https:// (the installer sets it)
     ports:  # AITRADER_HTTPS_BIND: the address to listen on (default all; the installer sets the LAN IP)
       - "${AITRADER_HTTPS_BIND:-0.0.0.0}:80:80"
       - "${AITRADER_HTTPS_BIND:-0.0.0.0}:443:443"
