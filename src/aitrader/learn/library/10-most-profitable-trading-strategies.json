@@ -1,0 +1,728 @@
+{
+ "book": "10 Most Profitable Trading Strategies",
+ "author": "Nikhil Porwal",
+ "strategies": [
+  {
+   "name": "inside_bar_trend_continuation",
+   "description": "Inside bar after a mother bar inside a higher-timeframe uptrend; buy when a candle closes above the mother bar's high, with volume confirmation.",
+   "source": {
+    "book": "10 Most Profitable Trading Strategies",
+    "pages": "p. 10-11",
+    "quote": "Entry when the candle close below the mother candle ( entry should be on candle close"
+   },
+   "timeframes": [
+    "1h",
+    "4h",
+    "1d"
+   ],
+   "entry": [
+    {
+     "left": "high[1]",
+     "op": "<",
+     "right": "high[2]"
+    },
+    {
+     "left": "low[1]",
+     "op": ">",
+     "right": "low[2]"
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "high[2]"
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "ema(200)"
+    },
+    {
+     "left": "ema_stack(20,50,200)",
+     "op": ">=",
+     "right": 1
+    },
+    {
+     "left": "rel_volume(20)",
+     "op": ">",
+     "right": 1.2
+    }
+   ],
+   "stop": {
+    "type": "lowest_low",
+    "n": 3
+   },
+   "target": {
+    "r": 2
+   },
+   "exit": {
+    "trailing": "close<ema20",
+    "time_stop_bars": null
+   },
+   "risk_pct": 0.01,
+   "decisions": [
+    "Inside bar = bar[1] high/low inside mother bar[2]; entry on the first close above the mother high (book: enter on candle close only)",
+    "Long side of the book's example (which was written for the breakdown side)",
+    "Higher-timeframe uptrend approximated on the same chart by close>EMA200 and EMA20>50>200 stack",
+    "'Volume confirmation' = rel_volume(20) > 1.2 (book gives no number)",
+    "Stop below mother candle: lowest_low(3) covers current, inside and mother bar = mother low",
+    "Book targets 1x/1.5x/2x mother range with scale-out; single target 2R used (book minimum 1:2), plus trailing close<ema20 (book: use a trailing stop, MA unspecified)",
+    "risk_pct 0.01: book gives no per-trade %"
+   ],
+   "uncodable": [
+    "Scale-out at 1x, 1.5x, 2x the mother candle range",
+    "Book rule 'close the terminal if two stop-loss orders are hit' (daily 2-loss limit) needs a portfolio-level daily loss counter",
+    "Inside-bar breakdown (short) side",
+    "Not coded yet: partial_take_profit(targets as multiples of a reference bar range)",
+    "Not coded yet: higher_timeframe_trend filter"
+   ]
+  },
+  {
+   "name": "inside_bar_oversold_reversal",
+   "description": "Inside bar at a market bottom with the oscillator oversold; buy on a close above the mother bar.",
+   "source": {
+    "book": "10 Most Profitable Trading Strategies",
+    "pages": "p. 11",
+    "quote": "we are trying to find the inside candle in the bottom or top of the market in the oversold or overbought market zone"
+   },
+   "timeframes": [
+    "4h",
+    "1d"
+   ],
+   "entry": [
+    {
+     "left": "high[1]",
+     "op": "<",
+     "right": "high[2]"
+    },
+    {
+     "left": "low[1]",
+     "op": ">",
+     "right": "low[2]"
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "high[2]"
+    },
+    {
+     "left": "rsi(14)",
+     "op": "<",
+     "right": 30,
+     "within": 5
+    },
+    {
+     "left": "close",
+     "op": "<",
+     "right": "ema(50)"
+    }
+   ],
+   "stop": {
+    "type": "lowest_low",
+    "n": 3
+   },
+   "target": {
+    "r": 2
+   },
+   "exit": {
+    "trailing": "close<ema20",
+    "time_stop_bars": null
+   },
+   "risk_pct": 0.01,
+   "decisions": [
+    "Book's oscillator is unnamed; RSI(14) < 30 within the last 5 bars used as 'oversold'",
+    "'Bottom of the market' approximated by close still below EMA50",
+    "Stop below mother low via lowest_low(3); target 2R (book minimum), trailing close<ema20"
+   ],
+   "uncodable": [
+    "Book rule 'close the terminal if two stop-loss orders are hit' (daily 2-loss limit) needs a portfolio-level daily loss counter",
+    "Overbought inside-bar reversal (short) side"
+   ]
+  },
+  {
+   "name": "doji_bottom_reversal",
+   "description": "Doji at a market bottom with oscillator oversold; buy when price closes above the doji's high, stop below the doji, trail with a moving average.",
+   "source": {
+    "book": "10 Most Profitable Trading Strategies",
+    "pages": "p. 13-14",
+    "quote": "A stop loss order should be placed below the low of the Doji candlestick"
+   },
+   "timeframes": [
+    "4h",
+    "1d"
+   ],
+   "entry": [
+    {
+     "left": "doji[1]",
+     "op": ">=",
+     "right": 1
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "high[1]"
+    },
+    {
+     "left": "rsi(14)",
+     "op": "<",
+     "right": 30,
+     "within": 3
+    },
+    {
+     "left": "close",
+     "op": "<",
+     "right": "ema(50)"
+    }
+   ],
+   "stop": {
+    "type": "lowest_low",
+    "n": 2
+   },
+   "target": {
+    "r": 2
+   },
+   "exit": {
+    "trailing": "close<ema20",
+    "time_stop_bars": null
+   },
+   "risk_pct": 0.01,
+   "decisions": [
+    "Doji approximated as |close-open| <= 0.2% of open on bar[1]; a proper doji test is body <= 10% of range",
+    "Entry = close above the doji high (book: 'high ... of Doji candle breaks upside'), confirmed on close",
+    "Oversold oscillator unnamed in text; RSI(14)<30 within 3 bars",
+    "Bottom of market approximated by close < EMA50",
+    "Stop lowest_low(2) = min(current low, doji low); book: below doji low",
+    "Book: trail with 'any moving averages' -> close<ema20; book gives no fixed target, 2R used per its 1:2 minimum"
+   ],
+   "uncodable": [
+    "Book rule 'close the terminal if two stop-loss orders are hit' (daily 2-loss limit) needs a portfolio-level daily loss counter",
+    "Doji at top / overbought (short) side",
+    "Gap-up confirmation from the example"
+   ]
+  },
+  {
+   "name": "bullish_engulfing_oversold",
+   "description": "Bullish engulfing in a downtrend with stochastics oversold; buy on breakout above the engulfing candle's high, stop below it, 1:2 target.",
+   "source": {
+    "book": "10 Most Profitable Trading Strategies",
+    "pages": "p. 15-16",
+    "quote": "On the breakout of the bullish Engulfing Candle , We are taking the entry with the stop loss below the"
+   },
+   "timeframes": [
+    "4h",
+    "1d"
+   ],
+   "entry": [
+    {
+     "left": "bullish_engulfing[1]",
+     "op": ">=",
+     "right": 1
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "high[1]"
+    },
+    {
+     "left": "stoch_k(14,3)",
+     "op": "<",
+     "right": 20,
+     "within": 4
+    },
+    {
+     "left": "close[2]",
+     "op": "<",
+     "right": "ema(50)"
+    }
+   ],
+   "stop": {
+    "type": "lowest_low",
+    "n": 2
+   },
+   "target": {
+    "r": 2
+   },
+   "exit": {
+    "trailing": null,
+    "time_stop_bars": null
+   },
+   "risk_pct": 0.01,
+   "decisions": [
+    "Engulfing coded from bodies: bar[2] bearish, bar[1] bullish, bar[1] body covers bar[2] body (book: 'body should fully cover ... previous day's black' body)",
+    "Entry = close above engulfing candle high (breakout, on close)",
+    "Downtrend (visual in book) approximated by bar[2] close below EMA50",
+    "Book says stochastics oversold; stoch_rsi(14) < 0.2 within 4 bars used as stand-in",
+    "Stop lowest_low(2) = min(current low, engulfing low); book: below the engulfing candle",
+    "Optional book confirmations (long day-1 body, volume spike on signal days) left out to keep signal count; test with rel_volume(20)>1.5 as a variant"
+   ],
+   "uncodable": [
+    "Book rule 'close the terminal if two stop-loss orders are hit' (daily 2-loss limit) needs a portfolio-level daily loss counter",
+    "Bearish engulfing (short) strategy, p. 16-19"
+   ]
+  },
+  {
+   "name": "trendline_breakout_lower_high",
+   "description": "After a downtrend of lower highs, buy once price closes above the previous lower high with a volume spike, rather than on the raw trendline break.",
+   "source": {
+    "book": "10 Most Profitable Trading Strategies",
+    "pages": "p. 22",
+    "quote": "we will wait for sustain above the previous Lower High in downtrend and Higher Low in uptrend"
+   },
+   "timeframes": [
+    "4h",
+    "1d"
+   ],
+   "entry": [
+    {
+     "left": "trend_structure",
+     "op": "<=",
+     "right": -1,
+     "within": 20
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "highest_high(15)"
+    },
+    {
+     "left": "rel_volume(20)",
+     "op": ">",
+     "right": 1.5
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "open"
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "ema(20)"
+    }
+   ],
+   "stop": {
+    "type": "lowest_low",
+    "n": 5
+   },
+   "target": {
+    "r": 2
+   },
+   "exit": {
+    "trailing": "close<ema20",
+    "time_stop_bars": null
+   },
+   "risk_pct": 0.01,
+   "decisions": [
+    "Downtrend = trend_structure -1 within the last 20 bars",
+    "Previous lower high approximated by highest_high(15); entry on close above it (book: wait for sustain above previous lower high)",
+    "'Spike in volume' = rel_volume(20) > 1.5; bigger-than-previous-candles condition approximated by a bullish close only",
+    "Stop: book says 'below the level'; lowest_low(5) used (below the breakout swing)",
+    "Target 2R (book: targets at prior lower highs, minimum 1:2); trailing close<ema20 (book: trailing stop is the golden tool)"
+   ],
+   "uncodable": [
+    "Book rule 'close the terminal if two stop-loss orders are hit' (daily 2-loss limit) needs a portfolio-level daily loss counter",
+    "Trendline angle filter (best 45 deg, avoid >60 deg)",
+    "Trendline breakdown (short) side",
+    "Targets T1/T2/T3 at prior lower highs",
+    "Not coded yet: descending_trendline_break(swing highs, pivot 3)",
+    "Not coded yet: trendline_angle",
+    "Not coded yet: bar_range > max range of previous 3 bars",
+    "Not coded yet: swing_high levels for targets"
+   ]
+  },
+  {
+   "name": "darvas_box_volume_breakout",
+   "description": "Consolidation box breakout: buy a close above the box top on a volume surge after a tight range; stop below the box bottom.",
+   "source": {
+    "book": "10 Most Profitable Trading Strategies",
+    "pages": "p. 27-28",
+    "quote": "put stop loss outside the box,which is the best place to put the stop loss"
+   },
+   "timeframes": [
+    "1h",
+    "4h",
+    "1d"
+   ],
+   "entry": [
+    {
+     "left": "bb_width_rank(20,2,120)",
+     "op": "<",
+     "right": 0.3,
+     "within": 5
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "highest_high(20)"
+    },
+    {
+     "left": "rel_volume(20)",
+     "op": ">",
+     "right": 1.5
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "open"
+    },
+    {
+     "left": "close",
+     "op": "<",
+     "right": "1.03*highest_high(20)"
+    }
+   ],
+   "stop": {
+    "type": "lowest_low",
+    "n": 20
+   },
+   "target": {
+    "r": 2
+   },
+   "exit": {
+    "trailing": "close<ema50",
+    "time_stop_bars": null
+   },
+   "risk_pct": 0.01,
+   "decisions": [
+    "Box approximated as the prior 20-bar range (top = highest_high(20), bottom = lowest_low(20)) with Bollinger width in the bottom 30% of 120 bars (consolidation)",
+    "Breakout confirmation = close above box top with rel_volume(20)>1.5 and a bullish candle (book: increased volume and strong price movement)",
+    "Do not chase: close no more than 3% above the box top (book warns against chasing extended moves)",
+    "Stop = box bottom (lowest_low 20), the book's preferred stop; target 2R; trailing close<ema50"
+   ],
+   "uncodable": [
+    "Book rule 'close the terminal if two stop-loss orders are hit' (daily 2-loss limit) needs a portfolio-level daily loss counter",
+    "Box breakdown at tops (short)",
+    "Stock-selection fundamentals/news filter",
+    "Not coded yet: darvas_box(top/bottom confirmed by 3 bars not exceeding them)"
+   ]
+  },
+  {
+   "name": "opening_range_breakout_15m",
+   "description": "Turbocharged market opening: break of the first 15-minute range in the direction of the previous day's trend, above EMA(14), trailed with EMA(14).",
+   "source": {
+    "book": "10 Most Profitable Trading Strategies",
+    "pages": "p. 33",
+    "quote": "Target will be x1,x1.5,x2 of First 15 minute candle range."
+   },
+   "timeframes": [
+    "5m",
+    "15m"
+   ],
+   "entry": [
+    {
+     "left": "close",
+     "op": "crosses_above",
+     "right": "highest_high(3)"
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "ema(14)"
+    },
+    {
+     "left": "change(96)",
+     "op": ">",
+     "right": 0
+    },
+    {
+     "left": "rel_volume(20)",
+     "op": ">",
+     "right": 1.2
+    }
+   ],
+   "stop": {
+    "type": "lowest_low",
+    "n": 4
+   },
+   "target": {
+    "r": 2
+   },
+   "exit": {
+    "trailing": "close<ema14",
+    "time_stop_bars": 96
+   },
+   "risk_pct": 0.005,
+   "decisions": [
+    "Crypto has no session open; true rule needs the UTC-00:00 first 15m candle range. Best-effort proxy: break of the last 3 bars' high",
+    "Previous-day trend proxied by change(96)>0 (24h on 15m; 8h on 5m)",
+    "Current-day bullishness = close above EMA(14), as the book says",
+    "Stop at the range low (lowest_low 4); target 2R = 2x range (book: 1x,1.5x,2x range); trailing close<ema14 as book",
+    "time_stop 96 bars stands in for intraday square-off; risk 0.005 because intraday and high frequency"
+   ],
+   "uncodable": [
+    "Book rule 'close the terminal if two stop-loss orders are hit' (daily 2-loss limit) needs a portfolio-level daily loss counter",
+    "Pre-market news and gap analysis",
+    "Short side below EMA(14)",
+    "Not coded yet: session_opening_range(first 15m after 00:00 UTC) high/low",
+    "Not coded yet: previous_day_trend (prior daily candle direction or daily close vs daily EMA)",
+    "Not coded yet: partial_take_profit(1x,1.5x,2x range)"
+   ]
+  },
+  {
+   "name": "high_52w_breakout",
+   "description": "52-week-high momentum: buy a daily close at a new 52-week high on rising volume, long side only.",
+   "source": {
+    "book": "10 Most Profitable Trading Strategies",
+    "pages": "p. 36",
+    "quote": "In Case of 52 week High, Always go with Bulls Side"
+   },
+   "timeframes": [
+    "1d"
+   ],
+   "entry": [
+    {
+     "left": "close",
+     "op": ">",
+     "right": "highest_high(365)"
+    },
+    {
+     "left": "rel_volume(20)",
+     "op": ">",
+     "right": 1.5
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "ema(50)"
+    }
+   ],
+   "stop": {
+    "type": "atr",
+    "mult": 2,
+    "n": 14
+   },
+   "target": {
+    "r": 2
+   },
+   "exit": {
+    "trailing": "close<ema50",
+    "time_stop_bars": null
+   },
+   "risk_pct": 0.01,
+   "decisions": [
+    "52 weeks = 365 daily bars because crypto trades every day",
+    "Volume confirmation = rel_volume(20) > 1.5 (book: increasing trading volume)",
+    "Book gives no stop/target; 2xATR(14) stop, 2R target (book minimum 1:2), trailing close<ema50",
+    "Book then times entries on lower timeframes with its other setups; not coded here"
+   ],
+   "uncodable": [
+    "Book rule 'close the terminal if two stop-loss orders are hit' (daily 2-loss limit) needs a portfolio-level daily loss counter",
+    "52-week-low short side",
+    "News catalysts",
+    "Top-down timing of the entry with an intraday setup",
+    "Not coded yet: multi-timeframe entry (daily 52w-high filter + intraday trigger)"
+   ]
+  },
+  {
+   "name": "adx_ema14_trend_intraday",
+   "description": "ADX-EMA: buy when ADX(14) is between 20 and 50, +DI above -DI, price above EMA(14) and the previous day trended up; exit on a close below EMA(14).",
+   "source": {
+    "book": "10 Most Profitable Trading Strategies",
+    "pages": "p. 40-42",
+    "quote": "We Exit the buy trade,When it breaks down the EMA(14) on candle close basis"
+   },
+   "timeframes": [
+    "5m",
+    "15m"
+   ],
+   "entry": [
+    {
+     "left": "adx(14)",
+     "op": ">",
+     "right": 20
+    },
+    {
+     "left": "adx(14)",
+     "op": "<",
+     "right": 50
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "ema(14)"
+    },
+    {
+     "left": "plus_di(14)",
+     "op": ">",
+     "right": "minus_di(14)"
+    },
+    {
+     "left": "change(96)",
+     "op": ">",
+     "right": 0
+    },
+    {
+     "left": "low",
+     "op": "<=",
+     "right": "1.003*ema(14)",
+     "within": 3
+    }
+   ],
+   "stop": {
+    "type": "indicator",
+    "expr": "0.995*ema(14)"
+   },
+   "target": null,
+   "exit": {
+    "trailing": "close<ema14",
+    "time_stop_bars": 96
+   },
+   "risk_pct": 0.005,
+   "decisions": [
+    "+DI > -DI is not available; proxied by change(14)>0 (14-bar net rise). Replace with plus_di>minus_di when added",
+    "Previous-day trend proxied by change(96)>0",
+    "Pullback to near EMA(14) (low within 0.3% of EMA in last 3 bars) taken from the book's examples, not its rule list",
+    "Stop placed 0.5% under EMA(14): book wants 'some space between the stop loss point and ema value'",
+    "No fixed target (book: 'Target is not Fixed'); exit = close below EMA(14); time stop 96 bars for intraday square-off"
+   ],
+   "uncodable": [
+    "Book rule 'close the terminal if two stop-loss orders are hit' (daily 2-loss limit) needs a portfolio-level daily loss counter",
+    "Sell-side version",
+    "Not coded yet: previous_day_trend"
+   ]
+  },
+  {
+   "name": "quasimodo_bullish_higher_low",
+   "description": "Bullish Quasimodo: after a downtrend, price breaks the last lower high (higher high), then pulls back to make a higher low; buy the higher-low bounce with a stop below the lower low.",
+   "source": {
+    "book": "10 Most Profitable Trading Strategies",
+    "pages": "p. 45-46",
+    "quote": "that is the level where we execute our buy trades and put stop loss below the previous lower low"
+   },
+   "timeframes": [
+    "15m",
+    "30m",
+    "4h"
+   ],
+   "entry": [
+    {
+     "left": "trend_structure",
+     "op": "<=",
+     "right": -1,
+     "within": 20
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "highest_high(20)",
+     "within": 15
+    },
+    {
+     "left": "low",
+     "op": "<=",
+     "right": "ema(20)"
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "ema(20)"
+    },
+    {
+     "left": "low",
+     "op": ">",
+     "right": "lowest_low(30)"
+    },
+    {
+     "left": "rel_volume(20)",
+     "op": ">",
+     "right": 1.0
+    }
+   ],
+   "stop": {
+    "type": "lowest_low",
+    "n": 30
+   },
+   "target": {
+    "r": 2
+   },
+   "exit": {
+    "trailing": "close<ema50",
+    "time_stop_bars": null
+   },
+   "risk_pct": 0.01,
+   "decisions": [
+    "Prior downtrend = trend_structure -1 within 20 bars",
+    "Break of the last lower high = a close above highest_high(20) within the last 15 bars",
+    "Higher low = pullback that tags EMA20 and closes back above it while staying above the 30-bar low",
+    "Volume confirmation (book) = rel_volume >= 1.0",
+    "Stop below the QM lower low = lowest_low(30); target 2R (book: min 1:2 or 1:3, first zig-zag top); trailing close<ema50",
+    "Timeframes from examples (gold 15m, USDJPY 30m, 4h analysis); author says it suits forex/crypto"
+   ],
+   "uncodable": [
+    "Bearish Quasimodo (short)",
+    "Book rule 'close the terminal if two stop-loss orders are hit' (daily 2-loss limit) needs a portfolio-level daily loss counter",
+    "Alternative entry on break above higher high (p. 45)",
+    "Not coded yet: swing_points(pivot 3/3) with labels HH/HL/LH/LL",
+    "Not coded yet: quasimodo_bullish(left shoulder level)"
+   ]
+  },
+  {
+   "name": "bear_trap_support_reclaim",
+   "description": "Bear trap: price breaks below 20-bar support, then reclaims it with a volume spike and a bullish candle; buy above the reversal candle high, stop below the swing low.",
+   "source": {
+    "book": "10 Most Profitable Trading Strategies",
+    "pages": "p. 56",
+    "quote": "Place a buy order above the recent swing high or above the high of the bullish candlestick that indicates the reversal."
+   },
+   "timeframes": [
+    "15m",
+    "1h",
+    "4h"
+   ],
+   "entry": [
+    {
+     "left": "low",
+     "op": "<",
+     "right": "lowest_low(20)",
+     "within": 4
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "lowest_low(20)[4]"
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "high[1]"
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "open"
+    },
+    {
+     "left": "rel_volume(20)",
+     "op": ">",
+     "right": 1.5
+    }
+   ],
+   "stop": {
+    "type": "lowest_low",
+    "n": 6
+   },
+   "target": {
+    "r": 2
+   },
+   "exit": {
+    "trailing": "close<ema20",
+    "time_stop_bars": null
+   },
+   "risk_pct": 0.01,
+   "decisions": [
+    "Support = 20-bar low as it stood 4 bars ago (lowest_low(20)[4]); trap = a low below the running 20-bar low within the last 4 bars, then a close back above the old support",
+    "Entry on a close above the prior bar's high with a bullish candle (book: above the high of the bullish reversal candle)",
+    "Volume confirmation on the reclaim = rel_volume(20) > 1.5",
+    "Stop below the trap swing low = lowest_low(6); target 2R (book: prior resistance / previous day high); trailing close<ema20"
+   ],
+   "uncodable": [
+    "Bull trap (short) strategy p. 49-55",
+    "Book rule 'close the terminal if two stop-loss orders are hit' (daily 2-loss limit) needs a portfolio-level daily loss counter",
+    "Low volume during the breakdown (needs lagged rel_volume compare)",
+    "Partial profit at multiple targets",
+    "Not coded yet: rel_volume on the breakdown bar < 1 (lagged within-window condition)",
+    "Not coded yet: positive_rsi_divergence(14)",
+    "Not coded yet: previous_day_high"
+   ]
+  }
+ ]
+}

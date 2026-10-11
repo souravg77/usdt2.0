@@ -1,0 +1,740 @@
+{
+ "book": "How to Trade with Price Action: Strategies",
+ "author": "Galen Woods",
+ "year": 2014,
+ "strategies": [
+  {
+   "name": "inside_bar_after_sma21_cross",
+   "description": "After price clears completely above the 21 SMA from below, buy the break of the first bullish inside bar (first low-risk pullback of a new uptrend).",
+   "source": {
+    "book": "How to Trade with Price Action: Strategies",
+    "pages": "p. 11-14",
+    "quote": "These rules attempt to capture the first low-risk pullback in a new trend using an inside bar."
+   },
+   "timeframes": [
+    "5m",
+    "15m",
+    "1h"
+   ],
+   "entry": [
+    {
+     "left": "low",
+     "op": "crosses_above",
+     "right": "sma(21)",
+     "within": 15
+    },
+    {
+     "left": "inside_bar[1]",
+     "op": ">=",
+     "right": 1
+    },
+    {
+     "left": "close[1]",
+     "op": ">",
+     "right": "open[1]"
+    },
+    {
+     "left": "close[1]",
+     "op": ">",
+     "right": "sma(21)"
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "high[1]"
+    },
+    {
+     "left": "adx(14)",
+     "op": ">",
+     "right": 20
+    }
+   ],
+   "stop": {
+    "type": "lowest_low",
+    "n": 1
+   },
+   "target": {
+    "r": 2
+   },
+   "exit": {
+    "trailing": null,
+    "time_stop_bars": 48,
+    "when": [
+     {
+      "left": "close",
+      "op": "<",
+      "right": "sma(21)"
+     }
+    ]
+   },
+   "risk_pct": 0.005,
+   "decisions": [
+    "'A price bar must clear above the SMA' = the bar's low crosses above SMA(21), at most 15 bars ago",
+    "'Bullish inside bar' = inside bar that closed above its open",
+    "The buy stop one tick above the inside bar is approximated by a close above the inside bar's high (the fill is later and worse than a real stop order)",
+    "Book does not define the stop; we use the inside bar's low (lowest_low(1), since lowest_low excludes the current bar)",
+    "Target 2R: the book's example made 2:1 when targeting the last extreme low",
+    "'Avoid congestion' is approximated with ADX(14) > 20",
+    "4-minute YM futures mapped to 5m-1h; risk 0.5% (the book gives no figure)"
+   ],
+   "uncodable": [
+    "Short side: price falls completely below the SMA, first bearish inside bar, sell stop below it",
+    "Discretionary congestion read (shadows on both ends of the bars)",
+    "Not coded yet: first_inside_bar_since(low crosses_above sma(21)) - only the FIRST inside bar after the cross should qualify",
+    "Not coded yet: stop_entry_above(high[1]) - intrabar stop-order fill",
+    "Not coded yet: target_at_last_swing_extreme"
+   ]
+  },
+  {
+   "name": "four_down_days_swing_low_holds",
+   "description": "Fade 4+ consecutive down bars that fail to breach the last swing low; buy above the next bullish bar.",
+   "source": {
+    "book": "How to Trade with Price Action: Strategies",
+    "pages": "p. 17-20",
+    "quote": "Using the market structure to filter consecutive up/down days is a simple method"
+   },
+   "timeframes": [
+    "4h",
+    "1d"
+   ],
+   "entry": [
+    {
+     "left": "red_streak[2]",
+     "op": ">=",
+     "right": 4
+    },
+    {
+     "left": "close[1]",
+     "op": ">",
+     "right": "open[1]"
+    },
+    {
+     "left": "lowest_low(5)[1]",
+     "op": ">",
+     "right": "lowest_low(20)[6]"
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "high[1]"
+    }
+   ],
+   "stop": {
+    "type": "lowest_low",
+    "n": 6
+   },
+   "target": {
+    "r": 2
+   },
+   "exit": {
+    "trailing": null,
+    "time_stop_bars": 20,
+    "when": []
+   },
+   "risk_pct": 0.005,
+   "decisions": [
+    "'Down day' = close below open (red_streak; check that the engine's red_streak uses close<open as the book does)",
+    "Setup bar = the first bullish bar (bar [1]) right after the streak, which ends at bar [2]",
+    "'Has not breached the last swing low' is approximated as: the lowest low of the streak and setup bars (bars 1-5) stays above the lowest low of the 20 bars before them",
+    "The buy stop one tick above the setup bar is approximated by a close above its high",
+    "Stop and target are not given by the book; stop below the low of the streak and setup (6 bars), target 2R",
+    "Daily stock examples (ROST, SPY) mapped to 4h/1d"
+   ],
+   "uncodable": [
+    "Short side: 4+ up days not breaching the last swing high, sell below the next bearish bar",
+    "Deceleration / Anti-climax thrust patterns (only named, defined in the author's course)",
+    "Not coded yet: swing_low_pivot (last confirmed swing low)",
+    "Not coded yet: stop_entry_above(high[1])",
+    "Not coded yet: red_streak with variable length ending at the bar before the setup bar (the streak may be longer than 4 and the first bullish bar may come later)"
+   ]
+  },
+  {
+   "name": "enhanced_three_bar_reversal",
+   "description": "Alton Hill's three-bar reversal: down bar, lower-low middle bar, then a bar that closes above the highs of both prior bars; buy at the close.",
+   "source": {
+    "book": "How to Trade with Price Action: Strategies",
+    "pages": "p. 21-25",
+    "quote": "Bar 3 closes above the high of both Bar 1 and Bar 2"
+   },
+   "timeframes": [
+    "5m",
+    "15m"
+   ],
+   "entry": [
+    {
+     "left": "close[2]",
+     "op": "<",
+     "right": "open[2]"
+    },
+    {
+     "left": "low[1]",
+     "op": "<",
+     "right": "low[2]"
+    },
+    {
+     "left": "low[1]",
+     "op": "<",
+     "right": "low"
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "high[1]"
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "high[2]"
+    },
+    {
+     "left": "high[1]",
+     "op": "<=",
+     "right": "high[2]"
+    }
+   ],
+   "stop": {
+    "type": "lowest_low",
+    "n": 2
+   },
+   "target": {
+    "r": 2
+   },
+   "exit": {
+    "trailing": null,
+    "time_stop_bars": 36,
+    "when": []
+   },
+   "risk_pct": 0.005,
+   "decisions": [
+    "Entry at the close of bar 3, as in the book",
+    "The book puts the stop at the opposite end of the signal bar (bar 3's low). The grammar's lowest_low excludes the current bar, so we use the pattern low (bar 2's low, lowest_low(2)). That stop is wider; size is kept constant by risk_pct",
+    "The book's warning about an outside middle bar becomes a filter: bar 2's high must not exceed bar 1's high",
+    "Target not given; 2R",
+    "5-minute ES/YM futures mapped to 5m/15m",
+    "lowest_low(2) is the low of bar 2, which by the entry rules is the lowest of the three bars"
+   ],
+   "uncodable": [
+    "Short side: bar 1 up, bar 2 higher high, bar 3 closes below the lows of bars 1 and 2",
+    "Discretionary context (head and shoulders confluence, long tails = congestion warning)"
+   ]
+  },
+  {
+   "name": "nr7_ema20_trend_breakout",
+   "description": "In an uptrend where the last 7 bars are completely above the 20 EMA, buy the break of an NR7 bar's high.",
+   "source": {
+    "book": "How to Trade with Price Action: Strategies",
+    "pages": "p. 26-29",
+    "quote": "NR7 means narrow bar 7. It is a bar that has a smaller range than the six bars before it."
+   },
+   "timeframes": [
+    "5m",
+    "15m",
+    "1h"
+   ],
+   "entry": [
+    {
+     "left": "nr(7)[1]",
+     "op": ">=",
+     "right": 1
+    },
+    {
+     "left": "nr(7)[2]",
+     "op": "<",
+     "right": 1
+    },
+    {
+     "left": "low[1]",
+     "op": ">",
+     "right": "ema(20)[1]"
+    },
+    {
+     "left": "low[2]",
+     "op": ">",
+     "right": "ema(20)[2]"
+    },
+    {
+     "left": "low[3]",
+     "op": ">",
+     "right": "ema(20)[3]"
+    },
+    {
+     "left": "low[4]",
+     "op": ">",
+     "right": "ema(20)[4]"
+    },
+    {
+     "left": "low[5]",
+     "op": ">",
+     "right": "ema(20)[5]"
+    },
+    {
+     "left": "low[6]",
+     "op": ">",
+     "right": "ema(20)[6]"
+    },
+    {
+     "left": "low[7]",
+     "op": ">",
+     "right": "ema(20)[7]"
+    },
+    {
+     "left": "high[1]",
+     "op": "<",
+     "right": "highest_high(10)[1]"
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "high[1]"
+    }
+   ],
+   "stop": {
+    "type": "lowest_low",
+    "n": 1
+   },
+   "target": {
+    "r": 2
+   },
+   "exit": {
+    "trailing": null,
+    "time_stop_bars": 36,
+    "when": [
+     {
+      "left": "close",
+      "op": "<",
+      "right": "ema(20)"
+     }
+    ]
+   },
+   "risk_pct": 0.005,
+   "decisions": [
+    "'Past 7 bars completely above the 20 EMA' = the lows of the NR7 bar and the 6 bars before it are above the EMA(20) of each bar",
+    "Break of the NR7 high is approximated by a close above it (no intrabar stop orders)",
+    "Stop at the NR7 bar's opposite extreme (its low), as in the book's example",
+    "Book warning: skip NR7 at the trend high and wait for a real pullback. Coded as: the NR7 high is below the prior 10-bar high",
+    "Book warning: multiple NR7s mean congestion. Coded as: the previous bar is not also an NR7",
+    "3-minute CL futures mapped to 5m-1h; target 2R (not given)"
+   ],
+   "uncodable": [
+    "Short side: 7 bars completely below the 20 EMA, sell on a break of the NR7 low",
+    "Re-entry after a whipsaw while the trend holds",
+    "'Path of least resistance' judgement",
+    "Not coded yet: stop_entry_above(high[1])"
+   ]
+  },
+  {
+   "name": "trend_bar_failure_long",
+   "description": "In an uptrend (20 EMA sloping up), a bear trend bar's low is broken without follow-through; buy above the high of the breaking bar within one bar.",
+   "source": {
+    "book": "How to Trade with Price Action: Strategies",
+    "pages": "p. 30-38",
+    "quote": "If a trend bar is not followed by another trend bar"
+   },
+   "timeframes": [
+    "5m",
+    "1h",
+    "1d"
+   ],
+   "entry": [
+    {
+     "left": "ema(20)[1]",
+     "op": ">",
+     "right": "ema(20)[3]"
+    },
+    {
+     "left": "close[2]",
+     "op": "<",
+     "right": "open[2]"
+    },
+    {
+     "left": "low[1]",
+     "op": "<",
+     "right": "low[2]"
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "high[1]"
+    },
+    {
+     "left": "body_pct[2]",
+     "op": ">=",
+     "right": 0.5
+    }
+   ],
+   "stop": {
+    "type": "lowest_low",
+    "n": 1
+   },
+   "target": {
+    "r": 2
+   },
+   "exit": {
+    "trailing": null,
+    "time_stop_bars": 30,
+    "when": []
+   },
+   "risk_pct": 0.005,
+   "decisions": [
+    "'20 EMA sloping up' = EMA(20) one bar ago is above its value two bars earlier",
+    "Bear trend bar (body > 50% of range) is APPROXIMATED as a red bar that is not a doji. The grammar has no body/range feature, see needs",
+    "'Low of bear trend bar broken' = the next bar (bar [1]) makes a lower low; buy stop above that bar's high, valid for 1 bar. Coded as a close above high[1] on the very next bar, which keeps the book's one-bar expiry",
+    "Stop below the low of the breaking bar (not specified by the book); target 2R",
+    "Book shows 5-minute to monthly charts; mapped to 5m, 1h, 1d",
+    "Bear trend bar = down bar whose body is at least 50% of its range (body_pct[2] >= 0.5)"
+   ],
+   "uncodable": [
+    "Short side: EMA sloping down, bull trend bar whose high is broken, sell stop below the low within one bar",
+    "'or if your trend assessment is bullish' discretionary alternative",
+    "Not coded yet: stop_entry_above(high[1]) with 1-bar expiry",
+    "Not coded yet: bar [1] must not itself be a bear trend bar (not expressible as one AND condition)"
+   ]
+  },
+  {
+   "name": "m2b_two_legged_pullback_ema20",
+   "description": "Al Brooks M2B: in a strong uptrend, a two-legged pullback to the 20 EMA; buy above the bar that tested the EMA.",
+   "source": {
+    "book": "How to Trade with Price Action: Strategies",
+    "pages": "p. 39-42",
+    "quote": "he identified a two-legged pullback to the moving average as one of the best trade"
+   },
+   "timeframes": [
+    "5m",
+    "15m",
+    "1h"
+   ],
+   "entry": [
+    {
+     "left": "adx(14)",
+     "op": ">",
+     "right": 25
+    },
+    {
+     "left": "plus_di(14)",
+     "op": ">",
+     "right": "minus_di(14)"
+    },
+    {
+     "left": "ema(20)",
+     "op": ">",
+     "right": "ema(20)[10]"
+    },
+    {
+     "left": "low[1]",
+     "op": "<=",
+     "right": "ema(20)[1]"
+    },
+    {
+     "left": "close[1]",
+     "op": ">",
+     "right": "ema(20)[1]"
+    },
+    {
+     "left": "highest_high(10)[1]",
+     "op": ">",
+     "right": "high[1]"
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "high[1]"
+    }
+   ],
+   "stop": {
+    "type": "lowest_low",
+    "n": 1
+   },
+   "target": {
+    "r": 2
+   },
+   "exit": {
+    "trailing": null,
+    "time_stop_bars": 36,
+    "when": []
+   },
+   "risk_pct": 0.005,
+   "decisions": [
+    "'Strong uptrend' = ADX(14) > 25, +DI > -DI and EMA(20) rising over 10 bars",
+    "'Bar that tested the 20 EMA' = bar [1] whose low touched or pierced EMA(20) but closed above it (rejection)",
+    "Pullback present = bar [1]'s high is below the prior 10-bar high. The TWO-legged count cannot be expressed, see needs",
+    "The buy stop one tick above the test bar is approximated by a close above its high",
+    "Stop below the test bar's low (not given in the book); target 2R"
+   ],
+   "needs": [
+    "two_legged_pullback (leg counting: a bar with a higher high starts an up-leg, a lower low starts a down-leg; require 2 down-legs since the swing high)",
+    "stop_entry_above(high[1])"
+   ],
+   "uncodable": [
+    "Short side (M2S): two-legged pullback up to the 20 EMA in a strong downtrend",
+    "Discretionary 'clear EMA rejection' and 'space between price and MA' momentum read",
+    "Not coded yet: the two-legged pullback needs leg counting; the approximation would be a different strategy"
+   ]
+  },
+  {
+   "name": "high_close_doji_pivot_support",
+   "description": "John Person style: a doji at a support level followed by a bar closing above the doji's high; buy at that close.",
+   "source": {
+    "book": "How to Trade with Price Action: Strategies",
+    "pages": "p. 43-47",
+    "quote": "Basically, wait for a doji. Then, look out for a candlestick to close"
+   },
+   "timeframes": [
+    "5m",
+    "15m"
+   ],
+   "entry": [
+    {
+     "left": "doji[1]",
+     "op": ">=",
+     "right": 1
+    },
+    {
+     "left": "low[1]",
+     "op": "<=",
+     "right": "1.003*lowest_low(50)[1]"
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "high[1]"
+    }
+   ],
+   "stop": {
+    "type": "lowest_low",
+    "n": 2
+   },
+   "target": {
+    "r": 2
+   },
+   "exit": {
+    "trailing": null,
+    "time_stop_bars": 48,
+    "when": []
+   },
+   "risk_pct": 0.005,
+   "decisions": [
+    "Doji = grammar doji (body <= 10% of range); the book does not quantify it",
+    "Floor-pivot supports (S1/S2 from the prior session) are unavailable. APPROXIMATED as: the doji's low is within 0.3% of the prior 50-bar low (a local support level)",
+    "Buy at the close of the bar that closes above the doji's high (the high-close doji), as in the book",
+    "Stop below the doji and the bar before it (not given); target 2R in place of the next pivot level (S1 after an S2 entry)",
+    "5-minute ES futures mapped to 5m/15m"
+   ],
+   "needs": [
+    "floor_pivots(prior session/day): pp, s1, s2, r1, r2 with PP=(H+L+C)/3, S1=2PP-H, S2=PP-(H-L)",
+    "target_at_next_pivot_level",
+    "count of dojis near the level (multiple dojis = better)"
+   ],
+   "uncodable": [
+    "Short side: doji at resistance, sell on close of a low close doji",
+    "Quality filters: no strong bearish bars, a preceding failed low-close doji",
+    "Not coded yet: needs floor pivot levels (PP, S1, S2) from the prior session"
+   ]
+  },
+  {
+   "name": "bullish_engulfing_market_structure",
+   "description": "In an uptrend of higher swing highs and lows, buy a bullish engulfing pattern whose high is still below the previous swing high.",
+   "source": {
+    "book": "How to Trade with Price Action: Strategies",
+    "pages": "p. 48-51",
+    "quote": "uses the concept of market structure to find point us in the right direction."
+   },
+   "timeframes": [
+    "4h",
+    "1d"
+   ],
+   "entry": [
+    {
+     "left": "trend_structure",
+     "op": ">=",
+     "right": 1
+    },
+    {
+     "left": "bullish_engulfing",
+     "op": ">=",
+     "right": 1
+    },
+    {
+     "left": "high",
+     "op": "<",
+     "right": "highest_high(20)[1]"
+    },
+    {
+     "left": "high[1]",
+     "op": "<",
+     "right": "highest_high(20)[1]"
+    }
+   ],
+   "stop": {
+    "type": "indicator",
+    "expr": "0.999*low"
+   },
+   "target": {
+    "r": 2
+   },
+   "exit": {
+    "trailing": null,
+    "time_stop_bars": 20,
+    "when": []
+   },
+   "risk_pct": 0.005,
+   "decisions": [
+    "'Higher swing high and higher swing low' = trend_structure == +1",
+    "Previous swing high approximated as the highest high of the 20 bars before the pattern; both pattern bars' highs must stay below it (book rule 3)",
+    "Enter at the engulfing bar's close with no confirmation bar, as the book says",
+    "Stop below the low of the 2 bars before the engulfing bar (this does not cover the engulfing bar's own low; see needs); target 2R in place of the previous swing high",
+    "Daily stock examples (AGN, CAH) mapped to 4h/1d",
+    "Stop just below the engulfing bar's own low (0.999*low), which is the pattern low"
+   ],
+   "uncodable": [
+    "Short side: lower swing highs and lows, bearish engulfing whose low stays above the previous swing low",
+    "Discretion to avoid sideways ranges where swings do not break out",
+    "Not coded yet: swing_high_pivot (previous confirmed swing high) and target_at_previous_swing_high"
+   ]
+  },
+  {
+   "name": "hikkake_long",
+   "description": "Dan Chesler's Hikkake: an inside bar followed by a false breakdown bar (lower high and lower low); buy when price takes out the inside bar's high.",
+   "source": {
+    "book": "How to Trade with Price Action: Strategies",
+    "pages": "p. 52-55",
+    "quote": "profit from false breakouts"
+   },
+   "timeframes": [
+    "4h",
+    "1d"
+   ],
+   "entry": [
+    {
+     "left": "inside_bar[2]",
+     "op": ">=",
+     "right": 1
+    },
+    {
+     "left": "high[1]",
+     "op": "<",
+     "right": "high[2]"
+    },
+    {
+     "left": "low[1]",
+     "op": "<",
+     "right": "low[2]"
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "high[2]"
+    }
+   ],
+   "stop": {
+    "type": "lowest_low",
+    "n": 2
+   },
+   "target": {
+    "r": 2
+   },
+   "exit": {
+    "trailing": null,
+    "time_stop_bars": 20,
+    "when": []
+   },
+   "risk_pct": 0.005,
+   "decisions": [
+    "The book's buy order at the inside bar's high, valid for the next 3 bars, is coded ONLY for the first bar after the false breakdown bar (close above the inside bar's high); fills on bars 2-3 are missed",
+    "Stop below the false-breakdown low (lowest_low(2) = low of bar [1]); the book gives no stop; target 2R",
+    "Daily LSE stock examples mapped to 4h/1d"
+   ],
+   "uncodable": [
+    "Short side: inside bar followed by a higher high and higher low, sell at the inside bar's low within 3 bars",
+    "Trapped-trader context judgement",
+    "Not coded yet: pending_stop_order(level=inside_bar_high, expiry=3 bars) - referencing a past setup bar's level for N bars",
+    "Not coded yet: outside_bar (setup often fails when triggered by an outside bar)"
+   ]
+  },
+  {
+   "name": "low_volume_pullback_long",
+   "description": "Above the 20 SMA, after a breakout over the last swing high on higher volume, a pullback on lower volume; buy above the next bullish bar.",
+   "source": {
+    "book": "How to Trade with Price Action: Strategies",
+    "pages": "p. 56-60",
+    "quote": "the idea is to fade low volume moves."
+   },
+   "timeframes": [
+    "4h",
+    "1d"
+   ],
+   "entry": [
+    {
+     "left": "close",
+     "op": ">",
+     "right": "sma(20)"
+    },
+    {
+     "left": "close",
+     "op": "crosses_above",
+     "right": "highest_high(20)",
+     "within": 10
+    },
+    {
+     "left": "rel_volume(20)",
+     "op": ">",
+     "right": 1.2,
+     "within": 10
+    },
+    {
+     "left": "close[2]",
+     "op": "<",
+     "right": "open[2]"
+    },
+    {
+     "left": "volume[2]",
+     "op": "<",
+     "right": "volume[3]"
+    },
+    {
+     "left": "close[1]",
+     "op": ">",
+     "right": "open[1]"
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "high[1]"
+    }
+   ],
+   "stop": {
+    "type": "lowest_low",
+    "n": 3
+   },
+   "target": {
+    "r": 2
+   },
+   "exit": {
+    "trailing": null,
+    "time_stop_bars": 30,
+    "when": [
+     {
+      "left": "close",
+      "op": "<",
+      "right": "sma(20)"
+     }
+    ]
+   },
+   "risk_pct": 0.005,
+   "decisions": [
+    "'Last swing high' approximated as the 20-bar highest high; breakout within the last 10 bars",
+    "'Higher volume' on the breakout approximated as rel_volume(20) > 1.2 within 10 bars (it cannot be tied to the exact breakout bar)",
+    "'Price falls with lower volume' = bar [2] is a down bar with less volume than the bar before it (the book compares volume with the previous bar)",
+    "'Next bullish bar' = bar [1] closes above its open; the buy stop above it is approximated by a close above its high",
+    "Stop below the pullback low (3 bars); target 2R (the book only says the potential exceeded the risk)",
+    "Weekly ETF and daily stock examples mapped to 4h/1d"
+   ],
+   "uncodable": [
+    "Short side: below the 20 SMA, break of the last swing low on higher volume, rise on lower volume, sell below the next bearish bar",
+    "Check for larger overhead resistance (losing Walmart example)",
+    "Not coded yet: swing_high_pivot",
+    "Not coded yet: condition pairing (breakout bar AND higher volume on the same bar within N bars)",
+    "Not coded yet: stop_entry_above(high[1])"
+   ]
+  }
+ ]
+}
