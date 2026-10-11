@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import sys
 from datetime import datetime, timezone
 
@@ -156,6 +157,7 @@ def cmd_signals(s: Settings, args) -> int:
     sigs = strat.generate(candles_to_frame(candles), args.exchange, args.symbol, args.timeframe)
     rows = [sig.as_row() for sig in sigs]
     out = args.out or f"data/signals_{args.strategy}_{args.exchange}_{args.symbol.replace('/', '')}_{args.timeframe}.csv"
+    os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
     with open(out, "w", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=list(rows[0]) if rows else ["ts"])
         w.writeheader()
@@ -165,6 +167,56 @@ def cmd_signals(s: Settings, args) -> int:
               f"stop={sig.stop:.6g} target={sig.target:.6g}  {sig.reason}")
     print(f"{len(sigs)} signals over {len(candles)} bars -> {out}")
     return 0
+
+
+def cmd_backtest(s: Settings, args) -> int:
+    """Backtest one strategy on stored candles: in-sample / out-of-sample / final-test split,
+    monthly results calendar and a trades CSV (Phase 3)."""
+    import pandas as pd
+
+    from .backtest import BacktestConfig, metrics, results_calendar, run_backtest, split_periods
+    from .backtest.engine import trades_frame
+    from .indicators import candles_to_frame
+    from .strategies import STRATEGIES
+
+    cfg = BacktestConfig(taker_fee=args.taker_fee, maker_fee=args.maker_fee,
+                         slippage_bps=args.slippage_bps, funding_rate_8h=args.funding_8h)
+    strat_cls = STRATEGIES[args.strategy]
+    store = CandleStore(s.db_path)
+    status = 0
+    for sym in args.symbol or s.symbols:
+        candles = store.load(args.exchange, sym, args.timeframe)
+        if len(candles) < 300:
+            print(f"{sym} {args.timeframe}: only {len(candles)} candles stored, skipping")
+            continue
+        df = candles_to_frame(candles)
+        print(f"\n== {args.strategy} {args.exchange} {sym} {args.timeframe}: "
+              f"{_fmt(int(df.ts.iloc[0]))} -> {_fmt(int(df.ts.iloc[-1]))}, {len(df)} bars")
+        ins, oos, final = split_periods(df)
+        parts = [("in-sample", ins), ("out-of-sample", oos)]
+        if args.final:
+            parts.append(("FINAL TEST", final))
+        for label, part in parts:
+            m = metrics(run_backtest(strat_cls(), part, args.exchange, sym, args.timeframe, cfg))
+            print(f"  {label:14} trades={m['trades']:4d} exp={m['expectancy_r']:+.3f}R "
+                  f"win={m['win_rate']:.0%} PF={m['profit_factor']:.2f} "
+                  f"maxDD={m['max_drawdown_r']:.1f}R costs={m['cost_r_per_trade']:.3f}R/trade"
+                  + ("" if m["reliable"] else "  (under 100 trades: not reliable)"))
+        trades = run_backtest(strat_cls(), pd.concat([ins, oos]), args.exchange, sym, args.timeframe, cfg)
+        cal = results_calendar(trades, "M")
+        if not cal.empty:
+            print("  month    trades  total_R  win")
+            for row in cal.tail(args.months).itertuples():
+                print(f"  {row.period}  {row.trades:6d}  {row.total_r:+7.2f}  {row.win_rate:.0%}")
+        out = f"data/trades_{args.strategy}_{args.exchange}_{sym.replace('/', '')}_{args.timeframe}.csv"
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        trades_frame(trades).to_csv(out, index=False)
+        print(f"  trades -> {out}")
+    store.close()
+    if not args.final:
+        print("\nThe final test period was left untouched. Run with --final only once you have "
+              "stopped tuning.")
+    return status
 
 
 def cmd_strategies(_s: Settings, _args) -> int:
@@ -239,6 +291,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("strategies", help="print every strategy's rule card")
 
+    bt = sub.add_parser("backtest", help="backtest a strategy on stored candles (fees + slippage)")
+    bt.add_argument("--strategy", required=True)
+    bt.add_argument("--exchange", default="binance", choices=EXCHANGES)
+    bt.add_argument("--symbol", action="append")
+    bt.add_argument("--timeframe", default="4h")
+    bt.add_argument("--taker-fee", type=float, default=0.001)
+    bt.add_argument("--maker-fee", type=float, default=0.001)
+    bt.add_argument("--slippage-bps", type=float, default=5.0)
+    bt.add_argument("--funding-8h", type=float, default=0.0, help="perps funding per 8h (0 for spot)")
+    bt.add_argument("--months", type=int, default=12, help="months of the results calendar to print")
+    bt.add_argument("--final", action="store_true", help="also run the untouched final test period")
+
     ca = sub.add_parser("calendar", help="show upcoming high-impact events and the current decision")
     ca.add_argument("--hours", type=float, default=72)
     return p
@@ -260,6 +324,7 @@ def main(argv: list[str] | None = None) -> int:
         "paper-smoke": cmd_paper_smoke,
         "signals": cmd_signals,
         "strategies": cmd_strategies,
+        "backtest": cmd_backtest,
         "calendar": cmd_calendar,
     }[args.cmd]
     result = handler(settings, args)
