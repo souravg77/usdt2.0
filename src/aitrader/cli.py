@@ -248,6 +248,40 @@ def cmd_calendar(_s: Settings, args) -> int:
     return 0
 
 
+async def cmd_context(s: Settings, args) -> int:
+    """Market context (Phase 2): funding, open interest, global market cap; see docs/market-context.md."""
+    import time
+
+    from .data.context import ContextStore, collect_context
+    from .strategies.context_filter import ContextFilter
+
+    ctx = ContextStore(s.db_path)
+    try:
+        if args.context_cmd == "collect":
+            log = logging.getLogger("aitrader.context")
+            while True:
+                added = await collect_context(ctx, args.symbol or s.symbols, backfill_days=args.backfill_days)
+                log.info("context +%s", ", ".join(f"{m} {n}" for m, n in added.items() if n) or "nothing new")
+                if args.once:
+                    return 0
+                await asyncio.sleep(args.interval)
+        now, symbol = int(time.time() * 1000), (args.symbol or ["BTC/USDT"])[0]
+        for ex, sym in dict.fromkeys([(args.exchange, symbol), ("binance", symbol), ("global", "*")]):
+            for metric in ("funding_rate", "open_interest", "long_short_ratio", "btc_dominance",
+                           "total_mcap", "total_mcap_change_24h", "stable_mcap"):
+                row = ctx.value_at(metric, ex, sym)
+                if row:
+                    print(f"{sym:10} {metric:22} {row[1]:>18.6g}  at {_fmt(row[0])} UTC "
+                          f"({(now - row[0]) / 3_600_000:.1f}h ago)")
+        d = ContextFilter(ctx).decide(args.exchange, symbol, now)
+        print(f"now: entries {'allowed' if d.allow_entries else 'BLOCKED'}, size x{d.size_multiplier:g}")
+        for r in d.reasons:
+            print(f"  - {r}")
+        return 0
+    finally:
+        ctx.close()
+
+
 def cmd_kb(_s: Settings, args) -> int:
     from .knowledge import DEFAULT_INDEX, KnowledgeBase, build_index
 
@@ -672,6 +706,14 @@ def build_parser() -> argparse.ArgumentParser:
     ca = sub.add_parser("calendar", help="show upcoming high-impact events and the current decision")
     ca.add_argument("--hours", type=float, default=72)
 
+    cx = sub.add_parser("context", help="market context: funding, open interest, total market cap")
+    cx.add_argument("context_cmd", choices=["collect", "show"])
+    cx.add_argument("--symbol", action="append")
+    cx.add_argument("--exchange", default="binance", choices=EXCHANGES, help="for show")
+    cx.add_argument("--once", action="store_true", help="collect: one top-up, then exit")
+    cx.add_argument("--interval", type=float, default=900, help="collect: seconds between top-ups")
+    cx.add_argument("--backfill-days", type=int, default=30, help="collect: history on first run")
+
     kb = sub.add_parser("kb", help="knowledge base: index the books and notes, then search them")
     kb_sub = kb.add_subparsers(dest="kb_cmd", required=True)
     kbb = kb_sub.add_parser("build", help="index PDFs/notes (default: data/books plus docs/knowledge)")
@@ -778,6 +820,7 @@ def main(argv: list[str] | None = None) -> int:
         "strategies": cmd_strategies,
         "backtest": cmd_backtest,
         "calendar": cmd_calendar,
+        "context": cmd_context,
         "kb": cmd_kb,
         "learn": cmd_learn,
         "ai": cmd_ai,

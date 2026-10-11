@@ -5,8 +5,9 @@ peeks at the bar the order would fill on. The same functions feed the training s
 paper trader, so the model sees identical inputs in both places.
 
 Funding rate and open-interest change are read from ``funding_rate`` / ``open_interest`` columns
-when the candle frame has them; nothing stores those yet, so today they are left missing (the
-model handles missing values natively).
+when the candle frame has them (``data.context.attach_context`` adds them from the market-context
+table; the training set does so whenever that table has rows). Otherwise they are left missing
+(the model handles missing values natively).
 """
 
 from __future__ import annotations
