@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import sys
+import time
 from datetime import datetime, timezone
 
 from .config import Settings
@@ -631,7 +632,7 @@ def cmd_backup(s: Settings, args) -> int:
         store.close()
     for path in ("data/learn/registry.json", "data/learn/paper_state.json", "data/ai/models/registry.json",
                  "data/trade/testnet_state.json", "data/trade/live_state.json", "data/trade/control.json",
-                 "data/golive/approval.json", "data/golive/attestations.json"):
+                 "data/golive/approval.json", "data/golive/attestations.json", "data/settings/keys.enc"):
         if os.path.exists(path):
             target = os.path.join(args.dest, path.replace("/", "__"))
             shutil.copy2(path, target)
@@ -733,6 +734,10 @@ async def _trade_run(s: Settings, args, control) -> int:
 
     mode = args.mode
     events = _events(f"executor-{mode}")
+    if mode == "testnet":
+        from .ops.secrets import restart_on_change
+
+        restart_on_change()  # testnet keys saved on the Settings page take effect by themselves
     strategies = set(args.strategy or []) or None
     guard = monitor = pilot = None
     if mode == "live":
@@ -810,12 +815,16 @@ def cmd_telegram(s: Settings, args) -> int:
     from .trade import Control
     from .trade.report import daily_text, executor_state_paths, status_text
 
+    from .ops.secrets import restart_on_change
+
     e = os.environ.get
+    restart_on_change()  # a token saved on the Settings page takes effect without a manual restart
     try:
         bot = Telegram(e("TELEGRAM_BOT_TOKEN", ""), e("TELEGRAM_CHAT_ID", ""))
     except ValueError as exc:
-        print(exc, file=sys.stderr)
-        return 1
+        print(f"{exc} (or on the dashboard's Settings page); waiting for them", file=sys.stderr)
+        while True:  # don't crash-loop: the keys watcher restarts us once they are saved
+            time.sleep(3600)
     control = Control(os.path.join(TRADE_DIR, "control.json"))
     paths = executor_state_paths(TRADE_DIR)
     svc = TelegramService(bot, _events("telegram"), control,
@@ -1150,6 +1159,13 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    if args.env_file:
+        from dotenv import load_dotenv
+
+        load_dotenv(args.env_file, override=False)
+    from .ops.secrets import apply_to_env
+
+    apply_to_env()  # keys saved on the dashboard's Settings page
     settings = Settings.from_env(args.env_file)
     handler = {
         "status": cmd_status,
