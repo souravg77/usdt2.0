@@ -6,11 +6,10 @@
 # memory limit. Only the `caddy` HTTPS proxy is reachable from the internet.
 
 x-app: &app
-  build:
-    context: .
-    args:
-      UID: ${AITRADER_UID:-1000}  # the server user's uid (id -u), so it can write ./data too
+  # Every app service runs the same image. Only `collector` builds it (`docker compose build`);
+  # the others must not, or parallel builds of one tag fail with "image ... already exists".
   image: aitrader:latest
+  pull_policy: never
   env_file: .env
   environment:
     AITRADER_DB_PATH: /app/data/aitrader.db
@@ -34,6 +33,11 @@ services:
   # Keeps candles up to date in the database. Public market data, no keys needed.
   collector:
     <<: *app
+    build:
+      context: .
+      args:
+        UID: ${AITRADER_UID:-1000}  # the server user's uid (id -u), so it can write ./data too
+    pull_policy: missing  # build the image if it isn't there yet
     command: ["collect", "--interval", "60", "--backfill-days", "30"]
 
   # Market context (funding, open interest, total market cap) for the context filter and the AI

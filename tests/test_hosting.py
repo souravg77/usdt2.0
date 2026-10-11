@@ -112,6 +112,9 @@ def test_compose_is_hardened():
         assert svc.get("cap_drop") == ["ALL"], name
         assert "no-new-privileges:true" in svc.get("security_opt", []), name
         assert svc.get("mem_limit"), name
+    builders = [name for name, svc in services.items() if "build" in svc]
+    assert builders == ["collector"]  # one build per image tag, or parallel builds collide
+    assert all(svc["image"] == "aitrader:latest" for n, svc in services.items() if n != "caddy")
     assert services["web"]["ports"] == ["127.0.0.1:8080:8080"]  # only Caddy faces the network
     assert services["web"]["environment"]["AITRADER_WEB_TRUST_PROXY"] == "true"
     assert services["web"]["environment"]["AITRADER_DB_PATH"]

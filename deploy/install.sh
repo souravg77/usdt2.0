@@ -68,6 +68,10 @@ if ! command -v docker >/dev/null 2>&1; then
   sudo apt-get update -y
   sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 fi
+if ! sudo docker compose version >/dev/null 2>&1; then  # Ubuntu's docker.io comes without it
+  say "Installing docker compose"
+  sudo apt-get install -y docker-compose-v2 || sudo apt-get install -y docker-compose-plugin
+fi
 sudo systemctl enable --now docker
 sudo usermod -aG docker "$USER"
 DOCKER="sudo docker"  # the new group only applies after logging in again
