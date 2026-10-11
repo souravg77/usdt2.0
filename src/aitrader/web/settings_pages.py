@@ -43,13 +43,15 @@ def _api_error(exc) -> str:
         return ""
 
 
-def check_anthropic(key: str, opener=urllib.request.urlopen) -> None:
+def check_anthropic(key: str, workspace: str = "", opener=urllib.request.urlopen) -> None:
     """Reject only when Anthropic says the key is bad; anything else means 'couldn't check'."""
+    from ..learn.extract import anthropic_headers
+
     if not key.startswith("sk-ant-"):
         raise KeyRejected("that isn't an Anthropic API key: it should start with sk-ant- (create one "
                           "at console.anthropic.com, Settings, API keys)")
-    req = urllib.request.Request("https://api.anthropic.com/v1/models?limit=1", headers={
-        "x-api-key": key, "anthropic-version": "2023-06-01", "user-agent": "aitrader"})
+    req = urllib.request.Request("https://api.anthropic.com/v1/models?limit=1",
+                                 headers=anthropic_headers(key, workspace))
     try:
         with opener(req, timeout=15) as resp:
             json.loads(resp.read())
@@ -59,6 +61,12 @@ def check_anthropic(key: str, opener=urllib.request.urlopen) -> None:
         if code == 401:
             raise KeyRejected("Anthropic says this key is invalid; copy it again, or create a new "
                               "one at console.anthropic.com") from None
+        if code == 400 and "workspace" in detail.lower():
+            raise KeyRejected("this key isn't tied to a workspace, so the agent can't use it as is. "
+                              "Either create a new key inside a workspace (console.anthropic.com, "
+                              "Settings, Workspaces, open Default, API keys), or paste the workspace "
+                              "ID (starts with wrkspc_) in the Workspace ID box with this key"
+                              + (" (the workspace ID given was refused)" if workspace else "")) from None
         what = f"HTTP {code}" if code else type(exc).__name__
         raise KeyUnverified(f"Anthropic didn't confirm the key ({what}{': ' + detail if detail else ''})") from None
 
@@ -170,7 +178,10 @@ def add_settings_routes(app, *, settings, auth, paths, jobs, keys_secret: str, p
         warning = ""
         try:
             if group == "anthropic":
-                await asyncio.to_thread(checkers["anthropic"], values["ANTHROPIC_API_KEY"])
+                if not values["ANTHROPIC_API_KEY"]:
+                    return done(error="paste the Anthropic API key too")
+                await asyncio.to_thread(checkers["anthropic"], values["ANTHROPIC_API_KEY"],
+                                        values["ANTHROPIC_WORKSPACE_ID"])
             elif group == "telegram":
                 if not (values["TELEGRAM_BOT_TOKEN"] and values["TELEGRAM_CHAT_ID"]):
                     return done(error="Telegram needs both the bot token and the chat ID")
