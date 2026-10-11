@@ -24,9 +24,12 @@ def web(tmp_path, monkeypatch):
         monkeypatch.delenv(f.name)
     monkeypatch.setenv("AITRADER_KEYS_SECRET", SECRET)
     calls = []
+    down = {}  # checker name -> exception it raises (the check can't run)
 
     def anthropic(key):
         calls.append(("anthropic", key))
+        if "anthropic" in down:
+            raise down["anthropic"]
         if key == "bad":
             raise KeyRejected("Anthropic refused that key")
 
@@ -35,6 +38,8 @@ def web(tmp_path, monkeypatch):
 
     async def binance(exchange, testnet, key, secret, settings):
         calls.append(("binance", testnet, key))
+        if "binance" in down:
+            raise down["binance"]
         if not testnet:
             raise KeyRejected("this key can WITHDRAW funds")
 
@@ -47,6 +52,7 @@ def web(tmp_path, monkeypatch):
     r = client.post("/login", data={"user": "admin", "password": PW}, follow_redirects=False)
     assert r.status_code == 303
     token = client.cookies.get(COOKIE)
+    client.down = down
     return client, auth.csrf(token), calls, paths, runner
 
 
@@ -128,3 +134,78 @@ def test_setup_starts_one_job(web, monkeypatch):
     r = client.post("/settings/setup", data={"csrf": csrf})
     assert "already running" in r.text
     runner.wait_idle(30)
+
+
+class _Resp:
+    def __init__(self, body=b'{"data": []}'):
+        self.body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def read(self):
+        return self.body
+
+
+def _http_error(code, message):
+    import io
+    import json
+    import urllib.error
+
+    body = json.dumps({"type": "error", "error": {"type": "x", "message": message}}).encode()
+    return urllib.error.HTTPError("https://api.anthropic.com/v1/models", code, "err", {}, io.BytesIO(body))
+
+
+def test_anthropic_check_only_rejects_a_bad_key():
+    from aitrader.accounts import KeyUnverified
+    from aitrader.web.settings_pages import check_anthropic
+
+    sent = []
+
+    def ok(req, timeout):
+        sent.append(req)
+        return _Resp()
+
+    check_anthropic(KEY, opener=ok)
+    assert sent[0].get_header("X-api-key") == KEY
+    with pytest.raises(KeyRejected, match="sk-ant-"):
+        check_anthropic("my-claude-password", opener=ok)
+
+    def refuse(code, msg):
+        def op(req, timeout):
+            raise _http_error(code, msg)
+        return op
+
+    with pytest.raises(KeyRejected, match="invalid") as e:
+        check_anthropic(KEY, opener=refuse(401, "invalid x-api-key"))
+    assert not isinstance(e.value, KeyUnverified)
+    with pytest.raises(KeyUnverified, match="HTTP 403: Request not allowed"):
+        check_anthropic(KEY, opener=refuse(403, "Request not allowed"))
+
+    def offline(req, timeout):
+        raise OSError("no route")
+
+    with pytest.raises(KeyUnverified, match="OSError"):
+        check_anthropic(KEY, opener=offline)
+
+
+def test_keys_are_saved_when_the_check_cannot_run(web):
+    from aitrader.accounts import KeyUnverified
+
+    client, csrf, calls, paths, _ = web
+    client.down["anthropic"] = KeyUnverified("Anthropic didn't confirm the key (HTTP 529)")
+    client.down["binance"] = KeyUnverified("couldn't reach Binance to check the key (ExchangeNotAvailable)")
+
+    r = client.post("/settings/keys/anthropic", data={"csrf": csrf, "ANTHROPIC_API_KEY": KEY})
+    assert "saved" in r.text and "HTTP 529" in r.text
+    assert secrets.SecretStore(SECRET, paths.keys_store).load()["ANTHROPIC_API_KEY"] == KEY
+    r = client.post("/settings/keys/binance_testnet", data={
+        "csrf": csrf, "BINANCE_TESTNET_API_KEY": "a" * 64, "BINANCE_TESTNET_API_SECRET": "b" * 64})
+    assert "saved" in r.text and "BINANCE_TESTNET_API_KEY" in secrets.SecretStore(SECRET, paths.keys_store).load()
+    r = client.post("/settings/keys/binance", data={
+        "csrf": csrf, "BINANCE_API_KEY": "c" * 64, "BINANCE_API_SECRET": "d" * 64})
+    assert "Not saved" in r.text  # a real-money key needs its permissions confirmed
+    assert "BINANCE_API_KEY" not in secrets.SecretStore(SECRET, paths.keys_store).load()

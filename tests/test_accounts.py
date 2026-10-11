@@ -8,7 +8,7 @@ import re
 import pytest
 from fastapi.testclient import TestClient
 
-from aitrader.accounts import AccountError, KeyRejected, UserStore, Vault, verify_keys
+from aitrader.accounts import AccountError, KeyRejected, KeyUnverified, UserStore, Vault, verify_keys
 from aitrader.accounts.runner import CombinedControl, UsersRunner, user_control
 from aitrader.config import LIVE_CONFIRM_PHRASE, Mode, Settings
 from aitrader.ops import EventLog
@@ -86,6 +86,8 @@ class KeyClient:
         self.markets = {}
 
     async def fetch_balance(self):
+        if self.fail == "network":
+            raise type("ExchangeNotAvailable", (Exception,), {})("GET https://...&signature=abc 503")
         if self.fail:
             raise type("AuthenticationError", (Exception,), {})("bad key")
         return {"free": {"USDT": 100.0}, "used": {}}
@@ -121,6 +123,9 @@ def test_key_checks_pass_and_fail():
                            client=KeyClient(fail=False)))
     with pytest.raises(KeyRejected, match="refused"):
         run(verify_keys("binance", True, API_KEY, API_SECRET, Settings(), client=KeyClient(fail=True)))
+    with pytest.raises(KeyUnverified, match="couldn't reach Binance testnet") as err:
+        run(verify_keys("binance", True, API_KEY, API_SECRET, Settings(), client=KeyClient(fail="network")))
+    assert "signature" not in str(err.value)  # the request URL is never echoed
     with pytest.raises(KeyRejected, match="supported"):
         run(verify_keys("htx", False, API_KEY, API_SECRET, Settings(), client=KeyClient(GOOD)))
     with pytest.raises(KeyRejected):
