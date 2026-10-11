@@ -634,5 +634,6 @@ pre{background:var(--card);border:1px solid var(--line);padding:12px;border-radi
 .row{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0}button.ghost{background:none;color:var(--accent)}button.danger{background:var(--bad);border-color:var(--bad)}
 form.kill{margin-top:12px;border-top:1px solid var(--line);padding-top:8px}ul.gate{padding-left:0;list-style:none;margin:6px 0}
 .chart svg{width:100%;height:180px;display:block}
+.switch{font-size:1.1em}.switch.on b{color:var(--bad)}
 .good{color:var(--good)}.bad{color:var(--bad)}.muted{color:var(--muted)}.small{font-size:.85em}.pill{border:1px solid var(--line);border-radius:99px;padding:1px 8px;font-size:.85em}
 """

@@ -865,7 +865,17 @@ def cmd_users(s: Settings, args) -> int:
             elif cmd == "disable":
                 store.set_status(u.id, "disabled")
             else:
+                from .accounts.live import turn_off
+
+                if cmd == "live-off":
+                    turn_off(store, "data/users", u.id, actor="admin (cli)", reason="stopped by the admin")
                 store.allow_live(u.id, cmd == "live-on")
+            if cmd == "disable":
+                from .accounts.live import turn_off
+
+                turn_off(store, "data/users", u.id, actor="admin (cli)", reason="account disabled")
+            store.log(u.id, "admin (cli)", {"approve": "active", "disable": "disabled", "live-on": "live_allowed",
+                                            "live-off": "live_not_allowed"}[cmd])
             print(f"{u.email}: {cmd} done")
             return 0
         if cmd == "add":

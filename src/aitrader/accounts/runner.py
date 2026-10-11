@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 import logging
 import os
 import time
@@ -23,6 +24,7 @@ from ..config import ExchangeKeys, Mode, Settings
 from ..ops import EventLog
 from ..safety import live_gate_problems
 from ..trade import Control, Executor, RiskEngine, RiskLimits
+from .live import live_stop_control
 from .store import UserStore, Vault
 
 log = logging.getLogger(__name__)
@@ -30,20 +32,25 @@ EXCHANGE = "binance"
 
 
 class CombinedControl:
-    """A user's own switches plus the platform's: either one pausing or killing applies."""
+    """A user's own switches plus the platform's (and, for the live executor, the account's live
+    switch): any one of them pausing or killing applies."""
 
-    def __init__(self, own: Control, platform: Control):
-        self.own, self.platform = own, platform
+    def __init__(self, own: Control, platform: Control, extra: list[Control] | None = None):
+        self.own, self.platform, self.extra = own, platform, list(extra or [])
 
     def state(self) -> dict:
         a, b = self.own.state(), self.platform.state()
+        others = [c.state() for c in self.extra]
         s = dict(a)
-        s["paused"] = bool(a["paused"] or b["paused"] or b["killed"])
-        s["killed"] = bool(a["killed"] or b["killed"])
+        s["paused"] = bool(a["paused"] or b["paused"] or b["killed"] or any(o["paused"] for o in others))
+        s["killed"] = bool(a["killed"] or b["killed"] or any(o["killed"] for o in others))
         if not a["paused"] and (b["paused"] or b["killed"]):
             s["reason"] = "platform: " + (b.get("reason") or "paused")
-        if b["killed"] and not a["killed"]:
-            s["since"] = b.get("since")
+        if not a["killed"]:  # the kill that applies decides when flattening is due again
+            for o in [b] + others:
+                if o["killed"]:
+                    s["since"], s["reason"] = o.get("since"), o.get("reason") or s.get("reason")
+                    break
         return s
 
     @property
@@ -65,6 +72,9 @@ class CombinedControl:
 
     def mark_flattened(self) -> None:
         self.own.mark_flattened()
+        for c in self.extra:
+            if c.killed:
+                c.mark_flattened()
 
 
 def user_dir(root: str, user_id: int) -> str:
@@ -94,22 +104,24 @@ class UsersRunner:
     def _wanted(self) -> dict[int, tuple]:
         """user id -> (mode, key fingerprint, pilot) for every user who should be running."""
         out = {}
+        lock_open = not live_gate_problems(self.settings)
         for u in self.store.list():
-            mode = u.mode if u.mode == "live" and u.live_allowed and u.status == "active" else "testnet"
+            live_on = u.mode == "live" and u.live_allowed and u.status == "active" and lock_open
+            draining = not live_on and _has_positions(os.path.join(user_dir(self.root, u.id), "live_state.json"))
+            if draining:
+                stop = live_stop_control(self.root, u.id)
+                if not stop.killed:
+                    stop.kill("live is off for this account", by="platform")
+            mode = "live" if live_on or draining else "testnet"
             info = self.store.key_info(u.id, EXCHANGE, testnet=(mode == "testnet"))
             if not info:
                 continue
             own = user_control(self.root, u.id)
-            if u.status != "active":
+            if u.status != "active" and not draining:
                 st = own.state()
                 if not st["killed"]:
                     own.kill(f"account {u.status}", by="platform")  # sell what we bought, then stop
                 elif st.get("flattened_at"):
-                    continue
-            if mode == "live" and live_gate_problems(self.settings):
-                mode = "testnet"  # the platform's live lock is closed: nobody trades real money
-                info = self.store.key_info(u.id, EXCHANGE, testnet=True)
-                if not info:
                     continue
             out[u.id] = (mode, info[0]["added"], u.pilot_max_usdt if mode == "live" else None)
         return out
@@ -128,7 +140,8 @@ class UsersRunner:
         events = EventLog(self.events_path or os.path.join(d, "events.jsonl"), service=f"user{user_id}-{mode}")
         ex = Executor(adapter, mode, EXCHANGE, self.paper_state,
                       state_path=os.path.join(d, f"{mode}_state.json"),
-                      control=CombinedControl(user_control(self.root, user_id), self.platform),
+                      control=CombinedControl(user_control(self.root, user_id), self.platform,
+                                              [live_stop_control(self.root, user_id)] if mode == "live" else []),
                       risk=self.risk, events=events,
                       live_guard=self.live_guard if mode == "live" else None,
                       monitor=self.live_monitor if mode == "live" else None, pilot_max_usdt=pilot,
@@ -169,6 +182,15 @@ def _make_adapter(exchange: str, settings: Settings, keys: ExchangeKeys, testnet
     from ..exchanges.ccxt_adapter import ADAPTERS
 
     return ADAPTERS[exchange](settings, keys=keys, testnet=testnet)
+
+
+def _has_positions(path: str) -> bool:
+    try:
+        with open(path, encoding="utf-8") as fh:
+            positions = json.load(fh).get("positions", {})
+    except (OSError, ValueError):
+        return False
+    return any(p.get("status") in ("open", "pending_entry", "pending_exit") for p in positions.values())
 
 
 async def _close(adapter) -> None:

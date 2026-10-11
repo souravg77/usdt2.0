@@ -205,9 +205,9 @@ def test_signup_approval_keys_and_isolation(site):
     client2.post("/me/keys", data={"csrf": csrf, "net": "testnet", "api_key": API_KEY, "secret": API_SECRET})
     page = client2.get("/me").text
     assert API_KEY not in page and API_SECRET not in page and API_KEY[-4:] in page
-    r = client2.post("/me/mode", data={"csrf": csrf, "mode": "live", "pilot": "100",
-                                       "confirm": LIVE_CONFIRM_PHRASE}, follow_redirects=False)
-    assert "admin" in r.headers["location"] and users.get(uid).mode == "testnet"
+    r = client2.post("/me/live/on", data={"csrf": csrf, "budget": "100", "password": "a long enough password",
+                                          "confirm": LIVE_CONFIRM_PHRASE}, follow_redirects=False)
+    assert "not turned on" in r.headers["location"].replace("%20", " ") and users.get(uid).mode == "testnet"
     client2.post("/me/kill", data={"csrf": csrf, "confirm": "KILL"})
     assert user_control("data/users", uid).killed
     client2.post("/me/resume", data={"csrf": csrf})
@@ -221,24 +221,59 @@ def test_signup_approval_keys_and_isolation(site):
     assert "error=1" in r.headers["location"]
 
 
-def test_live_switch_for_allowed_user(site):
+def test_live_switch(site, monkeypatch):
     make, users, _ = site
+    import aitrader.web.user_pages as up
+
+    gate = {"problems": ["the go/no-go gate hasn't been passed and approved yet"]}
+    monkeypatch.setattr(up, "gate_problems", lambda gl: gate["problems"])
+    monkeypatch.setattr("aitrader.accounts.live.gate_problems", lambda gl: gate["problems"])
     u = users.create("bob@example.com", "a long enough password", status="active")
-    users.allow_live(u.id, True)
-    users.save_keys(Vault(SECRET), u.id, "binance", False, API_KEY, API_SECRET, {})
     locked, _ = make()
     _login(locked, "bob@example.com", "a long enough password")
-    assert "live lock is closed" in locked.get("/me").text
+    page = locked.get("/me").text
+    assert "Live trading <b>OFF</b>" in page and "admin hasn" in page and "live lock is closed" in page
+    users.allow_live(u.id, True)
+    users.save_keys(Vault(SECRET), u.id, "binance", False, API_KEY, API_SECRET, {})
     unlocked = Settings(mode=Mode.LIVE, live_unlocked=True, live_confirm=LIVE_CONFIRM_PHRASE)
     client, _ = make(settings=unlocked)
     _login(client, "bob@example.com", "a long enough password")
+    assert "gate hasn" in client.get("/me").text
     csrf = _csrf(client)
-    r = client.post("/me/mode", data={"csrf": csrf, "mode": "live", "pilot": "100", "confirm": "yes"},
-                    follow_redirects=False)
-    assert "phrase" in r.headers["location"] and users.get(u.id).mode == "testnet"
-    client.post("/me/mode", data={"csrf": csrf, "mode": "live", "pilot": "100", "confirm": LIVE_CONFIRM_PHRASE})
-    assert users.get(u.id).mode == "live"
-    assert "LIVE (real money)" in client.get("/me").text
+    good = {"csrf": csrf, "budget": "150", "password": "a long enough password", "confirm": LIVE_CONFIRM_PHRASE}
+
+    def on(**change):
+        r = client.post("/me/live/on", data={**good, **change}, follow_redirects=False)
+        return r.headers["location"].replace("%20", " ").replace("+", " ")
+
+    assert "gate" in on() and users.get(u.id).mode == "testnet"
+    gate["problems"] = []
+    assert 'name="budget"' in client.get("/me").text
+    assert "password is wrong" in on(password="wrong password!!")
+    assert "phrase" in on(confirm="yes")
+    assert "budget" in on(budget="0")
+    assert users.get(u.id).mode == "testnet"
+    assert "ON" in on()
+    assert users.get(u.id).mode == "live" and users.get(u.id).pilot_max_usdt == 150
+    page = client.get("/me").text
+    assert "LIVE (real money)" in page and "Turn live trading OFF now" in page
+    client.post("/me/live/off", data={"csrf": csrf})
+    assert users.get(u.id).mode == "testnet"
+    from aitrader.accounts.live import live_stop_control
+
+    assert live_stop_control("data/users", u.id).killed
+    actions = [a["action"] for a in users.audit(u.id)]
+    assert actions[:2] == ["live_off", "live_on"] and "live_on_refused" in actions
+    kinds = [json.loads(line)["kind"] for line in open("data/ops/events.jsonl")]
+    assert kinds.count("live_switch") == 2
+    on()
+    admin, admin_auth = make(settings=unlocked)
+    _login(admin, "admin", PW)
+    page = admin.get("/admin/users").text
+    assert "Account log" in page and "live on" in page
+    admin.post(f"/admin/users/{u.id}/live", data={"csrf": admin_auth.csrf(admin.cookies.get(COOKIE)), "allow": "off"})
+    assert users.get(u.id).mode == "testnet" and not users.get(u.id).live_allowed
+    assert users.audit(u.id)[0]["action"] == "live_not_allowed"
 
 
 # ---- per-user trading -------------------------------------------------------------------------
@@ -300,3 +335,39 @@ def test_combined_control():
     c.kill(by="me")
     assert c.killed and own.killed and not plat.killed
     json.dumps(c.state())
+
+
+def test_switching_live_off_sells_live_positions(tmp_path):
+    from aitrader.accounts.live import live_stop_control, turn_off
+
+    st = UserStore(str(tmp_path / "a.db"))
+    v = Vault(SECRET)
+    paper = tmp_path / "paper.json"
+    _paper(paper, {KEY: _pos(SIG)})
+    adapters = {}
+
+    def factory(exchange, settings, keys, testnet):
+        k = ("t" if testnet else "L") + keys.api_key
+        adapters[k] = adapters.get(k) or FakeAdapter(usdt=2000)
+        return adapters[k]
+
+    u = st.create("a@example.com", "a long enough password", status="active")
+    st.save_keys(v, u.id, "binance", True, "T" * 20, "x" * 20, {})
+    st.save_keys(v, u.id, "binance", False, "R" * 20, "y" * 20, {})
+    st.allow_live(u.id, True)
+    st.set_mode(u.id, "live", 300)
+    live = Settings(mode=Mode.LIVE, live_unlocked=True, live_confirm=LIVE_CONFIRM_PHRASE)
+    root = str(tmp_path / "users")
+    runner = UsersRunner(st, v, live, str(paper), root=root, platform_control=Control(str(tmp_path / "p.json")),
+                         adapter_factory=factory, live_guard=lambda sid: [], live_monitor=lambda c: None,
+                         clock=lambda: NOW)
+    run(runner.tick())
+    real = adapters["L" + "R" * 20]
+    assert len(real.sent) == 1 and real.sent[0].filled * 100.1 <= 300 * 0.25 + 1e-6  # budget cap
+    turn_off(st, root, u.id, actor="a@example.com")
+    assert st.get(u.id).mode == "testnet" and live_stop_control(root, u.id).killed
+    run(runner.tick())  # the live executor keeps running only to sell
+    assert len(real.sent) == 2 and real.sent[1].side.value == "sell"
+    run(runner.tick())
+    assert runner._ex[u.id][0][0] == "testnet"  # then the account is back on the testnet
+    assert len(real.sent) == 2

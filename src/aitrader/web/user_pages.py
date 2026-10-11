@@ -15,6 +15,7 @@ from fastapi import Form, Request
 from fastapi.responses import PlainTextResponse, RedirectResponse
 
 from ..accounts import AccountError, KeyRejected, UserStore, Vault, verify_keys
+from ..accounts.live import gate_problems, live_stop_control, turn_off, turn_on
 from ..accounts.runner import user_control, user_dir
 from ..config import LIVE_CONFIRM_PHRASE
 from ..safety import live_gate_problems
@@ -32,6 +33,17 @@ def add_user_routes(app, *, settings, auth, paths, users: UserStore, keys_secret
 
     def vault() -> Vault:
         return Vault(keys_secret)
+
+    def events():
+        from ..ops import EventLog
+
+        return EventLog(paths.events, service="dashboard")
+
+    def golive():
+        from ..trade import GateConfig, GoLive
+
+        return GoLive(paths.golive_dir, paths.registry, paths.paper_state, paths.models,
+                      events=events(), cfg=GateConfig.from_env())
 
     def me(request: Request):
         subject, token = session(request)
@@ -89,7 +101,8 @@ my account, and that I keep my exchange key without withdrawal rights.</label>
             return RedirectResponse("/signup?error=" + _q("Tick the box to confirm you understand the risk."),
                                     status_code=303)
         try:
-            users.create(email, password)
+            new = users.create(email, password)
+            users.log(new.id, new.email, "signed_up", ip)
         except AccountError as exc:
             return RedirectResponse("/signup?error=" + _q(str(exc)), status_code=303)
         q.append(time.time())
@@ -158,20 +171,43 @@ stored encrypted and never shown again.</p>
 <button>Check and connect</button></form>"""
         keys_card = f'<div class="card"><h3>Exchange keys</h3>{keys_table}{key_form}</div>'
 
-        if not user.live_allowed:
-            live_body = "<p class=muted>Live trading isn't allowed for your account yet. The admin turns it on.</p>"
-        elif not live_open:
-            live_body = "<p class=muted>Live trading is allowed for you, but the platform's live lock is closed.</p>"
-        elif user.mode == "live":
-            live_body = (f'<p>Live, using at most <b>{user.pilot_max_usdt or 0:,.2f} USDT</b>.</p>'
-                         f'<form method="post" action="/me/mode">{csrf}<input type="hidden" name="mode" value="testnet">'
-                         '<button class="ghost">Go back to the testnet</button></form>')
+        live_on = user.mode == "live" and user.live_allowed and live_open
+        draining = live_stop_control(users_dir, user.id).killed and bool(
+            execs.get("live", {}).get("positions"))
+        if live_on:
+            live_body = (f'<p class="switch on">Live trading <b>ON</b> · budget cap <b>{user.pilot_max_usdt or 0:,.2f} USDT</b></p>'
+                         f'<form method="post" action="/me/live/off">{csrf}<button class="danger">'
+                         'Turn live trading OFF now</button></form><p class="small muted">Instant: no new real-money '
+                         'trades, the agent sells what it bought on your real account and goes back to the testnet.</p>')
         else:
-            live_body = f"""<form method="post" action="/me/mode">{csrf}<input type="hidden" name="mode" value="live">
-<label>Most USDT the agent may use <input name="pilot" type="number" min="10" step="1" required></label>
+            why = []
+            if user.status != "active":
+                why.append("your account isn't approved yet")
+            if not user.live_allowed:
+                why.append("the admin hasn't allowed live trading for your account")
+            if not live_open:
+                why.append("the platform's live lock is closed")
+            gp = gate_problems(golive()) if live_open else []
+            why += gp[:1]
+            if not users.key_info(user.id, "binance", testnet=False):
+                why.append("connect a real-account key first")
+            sell = '<p class="bad small">Selling the positions from your last live session.</p>' if draining else ""
+            if why:
+                live_body = (f'<p class="switch">Live trading <b>OFF</b></p>{sell}<p class="small muted">Can\'t turn it on yet: '
+                             f'{_e("; ".join(why))}.</p>')
+            else:
+                live_body = f"""<p class="switch">Live trading <b>OFF</b></p>{sell}
+<form method="post" action="/me/live/on">{csrf}
+<label>Budget cap: the most USDT the agent may use <input name="budget" type="number" min="10" step="1" required></label>
+<label>Your password <input name="password" type="password" autocomplete="current-password" required></label>
 <label>Type <b>{_e(LIVE_CONFIRM_PHRASE)}</b> <input name="confirm" autocomplete="off" required></label>
-<button class="danger">Trade with real money</button></form>"""
-        live_card = f'<div class="card"><h3>Real money</h3>{live_body}</div>'
+<button class="danger">Turn live trading ON</button></form>"""
+        history = "".join(f'<li>{_when(a["ts"])}: {_e(a["action"].replace("_", " "))}'
+                          f'{" by " + _e(a["actor"]) if a["actor"] != user.email else ""}'
+                          f'{" (" + _e(a["detail"]) + ")" if a["detail"] else ""}</li>'
+                          for a in users.audit(user.id, 8))
+        live_card = (f'<div class="card"><h3>Real money</h3>{live_body}'
+                     f'{"<h3>History</h3><ul class=small>" + history + "</ul>" if history else ""}</div>')
 
         pw_card = (f'<div class="card"><h3>Password</h3><form method="post" action="/me/password">{csrf}'
                    '<label>Current <input name="current" type="password" autocomplete="current-password" required></label>'
@@ -198,6 +234,7 @@ stored encrypted and never shown again.</p>
         except (KeyRejected, AccountError) as exc:
             return back(error=f"Key not connected: {exc}")
         users.save_keys(v, user.id, exchange, testnet, api_key, secret, perms)
+        users.log(user.id, user.email, "key_added", f"{exchange} {'testnet' if testnet else 'real account'}")
         return back(msg=f"{exchange.title()} {'testnet' if testnet else 'real-account'} key connected.")
 
     @app.post("/me/keys/delete")
@@ -205,22 +242,32 @@ stored encrypted and never shown again.</p>
         user, resp = checked(request, csrf)
         if resp:
             return resp
+        if net == "live":
+            turn_off(users, users_dir, user.id, actor=user.email, reason="real-account key removed", events=events())
         users.delete_keys(user.id, "binance", net != "live")
+        users.log(user.id, user.email, "key_removed", "testnet" if net != "live" else "real account")
         return back(msg="Key removed. Remove it on the exchange too if you no longer use it.")
 
-    @app.post("/me/mode")
-    def my_mode(request: Request, csrf: str = Form(""), mode: str = Form("testnet"),
-                pilot: float = Form(0), confirm: str = Form("")):
+    @app.post("/me/live/on")
+    def my_live_on(request: Request, csrf: str = Form(""), budget: float = Form(0), password: str = Form(""),
+                   confirm: str = Form("")):
         user, resp = checked(request, csrf)
         if resp:
             return resp
-        if mode == "live" and confirm.strip() != LIVE_CONFIRM_PHRASE:
-            return back(error=f"Type the phrase exactly: {LIVE_CONFIRM_PHRASE}")
         try:
-            users.set_mode(user.id, mode, pilot if mode == "live" else None)
+            turn_on(users, settings, golive(), users_dir, user.id, password, confirm, budget,
+                    actor=user.email, events=events())
         except AccountError as exc:
-            return back(error=str(exc))
-        return back(msg="Now trading with real money." if mode == "live" else "Back on the testnet.")
+            return back(error=f"Live trading not turned on: {exc}")
+        return back(msg="Live trading is ON. Turn it off here at any time.")
+
+    @app.post("/me/live/off")
+    def my_live_off(request: Request, csrf: str = Form("")):
+        user, resp = checked(request, csrf)
+        if resp:
+            return resp
+        turn_off(users, users_dir, user.id, actor=user.email, reason="switched off by the user", events=events())
+        return back(msg="Live trading is OFF. Selling what the agent bought on your real account.")
 
     @app.post("/me/pause")
     def my_pause(request: Request, csrf: str = Form("")):
@@ -228,6 +275,7 @@ stored encrypted and never shown again.</p>
         if resp:
             return resp
         user_control(users_dir, user.id).pause("paused by the user", by=user.email)
+        users.log(user.id, user.email, "pause")
         return back(msg="Paused: no new entries. Open positions are still managed.")
 
     @app.post("/me/resume")
@@ -236,6 +284,7 @@ stored encrypted and never shown again.</p>
         if resp:
             return resp
         user_control(users_dir, user.id).resume(by=user.email)
+        users.log(user.id, user.email, "resume")
         return back(msg="Resumed.")
 
     @app.post("/me/kill")
@@ -246,6 +295,8 @@ stored encrypted and never shown again.</p>
         if confirm.strip() != "KILL":
             return back(error="Not pulled: type KILL to confirm.")
         user_control(users_dir, user.id).kill("kill switch from the user's page", by=user.email)
+        turn_off(users, users_dir, user.id, actor=user.email, reason="kill switch", events=events())
+        users.log(user.id, user.email, "kill_switch")
         return back(msg="Kill switch on: the agent is selling what it bought for you. Resume when ready.")
 
     @app.post("/me/password")
@@ -296,7 +347,13 @@ stored encrypted and never shown again.</p>
         info = ("<p class=small>Sign-up is <b>" + ("open" if signup else "closed") + "</b> "
                 "(AITRADER_WEB_SIGNUP). New accounts wait for your approval. Disabling an account "
                 "sells what the agent bought for it and stops it.</p>")
-        return page("Users", note + info + table, admin, token)
+        log_rows = "".join(f'<tr><td>{_when(a["ts"])}</td><td>{_e(a["email"] or "-")}</td><td>{_e(a["actor"])}</td>'
+                           f'<td class="{"bad" if a["action"].startswith("live_on") or a["action"] == "kill_switch" else ""}">'
+                           f'{_e(a["action"].replace("_", " "))}</td><td class=small>{_e(a["detail"])}</td></tr>'
+                           for a in users.audit(limit=40))
+        audit = (f"<h2>Account log</h2><table><tr><th>When</th><th>Account</th><th>By</th><th>What</th><th></th></tr>"
+                 f"{log_rows}</table>" if log_rows else "")
+        return page("Users", note + info + table + audit, admin, token)
 
     def admin_post(request: Request, csrf: str, act) -> RedirectResponse | PlainTextResponse:
         admin, token, redirect = guard(request)
@@ -313,6 +370,9 @@ stored encrypted and never shown again.</p>
             if u is None:
                 return "No such user."
             users.set_status(uid, status)
+            users.log(uid, "admin", status)
+            if status == "disabled":
+                turn_off(users, users_dir, uid, actor="admin", reason="account disabled", events=events())
             if status == "active":
                 ctl = user_control(users_dir, uid)
                 if ctl.state().get("by") == "platform":
@@ -326,6 +386,12 @@ stored encrypted and never shown again.</p>
             u = users.get(uid)
             if u is None:
                 return "No such user."
-            users.allow_live(uid, allow == "on")
+            if allow == "on":
+                users.allow_live(uid, True)
+                users.log(uid, "admin", "live_allowed")
+            else:
+                turn_off(users, users_dir, uid, actor="admin", reason="stopped by the admin", events=events())
+                users.allow_live(uid, False)
+                users.log(uid, "admin", "live_not_allowed")
             return f"Live trading {'allowed' if allow == 'on' else 'stopped'} for {u.email}."
         return admin_post(request, csrf, act)

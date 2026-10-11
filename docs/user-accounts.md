@@ -40,9 +40,23 @@ account and decide who may use real money.
      the agent bought for them.
    - Their **equity curve, open positions and trade log**.
    - **Password change.**
-3. **Real money**, only once you allowed it for them. They switch to live by setting the most
-   USDT the agent may use and typing the confirmation phrase. They can go back to the testnet at
-   any time.
+3. **The live trading switch** (the "Real money" card). It is **off** for every account to start
+   with. The page says why it can't be turned on yet. Turning it **on** needs all of these:
+   - you allowed live for that account (Users page or `users live-on`);
+   - the platform's live lock in `.env` is open (only you can do that, on the server);
+   - the go/no-go gate passed and you approved at least one strategy (`golive approve`), and
+     that strategy and the AI model haven't changed since;
+   - a real-account key that passed the no-withdrawal check;
+   - the user re-enters their password, sets a budget cap (the most USDT the agent may use)
+     and types `I accept real-money risk`.
+
+   Turning it **off** is one click and instant. No new real-money trades, the agent sells
+   everything it bought on the real account, then the account goes back to the testnet. The
+   account's kill switch, removing the real-account key, your "Stop live" and disabling the
+   account all switch it off the same way.
+
+   Every switch, on or off, refused attempts included, goes into the account log (shown on the
+   user's page and on your Users page) and the event log, so Telegram tells you.
 
 ## What you do (admin)
 
@@ -70,8 +84,11 @@ All of these must be true. Each one is checked before every order:
 2. The go/no-go gate passed and you approved the strategy (`golive approve`); approval breaks
    if the strategy or the AI model changes.
 3. You allowed live for that user.
-4. The user switched to live, with a pilot budget.
+4. The user turned their live switch on (password, budget cap, confirmation phrase).
 5. Their real-account key passed the no-withdrawal check.
+
+If you close the platform's live lock while accounts still hold live positions, the agent can't
+sell them any more. Use the kill switch first, then close the lock.
 
 The same risk engine applies to every user: 0.5% risk per trade (never above 1%), daily and
 weekly loss caps that pause their account, and the exposure limits.

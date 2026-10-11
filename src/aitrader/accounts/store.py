@@ -51,6 +51,14 @@ CREATE TABLE IF NOT EXISTS api_keys (
     added REAL NOT NULL,
     PRIMARY KEY (user_id, exchange, testnet)
 );
+CREATE TABLE IF NOT EXISTS audit (
+    ts REAL NOT NULL,
+    user_id INTEGER,
+    actor TEXT NOT NULL,
+    action TEXT NOT NULL,
+    detail TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS audit_user ON audit(user_id, ts);
 """
 
 
@@ -254,6 +262,25 @@ class UserStore:
                               (user_id, exchange, int(testnet)))
             if not testnet:
                 self.conn.execute("UPDATE users SET mode='testnet' WHERE id=?", (user_id,))
+
+    # ---- audit log ------------------------------------------------------------------------------
+
+    def log(self, user_id: int | None, actor: str, action: str, detail: str = "") -> None:
+        """Record who did what to an account (live switch, approvals, keys, kill switch)."""
+        with self.conn:
+            self.conn.execute("INSERT INTO audit VALUES (?,?,?,?,?)",
+                              (time.time(), user_id, actor, action, detail))
+
+    def audit(self, user_id: int | None = None, limit: int = 50) -> list[dict]:
+        q = "SELECT a.ts, a.user_id, u.email, a.actor, a.action, a.detail FROM audit a " \
+            "LEFT JOIN users u ON u.id = a.user_id"
+        args: list = []
+        if user_id is not None:
+            q += " WHERE a.user_id=?"
+            args.append(user_id)
+        rows = self.conn.execute(q + " ORDER BY a.ts DESC LIMIT ?", args + [limit]).fetchall()
+        return [{"ts": r[0], "user_id": r[1], "email": r[2], "actor": r[3], "action": r[4], "detail": r[5]}
+                for r in rows]
 
     def backup(self, path: str) -> None:
         dest = sqlite3.connect(path)
