@@ -168,11 +168,31 @@ Check `data/update.log` afterwards, or run `./deploy/update.sh --check` by hand.
 rather approve each update, leave the cron job out and run the script yourself after a pull
 request is merged.
 
+## 10. Testnet, Telegram and the go/no-go gate (Phases 5 and 6)
+
+Start the market-context service once (later updates keep it running):
+`docker compose up -d context`. Then, step by step, as described in
+[live-trading.md](live-trading.md):
+
+1. Testnet keys in `.env`, then `docker compose --profile testnet up -d executor-testnet`.
+2. Test the kill switch on the testnet: `docker compose run --rm collector trade kill --confirm`,
+   then `trade resume`.
+3. Telegram: `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env`, then
+   `docker compose --profile telegram up -d telegram`.
+4. Add the weekly report to cron (Mondays 06:00 UTC):
+   `0 6 * * 1 cd ~/AI_crypto_trader && docker compose run --rm collector report weekly >/dev/null 2>&1`
+5. After about two weeks and 100+ paper trades: `docker compose run --rm collector golive check`.
+6. Only if it passes and you decide to go live: `golive attest`, `golive approve`, the pilot
+   budget and the live lock in `.env`, then `docker compose --profile live up -d executor-live`.
+
 ## Useful commands
 
 | Task | Command |
 |---|---|
 | Status / live-gate check | `docker compose run --rm collector status` |
+| Trading status, positions, today | `docker compose run --rm collector trade status` |
+| Pause / resume / kill switch | `docker compose run --rm collector trade pause` · `trade resume` · `trade kill --confirm` |
+| Go/no-go gate | `docker compose run --rm collector golive check` |
 | Search the knowledge base | `docker compose run --rm collector kb search "stop-market vs stop-limit"` |
 | Trade filter models and the active one | `docker compose run --rm collector ai list` |
 | Turn the trade filter off | `docker compose run --rm collector ai off` |

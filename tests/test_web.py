@@ -1,4 +1,5 @@
 import json
+import os
 import re
 
 import pytest
@@ -124,3 +125,45 @@ def test_logout(web):
     client.post("/logout", data={"csrf": auth.csrf(token)})
     assert client.get("/", follow_redirects=False).status_code == 303
     assert auth.verify(token) is None  # the old cookie no longer works either
+
+
+def test_trading_page_and_controls(web):
+    client, auth, _runner, paths = web
+    assert client.get("/trading", follow_redirects=False).status_code == 303
+    os.makedirs("data/learn", exist_ok=True)
+    os.makedirs("data/trade", exist_ok=True)
+    key = "s1|binance|BTC/USDT|1h"
+    with open(paths.paper_state, "w") as fh:
+        json.dump({"open": {key: {"entry_id": "s1", "filled": True, "entry": 100.0, "mark_r": 0.4, "ai_prob": 0.66,
+                                  "signal": {"ts": 1, "entry": 100.0, "stop": 95.0}}},
+                   "trades": [{"key": key, "entry_id": "s1", "symbol": "BTC/USDT", "exit_ts": 1_760_000_000_000,
+                               "entry": 100, "exit": 105, "r": 1.0, "pnl_usdt": 50, "exit_reason": "target",
+                               "ai_prob": 0.71},
+                              {"key": key, "entry_id": "s1", "symbol": "BTC/USDT", "exit_ts": 1_760_100_000_000,
+                               "entry": 100, "exit": 98, "r": -0.4, "pnl_usdt": -20, "exit_reason": "<stop>"}]}, fh)
+    with open("data/trade/testnet_state.json", "w") as fh:
+        json.dump({"positions": {key: {"key": key, "entry_id": "s1", "symbol": "BTC/USDT", "amount": 0.5,
+                                       "entry": 100.1, "stop": 95.0, "status": "open"}},
+                   "closed": [], "equity_curve": [[1, 10000], [2, 10050]]}, fh)
+    token = login(client)
+    r = client.get("/trading")
+    assert r.status_code == 200
+    for text in ("BTC/USDT", "0.66", "0.71", "+1.00R", "testnet equity", "<svg", "not checked yet",
+                 "&lt;stop&gt;", "running"):
+        assert text in r.text, text
+    csrf = auth.csrf(token)
+    assert client.post("/trading/pause", data={}, follow_redirects=False).status_code == 403
+    client.post("/trading/pause", data={"csrf": csrf})
+    assert "PAUSED" in client.get("/trading").text
+    r = client.post("/trading/kill", data={"csrf": csrf, "confirm": "kill"}, follow_redirects=False)
+    assert "type+KILL" in r.headers["location"] or "type%20KILL" in r.headers["location"]
+    assert not json.load(open("data/trade/control.json"))["killed"]
+    client.post("/trading/kill", data={"csrf": csrf, "confirm": "KILL"})
+    assert json.load(open("data/trade/control.json"))["killed"]
+    assert "KILL SWITCH ON" in client.get("/trading").text
+    client.post("/trading/resume", data={"csrf": csrf})
+    assert not json.load(open("data/trade/control.json"))["paused"]
+    client.post("/trading/gate", data={"csrf": csrf})
+    assert "does not pass yet" in client.get("/trading").text
+    kinds = [json.loads(line)["kind"] for line in open("data/ops/events.jsonl")]
+    assert kinds[:3] == ["risk_pause", "kill", "resume"]

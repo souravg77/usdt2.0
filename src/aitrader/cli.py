@@ -418,11 +418,22 @@ def cmd_learn(s: Settings, args) -> int:
 
         from .ai import LiveFilter
 
+        from .ops import EventLog
+        from .trade import Control
+
         store = CandleStore(s.db_path)
+        context = None
+        if not args.no_context:
+            from .data.context import ContextStore
+            from .strategies.context_filter import ContextFilter
+
+            context = ContextFilter(ContextStore(store))
         trader = PaperTrader(store, args.registry, exchanges, symbols,
                              PaperConfig(start_equity=s.paper_start_usdt, backtest=cfg),
                              calendar=None if args.no_calendar else CalendarFilter(),
-                             ai_filter=None if args.no_ai else LiveFilter(args.models))
+                             ai_filter=None if args.no_ai else LiveFilter(args.models),
+                             control=Control(os.path.join(TRADE_DIR, "control.json")),
+                             context=context, events=EventLog(service="paper"))
         try:
             if args.once:
                 print(trader.tick())
@@ -617,7 +628,9 @@ def cmd_backup(s: Settings, args) -> int:
         store.backup(os.path.join(args.dest, os.path.basename(s.db_path)))
     finally:
         store.close()
-    for path in ("data/learn/registry.json", "data/learn/paper_state.json", "data/ai/models/registry.json"):
+    for path in ("data/learn/registry.json", "data/learn/paper_state.json", "data/ai/models/registry.json",
+                 "data/trade/testnet_state.json", "data/trade/live_state.json", "data/trade/control.json",
+                 "data/golive/approval.json", "data/golive/attestations.json"):
         if os.path.exists(path):
             target = os.path.join(args.dest, path.replace("/", "__"))
             shutil.copy2(path, target)
@@ -644,6 +657,172 @@ def cmd_web(s: Settings, args) -> int:
     secure = e("AITRADER_WEB_SECURE_COOKIE", "false").strip().lower() in ("1", "true", "yes")
     app = create_app(s, auth, JobRunner(env_file=args.env_file), secure_cookie=secure)
     uvicorn.run(app, host=args.host, port=args.port, proxy_headers=False, server_header=False)
+    return 0
+
+
+
+# ---- Phases 5 and 6: executor, kill switch, alerts, go-live ------------------------------------
+
+TRADE_DIR = "data/trade"
+PAPER_STATE = "data/learn/paper_state.json"
+
+
+def _events(service: str):
+    from .ops import EventLog
+
+    return EventLog(service=service)
+
+
+def cmd_trade(s: Settings, args) -> int:
+    """Pause, resume, kill switch, status, and the testnet / live-pilot executor."""
+    from .trade import Control
+    from .trade.report import executor_state_paths, status_text
+
+    control = Control(os.path.join(TRADE_DIR, "control.json"))
+    who = args.by or os.environ.get("USER", "cli")
+    cmd = args.trade_cmd
+    if cmd == "status":
+        print(status_text(s, control, PAPER_STATE, executor_state_paths(TRADE_DIR)))
+        return 0
+    if cmd == "pause":
+        control.pause(args.reason or "paused by hand", by=who)
+        _events("cli").emit("risk_pause", f"paused by {who}: {args.reason or 'by hand'}", level="warning")
+        print("paused: no new entries (open positions are still managed). Undo: aitrader trade resume")
+        return 0
+    if cmd == "resume":
+        control.resume(by=who)
+        _events("cli").emit("resume", f"resumed by {who}")
+        print("resumed")
+        return 0
+    if cmd == "kill":
+        if not args.confirm:
+            print("The kill switch stops all entries and sells every position the executors opened.\n"
+                  "Run again with --confirm to pull it.")
+            return 1
+        control.kill(args.reason or "kill switch", by=who)
+        _events("cli").emit("kill", f"kill switch pulled by {who}", level="warning")
+        print("kill switch on: executors cancel and sell on their next tick. Undo: aitrader trade resume")
+        return 0
+    if cmd == "run":
+        return asyncio.run(_trade_run(s, args, control))
+    raise SystemExit(f"unknown trade command {cmd}")
+
+
+async def _trade_run(s: Settings, args, control) -> int:
+    from .safety import assert_live_allowed
+    from .trade import Executor, GateConfig, GoLive, RiskEngine, RiskLimits
+
+    mode = args.mode
+    events = _events(f"executor-{mode}")
+    strategies = set(args.strategy or []) or None
+    guard = monitor = pilot = None
+    if mode == "live":
+        assert_live_allowed(s)  # the three live-lock lines in .env, opened by you
+        pilot = float(os.environ.get("AITRADER_PILOT_MAX_USDT", "0") or 0)
+        if pilot <= 0:
+            print("set AITRADER_PILOT_MAX_USDT in .env: the most USDT the live pilot may use", file=sys.stderr)
+            return 1
+        gl = GoLive(events=events, cfg=GateConfig.from_env())
+        approved = sorted((gl._load("approval.json").get("strategies") or {}))
+        if not approved:
+            print("no go-live approval: run `aitrader golive check` then `aitrader golive approve`",
+                  file=sys.stderr)
+            return 1
+        strategies = (strategies or set(approved)) & set(approved)
+        if not strategies or len(strategies) > 2:
+            print("the live pilot runs 1 or 2 approved strategies", file=sys.stderr)
+            return 1
+        guard, monitor = gl.guard, gl.monitor
+    elif s.mode.value != "testnet":
+        print("testnet runs need AITRADER_MODE=testnet (the compose executor-testnet service sets it)",
+              file=sys.stderr)
+        return 1
+    adapter = make_adapter(args.exchange, s, testnet=(mode == "testnet"))
+    ex = Executor(adapter, mode, args.exchange, PAPER_STATE,
+                  state_path=os.path.join(TRADE_DIR, f"{mode}_state.json"), strategies=strategies,
+                  control=control, risk=RiskEngine(RiskLimits.from_env()), events=events,
+                  live_guard=guard, monitor=monitor, pilot_max_usdt=pilot)
+    try:
+        if args.once:
+            print(json.dumps(await ex.tick(), indent=1))
+        else:
+            await ex.run(args.interval)
+    finally:
+        await adapter.close()
+    return 0
+
+
+def cmd_golive(s: Settings, args) -> int:
+    """Phase 6 go/no-go gate: check it, record the manual items, approve or revoke."""
+    from .trade import GateConfig, GoLive
+
+    gl = GoLive(events=_events("cli"), cfg=GateConfig.from_env())
+    cmd = args.golive_cmd
+    if cmd == "check":
+        rep = gl.evaluate(args.strategy or None)
+        for c in rep["criteria"]:
+            print(f"[{'PASS' if c['passed'] else 'FAIL'}] {c['name']}: {c['value']}  (needs {c['threshold']})")
+        print("GATE PASSES: you may approve (aitrader golive approve)" if rep["passed"] else "gate does not pass yet")
+        print(f"live lock in .env: {'open' if not live_gate_problems(s) else 'locked'}")
+        return 0 if rep["passed"] else 1
+    if cmd == "attest":
+        a = gl.attest(args.item, by=args.by, note=args.note or "")
+        print(f"recorded: {args.item} confirmed by {a['by']}")
+        return 0
+    if cmd == "approve":
+        try:
+            gl.approve(args.strategy or [], by=args.by)
+        except ValueError as exc:
+            print(f"not approved: {exc}", file=sys.stderr)
+            return 1
+        print("approved. Live orders still need the live lock in .env opened by you, "
+              "AITRADER_PILOT_MAX_USDT, and the executor-live service started.")
+        return 0
+    if cmd == "revoke":
+        gl.revoke(by=args.by or "")
+        print("approval revoked: the live executor stops opening trades")
+        return 0
+    raise SystemExit(f"unknown golive command {cmd}")
+
+
+def cmd_telegram(s: Settings, args) -> int:
+    """Service: send alerts and summaries to Telegram and take /status, /pause, /resume, /kill."""
+    from .ops.telegram import Telegram, TelegramService
+    from .trade import Control
+    from .trade.report import daily_text, executor_state_paths, status_text
+
+    e = os.environ.get
+    try:
+        bot = Telegram(e("TELEGRAM_BOT_TOKEN", ""), e("TELEGRAM_CHAT_ID", ""))
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    control = Control(os.path.join(TRADE_DIR, "control.json"))
+    paths = executor_state_paths(TRADE_DIR)
+    svc = TelegramService(bot, _events("telegram"), control,
+                          status_fn=lambda: status_text(s, control, PAPER_STATE, paths),
+                          summary_fn=lambda day: daily_text(day, PAPER_STATE, paths))
+    if args.test:
+        bot.send("aitrader: test message. Alerts will arrive here.")
+        print("sent")
+        return 0
+    svc.run()
+    return 0
+
+
+def cmd_report(s: Settings, args) -> int:
+    """Weekly paper-vs-backtest report (also sent to Telegram through the event log)."""
+    from .trade.report import executor_state_paths, weekly, weekly_text
+
+    rep = weekly(args.registry, PAPER_STATE, executor_state_paths(TRADE_DIR), max_gap_r=args.max_gap)
+    text = weekly_text(rep)
+    print(text)
+    os.makedirs("data/reports", exist_ok=True)
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    with open(f"data/reports/weekly-{day}.json", "w", encoding="utf-8") as fh:
+        json.dump(rep, fh, indent=1)
+    if not args.quiet:
+        _events("report").emit("weekly_report", text, level="warning" if rep["flagged"] else "info")
     return 0
 
 
@@ -756,6 +935,7 @@ def build_parser() -> argparse.ArgumentParser:
     lp.add_argument("--no-calendar", action="store_true", help="ignore the economic calendar filter")
     lp.add_argument("--no-ai", action="store_true", help="ignore the active AI trade filter")
     lp.add_argument("--models", default="data/ai/models", help="trade-filter model registry folder")
+    lp.add_argument("--no-context", action="store_true", help="ignore the market-context filter")
 
     sub.add_parser("migrate", help="bring the database schema up to date")
     bk = sub.add_parser("backup", help="copy the database and registries into a folder")
@@ -799,6 +979,47 @@ def build_parser() -> argparse.ArgumentParser:
     asc.add_argument("--timeframe", default="4h")
     asc.add_argument("--last", type=int, default=20)
     asc.add_argument("--model", help="version (default: the active one)")
+
+    tr = sub.add_parser("trade", help="Phases 5-6: pause / resume / kill switch, and the order executor")
+    tr_sub = tr.add_subparsers(dest="trade_cmd", required=True)
+    tr_sub.add_parser("status", help="mode, live lock, pause state, positions, today's results")
+    for name, h in (("pause", "stop new entries everywhere"), ("resume", "allow entries again"),
+                    ("kill", "kill switch: stop entries and sell everything the executors bought")):
+        t = tr_sub.add_parser(name, help=h)
+        t.add_argument("--reason")
+        t.add_argument("--by", help="who (for the record)")
+        if name == "kill":
+            t.add_argument("--confirm", action="store_true")
+    tr.set_defaults(by=None, reason=None, confirm=False)
+    trr = tr_sub.add_parser("run", help="service: mirror the paper trades with real orders")
+    trr.add_argument("--mode", choices=["testnet", "live"], default="testnet")
+    trr.add_argument("--exchange", default="binance", choices=EXCHANGES)
+    trr.add_argument("--strategy", action="append", help="only these registry ids (repeatable)")
+    trr.add_argument("--interval", type=float, default=15)
+    trr.add_argument("--once", action="store_true", help="one pass, then exit")
+
+    gl = sub.add_parser("golive", help="Phase 6 go/no-go gate: check, attest, approve, revoke")
+    gl_sub = gl.add_subparsers(dest="golive_cmd", required=True)
+    glc = gl_sub.add_parser("check", help="evaluate every gate criterion")
+    glc.add_argument("--strategy", action="append")
+    gla = gl_sub.add_parser("attest", help="confirm a manual item: keys, kill_switch or compliance")
+    gla.add_argument("item", choices=["keys", "kill_switch", "compliance"])
+    gla.add_argument("--by", required=True)
+    gla.add_argument("--note")
+    glp = gl_sub.add_parser("approve", help="approve 1-2 strategies for the live pilot (gate must pass)")
+    glp.add_argument("--strategy", action="append", required=True)
+    glp.add_argument("--by", required=True)
+    glr = gl_sub.add_parser("revoke", help="withdraw the approval: live goes back to paper")
+    glr.add_argument("--by")
+
+    tg = sub.add_parser("telegram", help="service: Telegram alerts and /status /pause /resume /kill")
+    tg.add_argument("--test", action="store_true", help="send one test message and exit")
+
+    rp = sub.add_parser("report", help="weekly paper-vs-backtest report")
+    rp.add_argument("report_cmd", choices=["weekly"])
+    rp.add_argument("--registry", default="data/learn/registry.json")
+    rp.add_argument("--max-gap", type=float, default=0.15)
+    rp.add_argument("--quiet", action="store_true", help="don't send it to the event log / Telegram")
     return p
 
 
@@ -827,6 +1048,10 @@ def main(argv: list[str] | None = None) -> int:
         "web": cmd_web,
         "migrate": cmd_migrate,
         "backup": cmd_backup,
+        "trade": cmd_trade,
+        "golive": cmd_golive,
+        "telegram": cmd_telegram,
+        "report": cmd_report,
     }[args.cmd]
     result = handler(settings, args)
     if asyncio.iscoroutine(result):

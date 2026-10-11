@@ -49,3 +49,74 @@ services:
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "5" }
+
+  # Market context (funding, open interest, total market cap) for the context filter and the AI
+  # features. Public data, no keys needed.
+  context:
+    build: .
+    image: aitrader:latest
+    command: ["context", "collect", "--interval", "900"]
+    env_file: .env
+    environment:
+      AITRADER_DB_PATH: /app/data/aitrader.db
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
+  # Phase 5: mirrors the paper trades with real orders on the Binance Spot testnet (fake money).
+  # Needs BINANCE_TESTNET_API_KEY/SECRET. Start it with:
+  #   docker compose --profile testnet up -d executor-testnet
+  executor-testnet:
+    build: .
+    image: aitrader:latest
+    profiles: ["testnet"]
+    depends_on: [paper]
+    command: ["trade", "run", "--mode", "testnet", "--exchange", "binance"]
+    env_file: .env
+    environment:
+      AITRADER_DB_PATH: /app/data/aitrader.db
+      AITRADER_MODE: testnet
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
+  # Phase 5: Telegram alerts and /status /pause /resume /kill. Needs TELEGRAM_BOT_TOKEN and
+  # TELEGRAM_CHAT_ID. Start it with: docker compose --profile telegram up -d telegram
+  telegram:
+    build: .
+    image: aitrader:latest
+    profiles: ["telegram"]
+    command: ["telegram"]
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
+  # Phase 6 live pilot: REAL MONEY. It refuses to send an order unless the go/no-go gate passed,
+  # you ran `golive approve`, AITRADER_PILOT_MAX_USDT is set and you opened the live lock in .env
+  # yourself. See docs/go-live.md before starting it:
+  #   docker compose --profile live up -d executor-live
+  executor-live:
+    build: .
+    image: aitrader:latest
+    profiles: ["live"]
+    depends_on: [paper]
+    command: ["trade", "run", "--mode", "live", "--exchange", "binance"]
+    env_file: .env
+    environment:
+      AITRADER_DB_PATH: /app/data/aitrader.db
+    volumes:
+      - ./data:/app/data
+    restart: "no"
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
