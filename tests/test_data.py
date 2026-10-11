@@ -1,0 +1,108 @@
+import asyncio
+import time
+
+import pytest
+
+from aitrader.config import Settings
+from aitrader.data.downloader import download
+from aitrader.data.feeds import LiveFeed
+from aitrader.data.quality import check_candles
+from aitrader.data.store import CandleStore
+from aitrader.exchanges import BinanceAdapter
+from aitrader.models import Candle
+from aitrader.throttle import Throttle
+
+
+def c(ts, o=1.0, h=2.0, low=0.5, cl=1.5, v=1.0):
+    return Candle("binance", "BTC/USDT", "1m", ts, o, h, low, cl, v)
+
+
+def test_quality_clean_series():
+    rep = check_candles([c(i * 60_000) for i in range(10)], "1m")
+    assert rep.ok, rep.as_text()
+
+
+def test_quality_finds_problems():
+    candles = [c(0), c(60_000), c(60_000), c(240_000), c(250_000), c(300_000, h=0.1)]
+    rep = check_candles(candles, "1m")
+    assert rep.duplicates == [60_000]
+    assert rep.gaps == [(60_000, 2)]
+    assert rep.misaligned == [250_000]
+    assert rep.bad_bars == [300_000]
+    assert not rep.ok
+
+
+def test_store_upsert_is_idempotent(tmp_path):
+    store = CandleStore(str(tmp_path / "x.db"))
+    store.upsert([c(0), c(60_000)])
+    store.upsert([c(60_000, cl=1.9), c(120_000)])
+    rows = store.load("binance", "BTC/USDT", "1m")
+    assert [r.ts for r in rows] == [0, 60_000, 120_000]
+    assert rows[1].close == 1.9
+    assert store.last_ts("binance", "BTC/USDT", "1m") == 120_000
+
+
+async def test_download_paginates_and_resumes(fake_ccxt):
+    s = Settings()
+    raw = [[i * 60_000, 1, 2, 0.5, 1.5, 1] for i in range(25)]
+    adapter = BinanceAdapter(s, client=fake_ccxt(raw), throttle=Throttle(1000, 1000))
+    store = CandleStore(":memory:")
+    import aitrader.data.downloader as dl
+
+    dl.PAGE_LIMIT["binance"] = 10
+    try:
+        n = await download(adapter, store, "BTC/USDT", "1m", 0, 25 * 60_000)
+        assert n == 25
+        assert await download(adapter, store, "BTC/USDT", "1m", 0, 25 * 60_000) == 0
+    finally:
+        dl.PAGE_LIMIT["binance"] = 1000
+    assert check_candles(store.load("binance", "BTC/USDT", "1m"), "1m").ok
+
+
+async def test_throttle_limits_rate():
+    clock = [0.0]
+    t = Throttle(rate_per_sec=2, burst=1, clock=lambda: clock[0])
+    await t.acquire()
+    assert t.tokens == 0
+    clock[0] = 0.5
+    await t.acquire()  # refilled exactly one token
+
+
+class FlakyClient:
+    """First connection dies after one tick; the second keeps ticking."""
+
+    instances = 0
+
+    def __init__(self):
+        FlakyClient.instances += 1
+        self.n = FlakyClient.instances
+        self.calls = 0
+
+    async def watch_ticker(self, symbol):
+        self.calls += 1
+        await asyncio.sleep(0.01)
+        if self.n == 1 and self.calls > 1:
+            raise ConnectionError("socket closed")
+        return {"last": 100.0 + self.calls, "timestamp": 1}
+
+    async def close(self):
+        pass
+
+
+async def test_feed_reconnects_after_error():
+    FlakyClient.instances = 0
+    ticks = []
+    feed = LiveFeed("binance", ["BTC/USDT"], lambda *a: ticks.append(a),
+                    client_factory=FlakyClient, max_backoff=0.01)
+    feed_task = asyncio.create_task(feed.run())
+    import aitrader.data.feeds as feeds
+
+    orig = feeds.asyncio.sleep
+    deadline = time.monotonic() + 5
+    while FlakyClient.instances < 2 or len(ticks) < 3:
+        assert time.monotonic() < deadline, "feed did not reconnect"
+        await orig(0.05)
+    feed.stop()
+    await asyncio.wait_for(feed_task, 5)
+    assert FlakyClient.instances >= 2
+    assert not feed.is_stale("BTC/USDT")

@@ -1,0 +1,14 @@
+services:
+  collector:
+    build: .
+    image: aitrader:latest
+    command: ["collect", "--interval", "60", "--backfill-days", "30"]
+    env_file: .env
+    environment:
+      AITRADER_DB_PATH: /app/data/aitrader.db
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
