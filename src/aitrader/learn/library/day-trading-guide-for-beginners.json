@@ -1,0 +1,739 @@
+{
+ "book": "Day Trading Guide For Beginners",
+ "author": "Warrior Trading",
+ "strategies": [
+  {
+   "name": "bull_flag_ma_pullback",
+   "description": "Ross Cameron bull flag: after a strong run, a light-volume pullback to the 10/20 MA, entry when volume returns and price takes out the prior candle high.",
+   "source": {
+    "book": "Day Trading Guide For Beginners",
+    "pages": "p. 33-34",
+    "quote": "have a light volume pullback, usually to the 10 or 20 day moving average on the 1 or 5-minute chart"
+   },
+   "timeframes": [
+    "5m",
+    "15m"
+   ],
+   "entry": [
+    {
+     "left": "ema_stack(9, 20, 50)",
+     "op": ">=",
+     "right": 1
+    },
+    {
+     "left": "change(20)",
+     "op": ">",
+     "right": 0.03,
+     "within": 10
+    },
+    {
+     "left": "low",
+     "op": "<=",
+     "right": "1.003*ema(20)",
+     "within": 3
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "ema(20)"
+    },
+    {
+     "left": "volume[1]",
+     "op": "<",
+     "right": "avg_volume(20)"
+    },
+    {
+     "left": "rel_volume(20)",
+     "op": ">=",
+     "right": 1.5
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "high[1]"
+    }
+   ],
+   "stop": {
+    "type": "lowest_low",
+    "n": 5
+   },
+   "target": {
+    "r": 2
+   },
+   "exit": {
+    "trailing": null,
+    "time_stop_bars": 24
+   },
+   "risk_pct": 0.01,
+   "decisions": [
+    "'Run higher' = a >3% gain over 20 bars at some point in the last 10 bars (book gives no number)",
+    "'10 or 20 MA' = EMA(20) touch within 0.3%; book's chart MA is a 9 EMA, so trend check uses ema_stack(9,20,50)",
+    "'Light volume pullback' = previous bar volume below 20-bar average; 'volume picks back up' = rel_volume >= 1.5",
+    "Entry trigger = close above prior bar high (first candle to make a new high off the flag)",
+    "Stop at the 5-bar low = the flag's low, which the book calls the defined risk point",
+    "Target 2R and 24-bar time stop chosen because day trades must close the same session; book gives no target",
+    "Book uses 1m/5m stock charts; mapped to 5m/15m crypto"
+   ],
+   "uncodable": [
+    "news catalyst / gap-up",
+    "float under 100M (50M better)",
+    "premarket activity",
+    "9:30-10:30 ET window",
+    "Not coded yet: bull_flag_pattern(pole_min_pct, flag_max_bars, flag_max_retrace)",
+    "Not coded yet: low_float_filter",
+    "Not coded yet: news_catalyst"
+   ]
+  },
+  {
+   "name": "flat_top_breakout",
+   "description": "Breakout over a flat resistance level (in the book, premarket highs) on high relative volume; buy-stops of shorts fuel the move.",
+   "source": {
+    "book": "Day Trading Guide For Beginners",
+    "pages": "p. 20, 33-34",
+    "quote": "a flat top breakout over premarket highs"
+   },
+   "timeframes": [
+    "5m",
+    "15m"
+   ],
+   "entry": [
+    {
+     "left": "highest_high(5)[1]",
+     "op": ">=",
+     "right": "0.997*highest_high(30)[1]"
+    },
+    {
+     "left": "close",
+     "op": "crosses_above",
+     "right": "highest_high(30)"
+    },
+    {
+     "left": "rel_volume(20)",
+     "op": ">=",
+     "right": 2
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "ema(20)"
+    }
+   ],
+   "stop": {
+    "type": "lowest_low",
+    "n": 5
+   },
+   "target": {
+    "r": 2
+   },
+   "exit": {
+    "trailing": null,
+    "time_stop_bars": 24
+   },
+   "risk_pct": 0.01,
+   "decisions": [
+    "'Flat top' approximated: the last 5 bars retested the 30-bar high to within 0.3% (price pressing the same ceiling)",
+    "Premarket high replaced by the 30-bar high, since crypto has no premarket session",
+    "High volume = rel_volume >= 2, reusing the book's 2x momentum threshold (p. 34)",
+    "Stop = 5-bar low (base of the consolidation); 2R target and same-day time stop are our choices"
+   ],
+   "uncodable": [
+    "shorts' buy-stop clustering above highs",
+    "float and catalyst filters",
+    "Not coded yet: premarket_high",
+    "Not coded yet: flat_resistance_touches(level_tol, min_touches)"
+   ]
+  },
+  {
+   "name": "momentum_relvol_breakout",
+   "description": "Momentum candidate (above MAs, 2x relative volume, no nearby resistance) breaking to new highs.",
+   "source": {
+    "book": "Day Trading Guide For Beginners",
+    "pages": "p. 34",
+    "quote": "High Relative Volume of at least 2x above average."
+   },
+   "timeframes": [
+    "5m",
+    "15m",
+    "1h"
+   ],
+   "entry": [
+    {
+     "left": "close",
+     "op": ">",
+     "right": "ema(200)"
+    },
+    {
+     "left": "ema_stack(20, 50, 200)",
+     "op": ">=",
+     "right": 1
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "highest_high(100)"
+    },
+    {
+     "left": "rel_volume(20)",
+     "op": ">=",
+     "right": 2
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "open"
+    }
+   ],
+   "stop": {
+    "type": "atr",
+    "mult": 2.5,
+    "n": 14
+   },
+   "target": {
+    "r": 2
+   },
+   "exit": {
+    "trailing": "close<ema50",
+    "time_stop_bars": 48
+   },
+   "risk_pct": 0.01,
+   "decisions": [
+    "'Strong daily chart above the moving averages' approximated on the trading TF by close > EMA200 and stacked EMAs (no cross-timeframe feature)",
+    "'No nearby resistance' = close above the 100-bar high",
+    "Relative volume is volume / 20-bar average, not time-of-day-adjusted as the book specifies",
+    "Stop 2.5x ATR from the book's position sizing chapter (p. 37-38)"
+   ],
+   "uncodable": [
+    "float under 100M",
+    "fundamental catalyst (PR, earnings, FDA)",
+    "market-open timing 9:30-10:30 ET",
+    "Not coded yet: higher_timeframe_trend(1d)",
+    "Not coded yet: time_of_day_relative_volume",
+    "Not coded yet: news_catalyst",
+    "Not coded yet: low_float_filter"
+   ]
+  },
+  {
+   "name": "reversal_rubber_band_long",
+   "description": "Long side of the reversal strategy: a stock at new intraday lows after 5-10 straight red candles with extreme RSI; buy the first candle that reverses, trail the stop.",
+   "source": {
+    "book": "Day Trading Guide For Beginners",
+    "pages": "p. 35-36",
+    "quote": "Look to buy the first candle that begins to reverse with a stop either at the high/low or minus 20 cents"
+   },
+   "timeframes": [
+    "5m"
+   ],
+   "entry": [
+    {
+     "left": "red_streak[1]",
+     "op": ">=",
+     "right": 5
+    },
+    {
+     "left": "low",
+     "op": "<",
+     "right": "lowest_low(78)",
+     "within": 3
+    },
+    {
+     "left": "change(6)",
+     "op": "<",
+     "right": -0.03,
+     "within": 2
+    },
+    {
+     "left": "rsi(14)",
+     "op": "<",
+     "right": 20,
+     "within": 3
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "open"
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "high[1]"
+    }
+   ],
+   "stop": {
+    "type": "lowest_low",
+    "n": 5
+   },
+   "target": null,
+   "exit": {
+    "trailing": "close<psar",
+    "time_stop_bars": 36
+   },
+   "risk_pct": 0.01,
+   "decisions": [
+    "'New intraday low' = low below the previous 78 5m bars (one US session; book p. 28)",
+    "'5-10 consecutive candles of same color' approximated by a >3% drop over 6 bars; true streak needs a new feature",
+    "RSI period not given; RSI(14) < 10 used (very rare on 14; consider rsi(2)/rsi(5) in testing and record the result)",
+    "'First candle that begins to reverse' = green candle closing above the prior bar high",
+    "Stop at the 5-bar low = the reversal low (book: at the low or 20 cents below); 20 cents not portable to crypto",
+    "Book says use trailing stops; PSAR trailing chosen, 36-bar time stop to keep it intraday",
+    "RSI(14) below 20 (the book gives no period; RSI(14) under 10 almost never happens on crypto 5m bars). Five or more red candles in a row before the first green one."
+   ],
+   "uncodable": [
+    "short side: short the first red candle after 5-10 green candles at new highs with RSI > 90, stop above high (p. 35-36)",
+    "bearish spinning top break entry (short example, p. 36)",
+    "Not coded yet: session_low (intraday)"
+   ]
+  },
+  {
+   "name": "breakout_retest_hold",
+   "description": "Break of a defined resistance level on high relative volume, then a retest of the level that holds; enter on the hold.",
+   "source": {
+    "book": "Day Trading Guide For Beginners",
+    "pages": "p. 25",
+    "quote": "ideally it breaks out and comes back and tests that level and holds, that is a good entry point"
+   },
+   "timeframes": [
+    "15m",
+    "1h",
+    "4h"
+   ],
+   "entry": [
+    {
+     "left": "close",
+     "op": "crosses_above",
+     "right": "highest_high(40)[8]",
+     "within": 8
+    },
+    {
+     "left": "rel_volume(20)",
+     "op": ">=",
+     "right": 1.5,
+     "within": 8
+    },
+    {
+     "left": "low",
+     "op": "<=",
+     "right": "1.005*highest_high(40)[8]",
+     "within": 2
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "highest_high(40)[8]"
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "open"
+    }
+   ],
+   "stop": {
+    "type": "lowest_low",
+    "n": 3
+   },
+   "target": {
+    "r": 2
+   },
+   "exit": {
+    "trailing": null,
+    "time_stop_bars": 48
+   },
+   "risk_pct": 0.01,
+   "decisions": [
+    "Resistance level = the 40-bar high as it stood 8 bars ago, so the breakout and retest happen within the last 8 bars",
+    "'High relative volume' = rel_volume >= 1.5 during the breakout window (book gives no number)",
+    "Retest = low came within 0.5% of the level in the last 2 bars while close holds above it",
+    "Stop under the retest low (3-bar low); 2R target is our choice"
+   ],
+   "uncodable": [
+    "Not coded yet: horizontal_resistance_level(min_touches)",
+    "Not coded yet: breakout_retest_event"
+   ]
+  },
+  {
+   "name": "support_bounce",
+   "description": "Buy a bounce at a defined support level; exit if support breaks.",
+   "source": {
+    "book": "Day Trading Guide For Beginners",
+    "pages": "p. 25, 39-40",
+    "quote": "If we buy at support then we know we are wrong if it breaks below that price and can exit the position."
+   },
+   "timeframes": [
+    "1h",
+    "4h",
+    "1d"
+   ],
+   "entry": [
+    {
+     "left": "low",
+     "op": "<=",
+     "right": "1.01*lowest_low(50)"
+    },
+    {
+     "left": "low",
+     "op": ">=",
+     "right": "lowest_low(50)"
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "open"
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "ema(200)"
+    }
+   ],
+   "stop": {
+    "type": "lowest_low",
+    "n": 50
+   },
+   "target": {
+    "r": 2
+   },
+   "exit": {
+    "trailing": null,
+    "time_stop_bars": 30
+   },
+   "risk_pct": 0.01,
+   "decisions": [
+    "Support = 50-bar low; entry when price comes within 1% of it without breaking it and closes green",
+    "Uptrend filter close > EMA200 because the book says trade with the trend and prefers higher-TF levels (p. 24, 43)",
+    "Stop just under the support (the 50-bar low), per the book's vital-level stop (p. 39-40)",
+    "Book warns many 'levels' are random; a multi-touch level detector would be more faithful"
+   ],
+   "uncodable": [
+    "short side: short off resistance (p. 25)",
+    "Not coded yet: horizontal_support_level(min_touches, tolerance)"
+   ]
+  },
+  {
+   "name": "daily_new_high_breakout_atr_stop",
+   "description": "Go long on a breakout to new highs on the daily chart with a 2.5x ATR stop and 1% account risk (NVDA example).",
+   "source": {
+    "book": "Day Trading Guide For Beginners",
+    "pages": "p. 37-38",
+    "quote": "we want to get long on the recent breakout to new highs."
+   },
+   "timeframes": [
+    "4h",
+    "1d"
+   ],
+   "entry": [
+    {
+     "left": "close",
+     "op": "crosses_above",
+     "right": "highest_high(50)"
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "sma(50)"
+    }
+   ],
+   "stop": {
+    "type": "atr",
+    "mult": 2.5,
+    "n": 14
+   },
+   "target": null,
+   "exit": {
+    "trailing": "close<ema50",
+    "time_stop_bars": null
+   },
+   "risk_pct": 0.01,
+   "decisions": [
+    "'New highs' = close above the prior 50-bar high (book does not give the lookback)",
+    "Stop 2.5x ATR(14) and 1% risk exactly as in the book's example",
+    "Exit by trailing close below EMA50, following the book's trend rule of closes below a moving average (p. 24) and letting winners run (p. 42)"
+   ],
+   "uncodable": []
+  },
+  {
+   "name": "trend_bb50_stop_long",
+   "description": "Multi-month trend long (SPY example) with the stop at the lower Bollinger Band of 2 SD around the 50 SMA.",
+   "source": {
+    "book": "Day Trading Guide For Beginners",
+    "pages": "p. 39",
+    "quote": "with the bottom band (two standard deviations from the 50SMA) being your stop loss."
+   },
+   "timeframes": [
+    "1d"
+   ],
+   "entry": [
+    {
+     "left": "close",
+     "op": ">",
+     "right": "sma(50)"
+    },
+    {
+     "left": "sma(50)",
+     "op": ">",
+     "right": "sma(50)[20]"
+    },
+    {
+     "left": "trend_structure",
+     "op": ">=",
+     "right": 1
+    },
+    {
+     "left": "close",
+     "op": "crosses_above",
+     "right": "ema(20)"
+    }
+   ],
+   "stop": {
+    "type": "indicator",
+    "expr": "bb_lower(50,2)"
+   },
+   "target": null,
+   "exit": {
+    "trailing": "close<ema50",
+    "time_stop_bars": 120
+   },
+   "risk_pct": 0.01,
+   "decisions": [
+    "The book's entry is discretionary ('the bull market is going to continue'); approximated by a rising 50 SMA, higher highs/lows and a close back above EMA20",
+    "Stop = lower BB(50,2) as in the book; 1% risk as in the book",
+    "Exit and time stop chosen by us (multi-month horizon = up to 120 daily bars)"
+   ],
+   "uncodable": []
+  },
+  {
+   "name": "rsi_oversold_to_50ma",
+   "description": "Buy when RSI moves into oversold territory and take profit when price reaches the 50-period moving average; stop at a trend line.",
+   "source": {
+    "book": "Day Trading Guide For Beginners",
+    "pages": "p. 47-48",
+    "quote": "you might buy when the RSI moves into oversold territory and rake profits once it reaches the 50-period moving average"
+   },
+   "timeframes": [
+    "15m",
+    "1h",
+    "4h"
+   ],
+   "entry": [
+    {
+     "left": "rsi(14)",
+     "op": "crosses_below",
+     "right": 30
+    },
+    {
+     "left": "close",
+     "op": "<",
+     "right": "0.98*sma(50)"
+    }
+   ],
+   "stop": {
+    "type": "lowest_low",
+    "n": 20
+   },
+   "target": null,
+   "exit": {
+    "trailing": null,
+    "time_stop_bars": 48,
+    "when": [
+     {
+      "left": "close",
+      "op": "crosses_above",
+      "right": "sma(50)"
+     }
+    ]
+   },
+   "risk_pct": 0.01,
+   "decisions": [
+    "'Oversold' = RSI(14) < 30 (book gives no levels); entry when RSI crosses into it",
+    "The target is the 50-period MA, which the grammar cannot express; approximated with a 1.5R target and a requirement that price is at least 2% below the 50 SMA so there is room",
+    "The book's stop is an upward or horizontal trend line; approximated by the 20-bar low",
+    "The book's example market is gold/forex"
+   ],
+   "uncodable": [
+    "take profit exactly at the 50-period MA",
+    "trend-line stop",
+    "Not coded yet: trendline_support"
+   ]
+  },
+  {
+   "name": "trend_pullback_broad_screen",
+   "description": "Book's broad FinViz trend-pullback screen: price above the 20-day SMA, within 5% of the 50-day high, down on the day.",
+   "source": {
+    "book": "Day Trading Guide For Beginners",
+    "pages": "p. 57",
+    "quote": "Price 0-5% below 50-day high"
+   },
+   "timeframes": [
+    "1d"
+   ],
+   "entry": [
+    {
+     "left": "close",
+     "op": ">",
+     "right": "sma(20)"
+    },
+    {
+     "left": "close",
+     "op": ">=",
+     "right": "0.95*highest_high(50)"
+    },
+    {
+     "left": "close",
+     "op": "<=",
+     "right": "highest_high(50)"
+    },
+    {
+     "left": "change(1)",
+     "op": "<",
+     "right": 0
+    }
+   ],
+   "stop": {
+    "type": "atr",
+    "mult": 2.5,
+    "n": 14
+   },
+   "target": {
+    "r": 2
+   },
+   "exit": {
+    "trailing": "close<ema50",
+    "time_stop_bars": 20
+   },
+   "risk_pct": 0.01,
+   "decisions": [
+    "Screen criteria taken exactly; the book uses it to build a watchlist, so entering at the close of the screened day is our simplification",
+    "Stop: book's plan says a multiple of the TF's ATR or swing low; 2.5x ATR per p. 38",
+    "2R target and 20-bar time stop are our choices"
+   ],
+   "uncodable": [
+    "market cap < $2B, float < 50M, price > $1, average volume > 100K/day (p. 56) - stock universe filters"
+   ]
+  },
+  {
+   "name": "sma5_streak_pullback",
+   "description": "Book's narrow mechanical trend-pullback screen: above the 20 SMA, closed above the 5 SMA for 7+ days, closes below it today.",
+   "source": {
+    "book": "Day Trading Guide For Beginners",
+    "pages": "p. 57",
+    "quote": "Price has closed above 5-day simple moving average 7+ days in a row, but closed below it today"
+   },
+   "timeframes": [
+    "4h",
+    "1d"
+   ],
+   "entry": [
+    {
+     "left": "close",
+     "op": ">",
+     "right": "sma(20)"
+    },
+    {
+     "left": "close",
+     "op": "<",
+     "right": "sma(5)"
+    },
+    {
+     "left": "closes_above_sma(5)[1]",
+     "op": ">=",
+     "right": 7
+    }
+   ],
+   "stop": {
+    "type": "lowest_low",
+    "n": 10
+   },
+   "target": {
+    "r": 2
+   },
+   "exit": {
+    "trailing": "close<ema50",
+    "time_stop_bars": 20
+   },
+   "risk_pct": 0.01,
+   "decisions": [
+    "Rule coded exactly, with 7 explicit prior bars; on 4h it is applied to bars rather than days",
+    "Stop = recent swing low (10-bar low), one of the two stops in the book's trend-pullback plan (p. 55)",
+    "Entry at the close of the signal bar; 2R target and 20-bar time stop are our choices"
+   ],
+   "uncodable": []
+  },
+  {
+   "name": "trend_pullback_plan",
+   "description": "Written trend-pullback plan: higher highs and lows with momentum, shallow light-volume pullback to a moving average/consolidation, rejoin the trend; exit on closes below the MA.",
+   "source": {
+    "book": "Day Trading Guide For Beginners",
+    "pages": "p. 24, 55",
+    "quote": "Look for a shallow pullback into a consolidation on light volume and momentum."
+   },
+   "timeframes": [
+    "1h",
+    "4h"
+   ],
+   "entry": [
+    {
+     "left": "trend_structure",
+     "op": ">=",
+     "right": 1
+    },
+    {
+     "left": "ema_stack(20, 50, 200)",
+     "op": ">=",
+     "right": 1
+    },
+    {
+     "left": "low",
+     "op": "<=",
+     "right": "1.005*ema(20)",
+     "within": 3
+    },
+    {
+     "left": "close",
+     "op": ">=",
+     "right": "0.95*highest_high(20)"
+    },
+    {
+     "left": "avg_volume(5)",
+     "op": "<",
+     "right": "avg_volume(20)"
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "high[1]"
+    },
+    {
+     "left": "rsi(14)",
+     "op": ">",
+     "right": 45
+    }
+   ],
+   "stop": {
+    "type": "atr",
+    "mult": 2.5,
+    "n": 14
+   },
+   "target": null,
+   "exit": {
+    "trailing": "close<ema50",
+    "time_stop_bars": 60,
+    "when": [
+     {
+      "left": "closes_below_sma(20)",
+      "op": ">=",
+      "right": 2
+     }
+    ]
+   },
+   "risk_pct": 0.01,
+   "decisions": [
+    "Trend = higher highs/lows (trend_structure) plus stacked EMAs",
+    "'Shallow' = price still within 5% of the 20-bar high (book: avoid dramatic pullbacks); pullback touches EMA20 (p. 24 'pullbacks to... moving averages')",
+    "'Light volume' = 5-bar average volume below the 20-bar average; 'momentum' kept with RSI(14) > 45",
+    "Trigger = close above the prior bar high",
+    "Stop 2.5x ATR (book allows ATR multiple or swing low); exit on close below EMA50 to approximate 'consecutive closes below a moving average'"
+   ],
+   "uncodable": [
+    "exit on two consecutive closes below support/MA (only single-close trailing available)"
+   ]
+  }
+ ]
+}

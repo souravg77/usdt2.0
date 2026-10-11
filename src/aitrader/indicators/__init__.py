@@ -5,10 +5,18 @@ uses only data up to each bar, so values are free of look-ahead.
 """
 
 from .core import (
+    streak,
+    stochastic,
+    heikin_ashi,
+    force_index,
+    directional_index,
+    cci,
     adx,
     atr,
     atr_percentile,
     bollinger,
+    bullish_divergence,
+    candle_patterns,
     candles_to_frame,
     ema,
     ema_stack,
@@ -28,10 +36,18 @@ from .core import (
 )
 
 __all__ = [
+    "streak",
+    "stochastic",
+    "heikin_ashi",
+    "force_index",
+    "directional_index",
+    "cci",
     "adx",
     "atr",
     "atr_percentile",
     "bollinger",
+    "bullish_divergence",
+    "candle_patterns",
     "candles_to_frame",
     "ema",
     "ema_stack",

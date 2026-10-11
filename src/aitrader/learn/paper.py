@@ -117,6 +117,8 @@ class PaperTrader:
     def _manage_open(self, reg: Registry, now_ms: int, events: dict) -> None:
         for key, pos in list(self.state["open"].items()):
             entry_id, ex, sym, tf = key.split("|")
+            if entry_id in reg.entries:
+                make_strategy(reg.entries[entry_id])  # registers its custom exit rules
             sig = _sig_from(pos["signal"])
             step = TIMEFRAME_MS[tf]
             df = self._frame(ex, sym, tf, sig.ts - WINDOW_BARS * step, now_ms)

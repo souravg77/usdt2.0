@@ -11,6 +11,12 @@ so they can live in the repository. The books themselves are not committed (they
 | [03-crypto-ecosystem.md](03-crypto-ecosystem.md) | Coins vs tokens, stablecoins, NFTs, DeFi, wallets and keys, custody, exchanges (CEX/DEX), miners and validators | US Treasury; Binance Academy |
 | [04-risks-and-market-integrity.md](04-risks-and-market-integrity.md) | Fraud, hacks, wash trading, front-running, conflicts of interest, custody and insolvency risk, operational risk | US Treasury; Binance Academy |
 | [05-trading-basics.md](05-trading-basics.md) | Markets, orders, order books, spread and liquidity, fees, risk management, trading styles, chart reading, indicators | Binance Academy; Finance Illustrated ebook |
+| [06-swing-trading-larry-swing.md](06-swing-trading-larry-swing.md) | FORCESWING scans, Force Index, buy stops above the prior high, 1/15 position sizing | Larry Swing, *A Practical Guide to Swing Trading* |
+| [07-ten-strategies-porwal.md](07-ten-strategies-porwal.md) | Inside bar, doji, engulfing, trendline and Darvas breakouts, opening range, 52-week high, ADX + EMA14, Quasimodo, bear trap | Nikhil Porwal, *10 Most Profitable Trading Strategies* |
+| [08-divergence-trading-carli.md](08-divergence-trading-carli.md) | CCI divergence with zone, zero-line and Fibonacci rules, trendline-break entry, extension targets | David Carli, *The Power of Divergence* |
+| [09-nine-strategies-sadowski.md](09-nine-strategies-sadowski.md) | MA cross, Heikin-Ashi + stochastic, range breakout, candle reversals, role reversal, BB squeeze, NR7, RSI(2) | Roman Sadowski, *9 Advanced and Profitable Trading Strategies* |
+| [10-day-trading-warrior.md](10-day-trading-warrior.md) | Momentum day trading: bull flags, flat tops, relative volume, reversals, risk rules, screens | Warrior Trading, *Day Trading Guide For Beginners* |
+| [11-system-development-cardoza.md](11-system-development-cardoza.md) | Building and testing systems: R multiples, expectancy, System Quality, walk-forward, Monte Carlo, bias | David Cardoza, *Introduction to Trading System Development* |
 | [rules-from-books.md](rules-from-books.md) | Every concrete rule we took from the books and where it lives in the code | All |
 
 ## Sources
@@ -24,6 +30,15 @@ so they can live in the repository. The books themselves are not committed (they
    Businesses*, September 2022.
 5. Finance Illustrated, *Crypto Trading For Beginner Traders* (2021), covered in
    [../strategies.md](../strategies.md).
+6. Larry Swing, *A Practical Guide to Swing Trading*.
+7. Nikhil Porwal, *10 Most Profitable Trading Strategies* (2023).
+8. David Carli, *The Power of Divergence* (5th ed., 2020).
+9. Roman Sadowski, *9 Advanced and Profitable Trading Strategies*.
+10. Warrior Trading, *Day Trading Guide For Beginners*.
+11. David Cardoza, *Introduction to Trading System Development* (WPI project report).
+
+Notes 06-11 were written by reading each book in full; their strategies are in
+`src/aitrader/learn/library/` (see [rules-from-books.md](rules-from-books.md)).
 
 ## What "training" means here
 

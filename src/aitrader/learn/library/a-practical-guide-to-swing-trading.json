@@ -1,0 +1,363 @@
+{
+ "book": "A Practical Guide to Swing Trading",
+ "author": "Larry Swing",
+ "strategies": [
+  {
+   "name": "forceswing_long",
+   "description": "Author's daily FORCESWING LONG scan: uptrend (close above SMA10 and SMA20), 3-bar lower-high pullback, Force Index 3-MA <=0 while 13-MA >=0, ADX(20)>30; enter on break of the setup bar's high; stop under setup low; ~7% target.",
+   "source": {
+    "book": "A Practical Guide to Swing Trading",
+    "pages": "p. 25, p. 27-32, p. 55",
+    "quote": "the short term battle is now won by the bears, but still the bulls are in control of the longer-term battle"
+   },
+   "timeframes": [
+    "1d",
+    "4h"
+   ],
+   "entry": [
+    {
+     "left": "close[1]",
+     "op": ">",
+     "right": "sma(10)[1]"
+    },
+    {
+     "left": "close[1]",
+     "op": ">",
+     "right": "sma(20)[1]"
+    },
+    {
+     "left": "high[1]",
+     "op": "<",
+     "right": "high[2]"
+    },
+    {
+     "left": "high[2]",
+     "op": "<",
+     "right": "high[3]"
+    },
+    {
+     "left": "adx(20)[1]",
+     "op": ">",
+     "right": 30
+    },
+    {
+     "left": "force_index(3)[1]",
+     "op": "<=",
+     "right": 0
+    },
+    {
+     "left": "force_index(13)[1]",
+     "op": ">=",
+     "right": 0
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "high[1]"
+    }
+   ],
+   "stop": {
+    "type": "lowest_low",
+    "n": 1
+   },
+   "target": {
+    "r": 2
+   },
+   "exit": {
+    "trailing": null,
+    "time_stop_bars": 20
+   },
+   "risk_pct": 0.0027,
+   "decisions": [
+    "Book enters with a buy stop $0.06 above the setup day's high on the next session. Approximated as: setup conditions evaluated on the previous bar ([1] offsets), entry when the current bar closes above that bar's high. This fills later/worse than a resting buy stop.",
+    "Force Index MAs are not in the grammar. Approximation: FI-3MA<=0 ~ close[1]<=close[4] (net 3-bar price change <=0) and FI-13MA>=0 ~ close[1]>=close[14] (net 13-bar change >=0). This ignores volume weighting, so it is only a rough proxy.",
+    "Stop: book uses the HIGHER of entry-4% and (prior-day low - $0.06). Grammar allows one stop type; used lowest_low(1) (= setup bar's low). The 4% cap is not enforced \u2014 see needs.",
+    "Target: book takes half at +7% with stop at most 4% below; fixed percent target not in grammar, so used 2R for the full position (with a ~3.5% stop this is ~7%).",
+    "Time stop 20 bars: book holds 'a few days to a few weeks'; 20 daily bars ~ 4 weeks. Not in the book.",
+    "ADX period 20 per the scan's 'ADX20'.",
+    "risk_pct 0.0027: book allocates 1/15 of capital per trade with a max 4% loss, i.e. ~0.27% of account at risk.",
+    "Book scans daily stock charts; mapped to 1d and 4h.",
+    "Force Index averages use Elder's EMA of (change x volume): force_index(3) <= 0 and force_index(13) >= 0 on the setup bar."
+   ],
+   "uncodable": [
+    "Universe filter: price > $12 (or $7) and 20-day average volume >= 500,000 shares \u2014 stock-specific; replace with a quote-volume liquidity filter for crypto",
+    "Gap rules: gap = open >= $0.50 from prior close; wait 30 min (gap with trade) or 5 min (gap against) and use today's high/low instead of yesterday's \u2014 no gaps/market open in 24/7 crypto",
+    "Order left working for up to 5 trading days if not filled",
+    "Short side (FORCESWING SHORT / short swing): sell stop $0.06 below prior low, buy stop at lower of +4% or $0.06 above prior high, buy limit for half at -7% \u2014 not allowed (long-only spot)",
+    "Portfolio: capital split into 15 equal slices (up to 20); first 15 of ~25 triggered buy stops get filled",
+    "Not coded yet: buy_stop_entry(prior_high + offset)",
+    "Not coded yet: stop = max(entry*0.96, low[1]-offset) (tighter_of two stops)",
+    "Not coded yet: partial_take_profit(50% at +7% fixed percent)",
+    "Not coded yet: trailing_stop(prior_bar_low - offset, ratchet up only)",
+    "Not coded yet: pending_order_validity(5 bars)"
+   ]
+  },
+  {
+   "name": "forceswing_long_ride_the_wave",
+   "description": "Same FORCESWING LONG setup, but exit managed only by a trailing stop to approximate the book's 'ride the wave' second half (stop raised daily to prior low - $0.06).",
+   "source": {
+    "book": "A Practical Guide to Swing Trading",
+    "pages": "p. 30, p. 32, p. 55",
+    "quote": "A trailing stop is used to close the 2nd half of the trade."
+   },
+   "timeframes": [
+    "1d",
+    "4h"
+   ],
+   "entry": [
+    {
+     "left": "close[1]",
+     "op": ">",
+     "right": "sma(10)[1]"
+    },
+    {
+     "left": "close[1]",
+     "op": ">",
+     "right": "sma(20)[1]"
+    },
+    {
+     "left": "high[1]",
+     "op": "<",
+     "right": "high[2]"
+    },
+    {
+     "left": "high[2]",
+     "op": "<",
+     "right": "high[3]"
+    },
+    {
+     "left": "adx(20)[1]",
+     "op": ">",
+     "right": 30
+    },
+    {
+     "left": "force_index(3)[1]",
+     "op": "<=",
+     "right": 0
+    },
+    {
+     "left": "force_index(13)[1]",
+     "op": ">=",
+     "right": 0
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "high[1]"
+    }
+   ],
+   "stop": {
+    "type": "lowest_low",
+    "n": 1
+   },
+   "target": null,
+   "exit": {
+    "trailing": "close<psar",
+    "time_stop_bars": null
+   },
+   "risk_pct": 0.0027,
+   "decisions": [
+    "Book enters with a buy stop $0.06 above the setup day's high on the next session. Approximated as: setup conditions evaluated on the previous bar ([1] offsets), entry when the current bar closes above that bar's high. This fills later/worse than a resting buy stop.",
+    "Force Index MAs are not in the grammar. Approximation: FI-3MA<=0 ~ close[1]<=close[4] (net 3-bar price change <=0) and FI-13MA>=0 ~ close[1]>=close[14] (net 13-bar change >=0). This ignores volume weighting, so it is only a rough proxy.",
+    "Stop: book uses the HIGHER of entry-4% and (prior-day low - $0.06). Grammar allows one stop type; used lowest_low(1) (= setup bar's low). The 4% cap is not enforced \u2014 see needs.",
+    "Book's trailing stop = prior-bar low - $0.06, raised only. Not in grammar; closest available trailing exit is close<psar (also a ratcheting stop under price). Honest but loose approximation.",
+    "No target: models the half that rides the wave. Combine with forceswing_long to compare the two halves.",
+    "risk_pct 0.0027: book allocates 1/15 of capital per trade with a max 4% loss, i.e. ~0.27% of account at risk.",
+    "Force Index averages use Elder's EMA of (change x volume): force_index(3) <= 0 and force_index(13) >= 0 on the setup bar."
+   ],
+   "uncodable": [
+    "Universe filter: price > $12 (or $7) and 20-day average volume >= 500,000 shares \u2014 stock-specific; replace with a quote-volume liquidity filter for crypto",
+    "Gap rules: gap = open >= $0.50 from prior close; wait 30 min (gap with trade) or 5 min (gap against) and use today's high/low instead of yesterday's \u2014 no gaps/market open in 24/7 crypto",
+    "Order left working for up to 5 trading days if not filled",
+    "Short side (FORCESWING SHORT / short swing): sell stop $0.06 below prior low, buy stop at lower of +4% or $0.06 above prior high, buy limit for half at -7% \u2014 not allowed (long-only spot)",
+    "Portfolio: capital split into 15 equal slices (up to 20); first 15 of ~25 triggered buy stops get filled",
+    "Not coded yet: buy_stop_entry(prior_high + offset)",
+    "Not coded yet: stop = max(entry*0.96, low[1]-offset) (tighter_of two stops)",
+    "Not coded yet: partial_take_profit(50% at +7% fixed percent)",
+    "Not coded yet: trailing_stop(prior_bar_low - offset, ratchet up only)",
+    "Not coded yet: pending_order_validity(5 bars)"
+   ]
+  },
+  {
+   "name": "forceswing_case_study_variant",
+   "description": "Setup used in the book's case studies: close above SMA50 and SMA20, 3-bar lower-high pullback, FI-3MA <=0 and FI-13MA >=0 (no ADX filter); buy break of prior high, stop under prior low, 7% target on half, trail the rest.",
+   "source": {
+    "book": "A Practical Guide to Swing Trading",
+    "pages": "p. 60-62",
+    "quote": "CLOSE > SMAC50 and CLOSE > SMAC20 (to be sure the stock is still in an uptrend)"
+   },
+   "timeframes": [
+    "1d",
+    "4h"
+   ],
+   "entry": [
+    {
+     "left": "close[1]",
+     "op": ">",
+     "right": "sma(50)[1]"
+    },
+    {
+     "left": "close[1]",
+     "op": ">",
+     "right": "sma(20)[1]"
+    },
+    {
+     "left": "high[1]",
+     "op": "<",
+     "right": "high[2]"
+    },
+    {
+     "left": "high[2]",
+     "op": "<",
+     "right": "high[3]"
+    },
+    {
+     "left": "force_index(3)[1]",
+     "op": "<=",
+     "right": 0
+    },
+    {
+     "left": "force_index(13)[1]",
+     "op": ">=",
+     "right": 0
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "high[1]"
+    }
+   ],
+   "stop": {
+    "type": "lowest_low",
+    "n": 1
+   },
+   "target": {
+    "r": 2
+   },
+   "exit": {
+    "trailing": null,
+    "time_stop_bars": 20
+   },
+   "risk_pct": 0.0027,
+   "decisions": [
+    "Book enters with a buy stop $0.06 above the setup day's high on the next session. Approximated as: setup conditions evaluated on the previous bar ([1] offsets), entry when the current bar closes above that bar's high. This fills later/worse than a resting buy stop.",
+    "Force Index MAs are not in the grammar. Approximation: FI-3MA<=0 ~ close[1]<=close[4] (net 3-bar price change <=0) and FI-13MA>=0 ~ close[1]>=close[14] (net 13-bar change >=0). This ignores volume weighting, so it is only a rough proxy.",
+    "Stop: book uses the HIGHER of entry-4% and (prior-day low - $0.06). Grammar allows one stop type; used lowest_low(1) (= setup bar's low). The 4% cap is not enforced \u2014 see needs.",
+    "Target 2R in place of +7% on half (see forceswing_long).",
+    "Time stop 20 bars (my choice).",
+    "risk_pct 0.0027: book allocates 1/15 of capital per trade with a max 4% loss, i.e. ~0.27% of account at risk.",
+    "Force Index averages use Elder's EMA of (change x volume): force_index(3) <= 0 and force_index(13) >= 0 on the setup bar."
+   ],
+   "uncodable": [
+    "Universe filter: price > $12 (or $7) and 20-day average volume >= 500,000 shares \u2014 stock-specific; replace with a quote-volume liquidity filter for crypto",
+    "Gap rules: gap = open >= $0.50 from prior close; wait 30 min (gap with trade) or 5 min (gap against) and use today's high/low instead of yesterday's \u2014 no gaps/market open in 24/7 crypto",
+    "Order left working for up to 5 trading days if not filled",
+    "Short side (FORCESWING SHORT / short swing): sell stop $0.06 below prior low, buy stop at lower of +4% or $0.06 above prior high, buy limit for half at -7% \u2014 not allowed (long-only spot)",
+    "Portfolio: capital split into 15 equal slices (up to 20); first 15 of ~25 triggered buy stops get filled",
+    "Not coded yet: buy_stop_entry(prior_high + offset)",
+    "Not coded yet: stop = max(entry*0.96, low[1]-offset) (tighter_of two stops)",
+    "Not coded yet: partial_take_profit(50% at +7% fixed percent)",
+    "Not coded yet: trailing_stop(prior_bar_low - offset, ratchet up only)",
+    "Not coded yet: pending_order_validity(5 bars)"
+   ]
+  },
+  {
+   "name": "master_plan_full_criteria_long",
+   "description": "All chapter-5 uptrend/pullback criteria combined: close above SMA10 and SMA20, SMA10 above SMA20, 3-bar lower highs, Force Index 3/13 split, ADX>30 with +DI>-DI; Master Plan entry/exit.",
+   "source": {
+    "book": "A Practical Guide to Swing Trading",
+    "pages": "p. 24-25",
+    "quote": "The 10-day moving average is above the 20-day moving average"
+   },
+   "timeframes": [
+    "1d",
+    "4h"
+   ],
+   "entry": [
+    {
+     "left": "close[1]",
+     "op": ">",
+     "right": "sma(10)[1]"
+    },
+    {
+     "left": "close[1]",
+     "op": ">",
+     "right": "sma(20)[1]"
+    },
+    {
+     "left": "sma(10)[1]",
+     "op": ">",
+     "right": "sma(20)[1]"
+    },
+    {
+     "left": "high[1]",
+     "op": "<",
+     "right": "high[2]"
+    },
+    {
+     "left": "high[2]",
+     "op": "<",
+     "right": "high[3]"
+    },
+    {
+     "left": "adx(20)[1]",
+     "op": ">",
+     "right": 30
+    },
+    {
+     "left": "force_index(3)[1]",
+     "op": "<=",
+     "right": 0
+    },
+    {
+     "left": "force_index(13)[1]",
+     "op": ">=",
+     "right": 0
+    },
+    {
+     "left": "plus_di(20)[1]",
+     "op": ">",
+     "right": "minus_di(20)[1]"
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "high[1]"
+    }
+   ],
+   "stop": {
+    "type": "lowest_low",
+    "n": 1
+   },
+   "target": {
+    "r": 2
+   },
+   "exit": {
+    "trailing": null,
+    "time_stop_bars": 20
+   },
+   "risk_pct": 0.0027,
+   "decisions": [
+    "Book enters with a buy stop $0.06 above the setup day's high on the next session. Approximated as: setup conditions evaluated on the previous bar ([1] offsets), entry when the current bar closes above that bar's high. This fills later/worse than a resting buy stop.",
+    "Force Index MAs are not in the grammar. Approximation: FI-3MA<=0 ~ close[1]<=close[4] (net 3-bar price change <=0) and FI-13MA>=0 ~ close[1]>=close[14] (net 13-bar change >=0). This ignores volume weighting, so it is only a rough proxy.",
+    "Stop: book uses the HIGHER of entry-4% and (prior-day low - $0.06). Grammar allows one stop type; used lowest_low(1) (= setup bar's low). The 4% cap is not enforced \u2014 see needs.",
+    "+DI > -DI is not in grammar; weak proxy: trend_structure >= 0 (not in a lower-high/lower-low structure). Real feature listed in needs.",
+    "Target 2R in place of +7% on half; time stop 20 bars (my choice).",
+    "risk_pct 0.0027: book allocates 1/15 of capital per trade with a max 4% loss, i.e. ~0.27% of account at risk.",
+    "Force Index averages use Elder's EMA of (change x volume): force_index(3) <= 0 and force_index(13) >= 0 on the setup bar."
+   ],
+   "uncodable": [
+    "Universe filter: price > $12 (or $7) and 20-day average volume >= 500,000 shares \u2014 stock-specific; replace with a quote-volume liquidity filter for crypto",
+    "Gap rules: gap = open >= $0.50 from prior close; wait 30 min (gap with trade) or 5 min (gap against) and use today's high/low instead of yesterday's \u2014 no gaps/market open in 24/7 crypto",
+    "Order left working for up to 5 trading days if not filled",
+    "Short side (FORCESWING SHORT / short swing): sell stop $0.06 below prior low, buy stop at lower of +4% or $0.06 above prior high, buy limit for half at -7% \u2014 not allowed (long-only spot)",
+    "Portfolio: capital split into 15 equal slices (up to 20); first 15 of ~25 triggered buy stops get filled",
+    "Not coded yet: buy_stop_entry(prior_high + offset)",
+    "Not coded yet: stop = max(entry*0.96, low[1]-offset) (tighter_of two stops)",
+    "Not coded yet: partial_take_profit(50% at +7% fixed percent)",
+    "Not coded yet: trailing_stop(prior_bar_low - offset, ratchet up only)",
+    "Not coded yet: pending_order_validity(5 bars)"
+   ]
+  }
+ ]
+}

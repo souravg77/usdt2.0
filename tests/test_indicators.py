@@ -5,7 +5,8 @@ import pytest
 from aitrader.indicators import (
     atr, bollinger, ema, ema_stack, macd, market_structure, rsi, sma, support_resistance,
     swing_points, volume_profile, fib_levels, ichimoku, parabolic_sar, relative_volume, stoch_rsi,
-    vwap,
+    vwap, bullish_divergence, candle_patterns, cci, directional_index, force_index, heikin_ashi,
+    stochastic, streak,
 )
 
 
@@ -152,3 +153,47 @@ def test_relative_volume():
 def test_fib_levels():
     lv = fib_levels(100, 200)
     assert lv[0.5] == 150 and lv[0.618] == pytest.approx(138.2) and lv[0.236] == pytest.approx(176.4)
+
+
+def test_cci_stochastic_and_di_ranges():
+    rng = np.random.default_rng(5)
+    df = frame(100 + np.cumsum(rng.normal(0, 1, 300)))
+    c = cci(df).dropna()
+    assert len(c) > 250 and c.abs().max() < 500
+    st = stochastic(df).dropna()
+    assert st.min().min() >= 0 and st.max().max() <= 100
+    di = directional_index(frame(np.linspace(100, 200, 80)))
+    assert (di["plus_di"].iloc[-10:] > di["minus_di"].iloc[-10:]).all()
+
+
+def test_force_index_sign_and_heikin_ashi():
+    up = frame(np.linspace(100, 130, 40))
+    assert force_index(up, 13).iloc[-1] > 0
+    ha = heikin_ashi(up)
+    assert (ha["close"].iloc[5:] > ha["open"].iloc[5:]).all()
+    assert ha["open"].iloc[1] == pytest.approx((ha["open"].iloc[0] + ha["close"].iloc[0]) / 2)
+
+
+def test_streak_counts_runs():
+    assert streak(pd.Series([True, True, False, True, True, True])).tolist() == [1, 2, 0, 1, 2, 3]
+
+
+def test_candle_patterns():
+    df = pd.DataFrame({"open": [10, 9.0, 10, 10, 10.0], "high": [10.2, 10.6, 10.1, 10.5, 10.4],
+                       "low": [8.9, 8.8, 8.0, 9.9, 9.95], "close": [9.2, 10.5, 10.05, 10.0, 10.2]})
+    p = candle_patterns(df)
+    assert p["bullish_engulfing"].tolist() == [0, 1, 0, 0, 0]
+    assert p["hammer"].iloc[2] == 1  # long lower wick, tiny body at the top
+    assert p["doji"].iloc[3] == 1
+    assert p["inside_bar"].iloc[4] == 1
+
+
+def test_bullish_divergence_detects_lower_low_with_higher_osc():
+    low = np.array([10, 9, 8, 9, 10, 11, 10, 9, 7, 9, 10, 11], dtype=float)
+    df = pd.DataFrame({"low": low, "high": low + 1})
+    osc = pd.Series([50, 40, 20, 30, 45, 55, 45, 35, 30, 40, 50, 60.0])
+    sig = bullish_divergence(df, osc, lookback=30, left=2, right=2)
+    assert sig.tolist() == [0] * 10 + [1, 0]  # second low (bar 8) confirmed two bars later
+    osc2 = osc.copy()
+    osc2[8] = 10.0  # oscillator also makes a lower low: no divergence
+    assert bullish_divergence(df, osc2, 30, 2, 2).sum() == 0

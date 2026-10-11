@@ -1,0 +1,190 @@
+{
+ "book": "Introduction to Trading System Development",
+ "author": "David Cardoza",
+ "strategies": [
+  {
+   "name": "cardoza_trendline_support_pullback",
+   "description": "Strategy 1 of the book: in an uptrending growth asset, buy when price dips to trendline support while the slow MA is above the fast MA and the bar opens above the fast MA; sell at resistance.",
+   "source": {
+    "book": "Introduction to Trading System Development",
+    "pages": "p. 18, 23-27",
+    "quote": "Stocks are purchased when the slow moving average exceeds the fast moving average"
+   },
+   "timeframes": [
+    "4h",
+    "1d"
+   ],
+   "entry": [
+    {
+     "left": "sma(34)",
+     "op": ">",
+     "right": "sma(22)"
+    },
+    {
+     "left": "open",
+     "op": ">",
+     "right": "sma(22)"
+    },
+    {
+     "left": "low",
+     "op": "<=",
+     "right": "1.01*lowest_low(20)"
+    },
+    {
+     "left": "trend_structure",
+     "op": ">=",
+     "right": 0
+    }
+   ],
+   "stop": {
+    "type": "lowest_low",
+    "n": 20
+   },
+   "target": {
+    "r": 2
+   },
+   "exit": {
+    "trailing": null,
+    "time_stop_bars": 20,
+    "when": [
+     {
+      "left": "sma(34)",
+      "op": "<",
+      "right": "sma(22)"
+     },
+     {
+      "left": "open",
+      "op": "<",
+      "right": "sma(22)"
+     }
+    ]
+   },
+   "risk_pct": 0.01,
+   "decisions": [
+    "The book's MA lengths for this system are in a missing code figure; reused the 22/34 lengths the book reports for its MA system (p. 30). SMA chosen because the book defines MAs as simple averages (p. 24).",
+    "Kept the literal condition 'slow MA exceeds fast MA' (a pullback state) plus 'open > fast MA' exactly as written on p. 26, even though it reads oddly.",
+    "Trendline support approximated by the 20-bar lowest low: low within 1% of it. This is a horizontal support, not the book's sloped, forward-projected trendline.",
+    "Book only trades growth/uptrending stocks; approximated with trend_structure >= 0 (not in a lower-highs/lower-lows downtrend).",
+    "Book has no stop; author says it needs one (p. 35-36). Used stop below the 20-bar lowest low.",
+    "Exit at resistance approximated by a 2R target; time stop 20 bars ~ the 'several days to several weeks' swing horizon (p. 25)."
+   ],
+   "uncodable": [
+    "CANSLIM fundamental selection (earnings growth, new products, institutional ownership, market cap > $80B)",
+    "Short side of the stop-and-reverse 'smoothies' system (short at resistance)",
+    "Walk-forward re-optimization of hold time per stock",
+    "Not coded yet: rising_trendline_support(start_bar, end_bar, project_to_bar) \u2014 value of a trendline through swing lows projected to the current bar (TradeStation TLValueEasy)",
+    "Not coded yet: trendline_resistance(start_bar, end_bar, project_to_bar) as an exit level",
+    "Not coded yet: universe_filter: 30d return > 5% and 365d return > 10% (CANSLIM-style momentum screen, 2 of 3 with ownership proxy)"
+   ]
+  },
+  {
+   "name": "cardoza_sma_crossover_22_34",
+   "description": "Strategy 2 of the book: buy when the fast SMA crosses above the slow SMA, exit when it crosses back under; lengths optimized per asset (BA optimum 22/34 days).",
+   "source": {
+    "book": "Introduction to Trading System Development",
+    "pages": "p. 24, 29-31",
+    "quote": "when the fast crossed over or under the slow, then a trade is initiated"
+   },
+   "timeframes": [
+    "4h",
+    "1d"
+   ],
+   "entry": [
+    {
+     "left": "sma(22)",
+     "op": "crosses_above",
+     "right": "sma(34)"
+    }
+   ],
+   "stop": {
+    "type": "atr",
+    "mult": 3,
+    "n": 14
+   },
+   "target": null,
+   "exit": {
+    "trailing": "close<ema50",
+    "time_stop_bars": null,
+    "when": [
+     {
+      "left": "sma(22)",
+      "op": "crosses_below",
+      "right": "sma(34)"
+     }
+    ]
+   },
+   "risk_pct": 0.01,
+   "decisions": [
+    "Used the book's reported BA optimum: fast 22, slow 34 days (p. 30). The book optimizes these per asset within 1-35; a per-asset walk-forward optimization should replace the fixed values.",
+    "SMA chosen because the book's MA definition is the simple average (p. 24).",
+    "Book has no protective stop; added a 3x ATR(14) stop since the author says stops are needed (p. 35-36).",
+    "The real exit is fast SMA crossing under slow SMA; grammar lacks that, so closest allowed trailing exit close<ema50 is used as an approximation (slower than the book's exit)."
+   ],
+   "uncodable": [
+    "Short side (crossing under as a short entry) \u2014 book says the system is not designed for shorting (p. 21)",
+    "CANSLIM stock selection",
+    "Not coded yet: per_asset_walk_forward_optimization(fast in 1..35, slow in 1..35)"
+   ]
+  },
+  {
+   "name": "cardoza_smoothies_range_support_buy",
+   "description": "Generic 'smoothies' support/resistance trade from the book's overview: buy when price reaches support expecting a rise, sell when it reaches resistance.",
+   "source": {
+    "book": "Introduction to Trading System Development",
+    "pages": "p. 18, 23-24",
+    "quote": "When the price level reaches the support, the trader can assume the price will rise"
+   },
+   "timeframes": [
+    "1h",
+    "4h",
+    "1d"
+   ],
+   "entry": [
+    {
+     "left": "low",
+     "op": "<=",
+     "right": "1.005*lowest_low(30)"
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "lowest_low(30)"
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "sma(50)"
+    }
+   ],
+   "stop": {
+    "type": "percent",
+    "pct": 0.03
+   },
+   "target": {
+    "r": 2
+   },
+   "exit": {
+    "trailing": null,
+    "time_stop_bars": 30,
+    "when": [
+     {
+      "left": "high",
+      "op": ">=",
+      "right": "highest_high(30)"
+     }
+    ]
+   },
+   "risk_pct": 0.01,
+   "decisions": [
+    "Support = 30-bar lowest low; a 'touch' = low within 0.5% of it while the bar closes back above it (support holds).",
+    "Book says the simple version uses moving averages to confirm the price is increasing (p. 24); approximated with close > sma(50).",
+    "Exit at resistance approximated by a 2R target; resistance would be highest_high(30). 3% stop chosen because the book gives none.",
+    "Time stop 30 bars as a swing-length cap."
+   ],
+   "uncodable": [
+    "Short at resistance / stop-and-reverse half of the system (p. 18)",
+    "Not coded yet: rising_trendline_support for the sloped version"
+   ]
+  }
+ ]
+}

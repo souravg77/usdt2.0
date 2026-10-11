@@ -5,7 +5,8 @@ import pytest
 from aitrader.strategies import STRATEGIES, BuyTheDip, MomentumBreakout, TrendPullback
 
 
-DATA = {"buy_the_dip": dict(vol=0.03, drift=0.0015)}
+DATA = {"buy_the_dip": dict(vol=0.03, drift=0.0015),
+        "cci_divergence": dict(seed=8, vol=0.01, drift=0.0)}
 
 
 def synthetic(n=1500, seed=7, drift=0.0004, vol=0.01, tf_ms=3_600_000):
@@ -33,7 +34,10 @@ def test_signals_are_well_formed(name):
     assert sigs, f"{name} produced no signals on synthetic data"
     for s in sigs:
         assert s.stop < s.entry < s.target
-        assert s.r_multiple_target == pytest.approx(strat.params["target_r"])
+        if strat.params.get("target_r") is not None:
+            assert s.r_multiple_target == pytest.approx(strat.params["target_r"])
+        else:
+            assert s.r_multiple_target >= strat.params.get("min_rr", 0)
         assert s.strategy == name
 
 
@@ -82,3 +86,16 @@ def test_signals_cli_writes_log(tmp_path, monkeypatch, capsys):
     lines = out.read_text().splitlines()
     assert lines[0].startswith("ts,strategy,exchange") and len(lines) > 1
     assert "signals over 1500 bars" in capsys.readouterr().out
+
+
+def test_cci_divergence_signals_obey_the_books_rules():
+    strat = STRATEGIES["cci_divergence"]()
+    sigs = []
+    for seed in (0, 2, 8, 12):
+        sigs += strat.generate(synthetic(seed=seed, vol=0.02, drift=0.0), "binance", "BTC/USDT", "1d")
+    assert sigs
+    for s in sigs:
+        assert s.features["cci_a"] < -150 and s.features["cci_c"] < -130
+        assert s.features["cci_c"] > s.features["cci_a"]
+        assert 1.13 <= s.features["fib"] <= 1.618
+        assert (s.target - s.entry) >= (s.entry - s.stop)

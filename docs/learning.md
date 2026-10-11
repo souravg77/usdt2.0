@@ -30,10 +30,23 @@ book (PDF) ──read──> draft strategies ──backtest gate──> paper t
 There is no automatic step to real money. The registry has no "live" status; going live stays
 behind the Phase 6 go/no-go gate and the three-setting live lock.
 
+## Strategies already read from the books
+
+The six strategy books Shawn sent were read in full, and their 41 rule-based strategies ship
+with the code in `src/aitrader/learn/library/`. `learn add-library` registers them, so they
+don't need the API key. Carli's CCI divergence is a hand-coded strategy (`cci_divergence`); add
+it with `learn add-builtin`. The list and what was approximated are in
+[knowledge/rules-from-books.md](knowledge/rules-from-books.md).
+
+Every new book makes the library bigger. Each one is read the same way: notes go in
+`docs/knowledge`, strategies become specs, and specs go through the backtest gate and paper
+trading. Only strategies with results that hold up survive.
+
 ## Commands
 
 ```bash
 aitrader learn read data/books/my-book.pdf --test   # draft strategies, then backtest them
+aitrader learn add-library --test                   # the 41 strategies already read from Shawn's books
 aitrader learn add-builtin                          # also run the hand-coded strategies through the gate
 aitrader learn test                                 # backtest anything still untested
 aitrader learn list                                 # every strategy: status, backtest and paper results

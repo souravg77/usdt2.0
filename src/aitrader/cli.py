@@ -325,6 +325,22 @@ def cmd_learn(s: Settings, args) -> int:
             print("backtesting them:")
             run_tests(new)
         return 0
+    if cmd == "add-library":
+        from .learn.library import library_specs
+
+        specs, skipped = library_specs(args.book)
+        added = 0
+        for spec in specs:
+            e = Entry(id=spec_id(spec), kind="rule", name=spec["name"], spec=spec,
+                      source=f"{spec['source']['book']} {spec['source']['pages']}".strip())
+            added += reg.add(e)
+        for name, why in skipped:
+            print(f"  - {name}: skipped ({why[:150]})")
+        reg.save()
+        print(f"{added} new strategies from the book library ({len(specs)} in it) -> {args.registry}")
+        if args.test:
+            run_tests(reg.with_status("candidate"))
+        return 0
     if cmd == "add-builtin":
         for name in args.names or list(STRATEGIES):
             e = Entry(id=f"builtin-{name}", kind="builtin", name=name, source=STRATEGIES[name].spec.source)
@@ -462,6 +478,9 @@ def build_parser() -> argparse.ArgumentParser:
     lr.add_argument("book", help="PDF, Markdown or text file")
     lr.add_argument("--max", type=int, default=12, help="most strategies to keep from one book")
     lr.add_argument("--test", action="store_true", help="backtest the new drafts straight away")
+    ll = le_sub.add_parser("add-library", help="register the strategies already read from the supplied books")
+    ll.add_argument("--book", help="only books whose title contains this")
+    ll.add_argument("--test", action="store_true", help="backtest them straight away")
     lb = le_sub.add_parser("add-builtin", help="register the hand-coded strategies too")
     lb.add_argument("names", nargs="*")
     lt = le_sub.add_parser("test", help="backtest candidates; passes go to paper trading")

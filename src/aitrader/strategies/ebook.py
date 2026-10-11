@@ -294,3 +294,12 @@ class BollingerSqueeze(Strategy):
 STRATEGIES: dict[str, type[Strategy]] = {
     s.spec.name: s for s in (TrendPullback, MomentumBreakout, BuyTheDip, BollingerSqueeze)
 }
+
+
+def _register_more() -> None:
+    from .divergence import CciDivergence
+
+    STRATEGIES[CciDivergence.spec.name] = CciDivergence
+
+
+_register_more()
