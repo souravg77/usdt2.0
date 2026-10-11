@@ -48,11 +48,12 @@ class Paths:
     golive_dir: str = "data/golive"
     events: str = "data/ops/events.jsonl"
     users_dir: str = "data/users"
+    keys_store: str = "data/settings/keys.enc"
 
 
 def create_app(settings: Settings, auth: Auth, jobs: JobRunner, paths: Paths | None = None,
                secure_cookie: bool = False, users=None, keys_secret: str = "", signup: bool = False,
-               verifier=None) -> FastAPI:
+               verifier=None, checkers: dict | None = None) -> FastAPI:
     """``users`` (an ``accounts.UserStore``) turns on user accounts: sign-up when ``signup`` is
     true, each user's own page, and the admin's Users page. Without it only the admin can log in."""
     paths = paths or Paths()
@@ -88,7 +89,8 @@ def create_app(settings: Settings, auth: Auth, jobs: JobRunner, paths: Paths | N
         if user:
             links = nav_links if nav_links is not None else (
                 '<a href="/">Overview</a><a href="/trading">Trading</a><a href="/books">Submit a book</a>'
-                + ('<a href="/admin/users">Users</a>' if users is not None else ""))
+                + ('<a href="/admin/users">Users</a>' if users is not None else "")
+                + '<a href="/settings">Settings</a>')
             nav = (f'<nav>{links}'
                    f'<form method="post" action="/logout" class="inline">{_csrf(auth, token)}'
                    f'<button>Log out {_e(user)}</button></form></nav>')
@@ -140,6 +142,11 @@ def create_app(settings: Settings, auth: Auth, jobs: JobRunner, paths: Paths | N
         resp.set_cookie(COOKIE, token, max_age=int(auth.session_s), httponly=True,
                         samesite="strict", secure=secure_cookie)
         return resp
+
+    from .settings_pages import add_settings_routes
+
+    add_settings_routes(app, settings=settings, auth=auth, paths=paths, jobs=jobs,
+                        keys_secret=keys_secret, page=page, guard=guard, checkers=checkers)
 
     if users is not None:
         from .user_pages import add_user_routes
@@ -197,8 +204,8 @@ def create_app(settings: Settings, auth: Auth, jobs: JobRunner, paths: Paths | N
             return redirect
         has_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
         warn = "" if has_key else (
-            '<p class="bad">ANTHROPIC_API_KEY is not set in .env, so the agent can\'t read books '
-            "yet. Uploads are still added to the knowledge base.</p>")
+            '<p class="bad">No Anthropic API key yet, so the agent can\'t read books. Add it on the '
+            '<a href="/settings">Settings</a> page. Uploads are still added to the knowledge base.</p>')
         err = f'<p class="bad">{_e(error)}</p>' if error else ""
         body = f"""{err}{warn}
 <form method="post" action="/books" enctype="multipart/form-data" class="card">
@@ -435,7 +442,7 @@ def _strategy_table(paths: Paths) -> str:
 
     reg = Registry(paths.registry)
     if not reg.entries:
-        return "<p class=muted>No strategies yet. Submit a book, or run <code>aitrader learn add-library --test</code>.</p>"
+        return "<p class=muted>No strategies yet. Start the first-time setup on the <a href=\"/settings\">Settings</a> page, or submit a book.</p>"
     order = {"paper": 0, "candidate": 1, "retired": 2, "rejected": 3}
     rows = []
     for e in sorted(reg.entries.values(), key=lambda e: (order.get(e.status, 9), e.id)):
@@ -635,5 +642,5 @@ pre{background:var(--card);border:1px solid var(--line);padding:12px;border-radi
 form.kill{margin-top:12px;border-top:1px solid var(--line);padding-top:8px}ul.gate{padding-left:0;list-style:none;margin:6px 0}
 .chart svg{width:100%;height:180px;display:block}
 .switch{font-size:1.1em}.switch.on b{color:var(--bad)}
-.good{color:var(--good)}.bad{color:var(--bad)}.muted{color:var(--muted)}.small{font-size:.85em}.pill{border:1px solid var(--line);border-radius:99px;padding:1px 8px;font-size:.85em}
+.good{color:var(--good)}.bad{color:var(--bad)}.warn{color:#a86b00}.stack{margin:12px 0}.muted{color:var(--muted)}.small{font-size:.85em}.pill{border:1px solid var(--line);border-radius:99px;padding:1px 8px;font-size:.85em}
 """

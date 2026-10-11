@@ -144,6 +144,13 @@ Delete `caddy-root.crt` from the server afterwards: `rm ~/AI_crypto_trader/caddy
 
 ## 5. Fill in the rest of the settings
 
+**Easiest: the dashboard's Settings page.** Paste your Anthropic key, Binance testnet keys and
+Telegram bot there. Each key is checked before it is saved, stored encrypted, and the services
+that use it restart by themselves. The same page shows the health check and has a **Start
+setup** button that does step 6 for you.
+
+Or edit `.env` on the server (a key saved on the Settings page wins over `.env`):
+
 ```bash
 cd ~/AI_crypto_trader
 nano .env        # save with Ctrl+O, Enter; exit with Ctrl+X
