@@ -560,7 +560,7 @@ def _equity_svg(paper: dict, execs: dict) -> str:
             y1 = y0 + 1
         line = " ".join(f"{pad + (x - x0) / (x1 - x0) * (w - 2 * pad):.1f},"
                         f"{h - pad - (y - y0) / (y1 - y0) * (h - 2 * pad):.1f}" for x, y in pts)
-        parts.append(f'<div class="card chart"><h3>{_e(name)}: {ys[-1]:+,.2f}</h3>'
+        parts.append(f'<div class="card chart"><h3>{_e(name)}: {ys[-1]:{"+" if "P&L" in name else ""},.2f}</h3>'
                      f'<svg viewBox="0 0 {w} {h}" role="img" aria-label="{_e(name)}" preserveAspectRatio="none">'
                      f'<line x1="{pad}" y1="{h - pad}" x2="{w - pad}" y2="{h - pad}" stroke="var(--line)"/>'
                      f'<polyline fill="none" stroke="{color}" stroke-width="2" points="{line}"/>'
