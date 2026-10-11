@@ -1,0 +1,97 @@
+"""Login for the dashboard: one account from the environment, signed session cookies, CSRF
+tokens on every form, and a lockout after repeated wrong passwords.
+
+The dashboard runs on a public VPS, so it refuses to start without a strong password
+(``AITRADER_WEB_PASSWORD``, at least 12 characters).
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import hmac
+import secrets
+import time
+from collections import defaultdict, deque
+
+MIN_PASSWORD = 12
+COOKIE = "aitrader_session"
+
+
+class AuthError(RuntimeError):
+    pass
+
+
+class Auth:
+    def __init__(self, user: str, password: str, secret: str = "", session_hours: float = 12,
+                 max_failures: int = 5, lockout_s: float = 900):
+        if len(password or "") < MIN_PASSWORD:
+            raise AuthError(f"set AITRADER_WEB_PASSWORD in .env to at least {MIN_PASSWORD} "
+                            "characters before starting the dashboard")
+        self.user = user or "admin"
+        self._pw = hashlib.sha256(password.encode()).digest()
+        # without a fixed secret, sessions end when the service restarts (log in again)
+        self._key = (secret or secrets.token_hex(32)).encode()
+        self.session_s = session_hours * 3600
+        self.max_failures, self.lockout_s = max_failures, lockout_s
+        self._fails: dict[str, deque] = defaultdict(deque)
+        self._revoked: set[str] = set()
+
+    # ---- passwords ------------------------------------------------------------------------------
+
+    def locked_out(self, ip: str, now: float | None = None) -> bool:
+        now = now or time.time()
+        q = self._fails[ip]
+        while q and q[0] < now - self.lockout_s:
+            q.popleft()
+        return len(q) >= self.max_failures
+
+    def login(self, ip: str, user: str, password: str, now: float | None = None) -> str | None:
+        """Return a session token, or None (wrong details or locked out)."""
+        if self.locked_out(ip, now):
+            return None
+        ok_user = hmac.compare_digest(user.encode(), self.user.encode())
+        ok_pw = hmac.compare_digest(hashlib.sha256(password.encode()).digest(), self._pw)
+        if ok_user and ok_pw:
+            self._fails.pop(ip, None)
+            return self._token(user, now)
+        self._fails[ip].append(now or time.time())
+        return None
+
+    # ---- sessions -------------------------------------------------------------------------------
+
+    def _sign(self, payload: str) -> str:
+        return hmac.new(self._key, payload.encode(), hashlib.sha256).hexdigest()
+
+    def _token(self, user: str, now: float | None = None) -> str:
+        expires = int((now or time.time()) + self.session_s)
+        payload = f"{user}|{expires}|{secrets.token_hex(8)}"
+        raw = f"{payload}|{self._sign(payload)}"
+        return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")  # cookie-safe
+
+    def verify(self, token: str | None, now: float | None = None) -> str | None:
+        """The user name for a valid, unexpired token."""
+        if not token or token in self._revoked:
+            return None
+        try:
+            raw = base64.urlsafe_b64decode(token.encode() + b"=" * (-len(token) % 4)).decode()
+            user, expires, nonce, sig = raw.split("|")
+        except Exception:
+            return None
+        if not hmac.compare_digest(sig, self._sign(f"{user}|{expires}|{nonce}")):
+            return None
+        if int(expires) < (now or time.time()):
+            return None
+        return user
+
+    def revoke(self, token: str) -> None:
+        """Log a session out (until the service restarts, when every session ends anyway
+        unless AITRADER_WEB_SECRET is fixed; tokens also expire on their own)."""
+        self._revoked.add(token)
+
+    def csrf(self, token: str) -> str:
+        """Form token tied to the session, checked on every POST."""
+        return self._sign("csrf|" + token)[:32]
+
+    def check_csrf(self, token: str | None, value: str | None) -> bool:
+        return bool(token and value) and hmac.compare_digest(self.csrf(token), value)

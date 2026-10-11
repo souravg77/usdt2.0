@@ -561,6 +561,28 @@ def cmd_ai(s: Settings, args) -> int:
     raise ValueError(f"unknown ai command {cmd}")
 
 
+def cmd_web(s: Settings, args) -> int:
+    """Serve the dashboard (login from AITRADER_WEB_USER / AITRADER_WEB_PASSWORD)."""
+    try:
+        import uvicorn
+
+        from .web import Auth, AuthError, JobRunner, create_app
+    except ImportError as exc:  # pragma: no cover - installed with the package
+        print(f"dashboard dependencies missing: {exc}", file=sys.stderr)
+        return 1
+    e = os.environ.get
+    try:
+        auth = Auth(e("AITRADER_WEB_USER", "admin"), e("AITRADER_WEB_PASSWORD", ""),
+                    e("AITRADER_WEB_SECRET", ""))
+    except AuthError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    secure = e("AITRADER_WEB_SECURE_COOKIE", "false").strip().lower() in ("1", "true", "yes")
+    app = create_app(s, auth, JobRunner(env_file=args.env_file), secure_cookie=secure)
+    uvicorn.run(app, host=args.host, port=args.port, proxy_headers=False, server_header=False)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="aitrader", description=__doc__)
     p.add_argument("--env-file", default=".env")
@@ -663,6 +685,10 @@ def build_parser() -> argparse.ArgumentParser:
     lp.add_argument("--no-ai", action="store_true", help="ignore the active AI trade filter")
     lp.add_argument("--models", default="data/ai/models", help="trade-filter model registry folder")
 
+    w = sub.add_parser("web", help="dashboard: submit books, see strategies and results (login required)")
+    w.add_argument("--host", default="127.0.0.1", help="0.0.0.0 only inside Docker or behind a proxy")
+    w.add_argument("--port", type=int, default=8080)
+
     ai = sub.add_parser("ai", help="Phase 4 AI trade filter: training set, train/test, promote, rollback")
     ai.add_argument("--models", default="data/ai/models", help="model registry folder")
     ai.add_argument("--dataset", default="data/ai/dataset.csv")
@@ -721,6 +747,7 @@ def main(argv: list[str] | None = None) -> int:
         "kb": cmd_kb,
         "learn": cmd_learn,
         "ai": cmd_ai,
+        "web": cmd_web,
     }[args.cmd]
     result = handler(settings, args)
     if asyncio.iscoroutine(result):
