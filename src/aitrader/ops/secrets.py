@@ -37,6 +37,7 @@ class Field:
 
 FIELDS = [
     Field("ANTHROPIC_API_KEY", "Anthropic API key", "anthropic"),
+    Field("ANTHROPIC_WORKSPACE_ID", "Workspace ID (only if Anthropic asks for one)", "anthropic", secret=False),
     Field("BINANCE_TESTNET_API_KEY", "Testnet API key", "binance_testnet"),
     Field("BINANCE_TESTNET_API_SECRET", "Testnet secret key", "binance_testnet"),
     Field("BINANCE_API_KEY", "Real-account API key", "binance"),

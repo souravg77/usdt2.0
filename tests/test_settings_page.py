@@ -26,7 +26,7 @@ def web(tmp_path, monkeypatch):
     calls = []
     down = {}  # checker name -> exception it raises (the check can't run)
 
-    def anthropic(key):
+    def anthropic(key, workspace=""):
         calls.append(("anthropic", key))
         if "anthropic" in down:
             raise down["anthropic"]
@@ -190,6 +190,24 @@ def test_anthropic_check_only_rejects_a_bad_key():
 
     with pytest.raises(KeyUnverified, match="OSError"):
         check_anthropic(KEY, opener=offline)
+
+    # an org-level key: Anthropic needs the workspace header, which is sent once the ID is given
+    msg = "This API key is not scoped to a workspace, so this request must include the anthropic-workspace-id header"
+    with pytest.raises(KeyRejected, match="Workspace ID") as e:
+        check_anthropic(KEY, opener=refuse(400, msg))
+    assert not isinstance(e.value, KeyUnverified)
+    sent.clear()
+    check_anthropic(KEY, "wrkspc_01abc", opener=ok)
+    assert sent[0].get_header("Anthropic-workspace-id") == "wrkspc_01abc"
+
+
+def test_book_reader_sends_the_workspace_id(monkeypatch):
+    from aitrader.learn.extract import anthropic_headers
+
+    monkeypatch.delenv("ANTHROPIC_WORKSPACE_ID", raising=False)
+    assert "anthropic-workspace-id" not in anthropic_headers(KEY)
+    monkeypatch.setenv("ANTHROPIC_WORKSPACE_ID", "wrkspc_01abc")
+    assert anthropic_headers(KEY)["anthropic-workspace-id"] == "wrkspc_01abc"
 
 
 def test_keys_are_saved_when_the_check_cannot_run(web):

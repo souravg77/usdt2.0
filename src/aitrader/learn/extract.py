@@ -28,6 +28,16 @@ from .rules import RuleError, grammar_help, validate_spec
 log = logging.getLogger(__name__)
 
 API_URL = "https://api.anthropic.com/v1/messages"
+
+
+def anthropic_headers(key: str, workspace: str | None = None) -> dict:
+    """Request headers; ``ANTHROPIC_WORKSPACE_ID`` is sent for keys not scoped to a workspace."""
+    workspace = (os.environ.get("ANTHROPIC_WORKSPACE_ID", "") if workspace is None else workspace).strip()
+    headers = {"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json",
+               "user-agent": "aitrader"}
+    if workspace:
+        headers["anthropic-workspace-id"] = workspace
+    return headers
 DEFAULT_MODEL = "claude-sonnet-5-5"
 WORDS_PER_PART = 30_000
 
@@ -113,8 +123,7 @@ def claude_caller(api_key: str | None = None, model: str | None = None,
             "model": model, "max_tokens": max_tokens, "system": system, "messages": messages,
             "tools": [TOOL], "tool_choice": {"type": "tool", "name": TOOL["name"]},
         }).encode()
-        req = urllib.request.Request(API_URL, data=body, method="POST", headers={
-            "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"})
+        req = urllib.request.Request(API_URL, data=body, method="POST", headers=anthropic_headers(key))
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read())
         for block in data.get("content", []):
