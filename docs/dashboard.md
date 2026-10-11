@@ -27,6 +27,9 @@ order it can cause is the kill switch selling what the executors bought.
   "Check the gate now" button. The page refreshes every minute. See
   [live-trading.md](live-trading.md).
 
+- **Users** (admin) and **My account** (users): sign-up, approval, each user's exchange keys,
+  positions, trades and kill switch. See [user-accounts.md](user-accounts.md).
+
 Uploaded books are saved in `data/books/` under a generated name and are never committed.
 
 ## Turning it on (VPS)

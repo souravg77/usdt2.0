@@ -1,5 +1,6 @@
-"""Login for the dashboard: one account from the environment, signed session cookies, CSRF
-tokens on every form, and a lockout after repeated wrong passwords.
+"""Login for the dashboard: the admin account from the environment plus user accounts
+(``aitrader.accounts``), signed session cookies, CSRF tokens on every form, and a lockout after
+repeated wrong passwords. A session's subject is the admin's name or ``u:<user id>``.
 
 The dashboard runs on a public VPS, so it refuses to start without a strong password
 (``AITRADER_WEB_PASSWORD``, at least 12 characters).
@@ -29,6 +30,8 @@ class Auth:
             raise AuthError(f"set AITRADER_WEB_PASSWORD in .env to at least {MIN_PASSWORD} "
                             "characters before starting the dashboard")
         self.user = user or "admin"
+        if ":" in self.user or "@" in self.user or "|" in self.user:
+            raise AuthError("AITRADER_WEB_USER must be a plain name (no @, : or |)")
         self._pw = hashlib.sha256(password.encode()).digest()
         # without a fixed secret, sessions end when the service restarts (log in again)
         self._key = (secret or secrets.token_hex(32)).encode()
@@ -54,9 +57,22 @@ class Auth:
         ok_pw = hmac.compare_digest(hashlib.sha256(password.encode()).digest(), self._pw)
         if ok_user and ok_pw:
             self._fails.pop(ip, None)
-            return self._token(user, now)
-        self._fails[ip].append(now or time.time())
+            return self._token(self.user, now)
+        self.record_failure(ip, now)
         return None
+
+    def record_failure(self, ip: str, now: float | None = None) -> None:
+        self._fails[ip].append(now or time.time())
+
+    def issue(self, ip: str, subject: str, now: float | None = None) -> str:
+        """Session for a user account that the account store has already checked."""
+        if "|" in subject:
+            raise ValueError("bad subject")
+        self._fails.pop(ip, None)
+        return self._token(subject, now)
+
+    def is_admin(self, subject: str | None) -> bool:
+        return bool(subject) and hmac.compare_digest(subject.encode(), self.user.encode())
 
     # ---- sessions -------------------------------------------------------------------------------
 

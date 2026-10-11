@@ -634,6 +634,14 @@ def cmd_backup(s: Settings, args) -> int:
         if os.path.exists(path):
             target = os.path.join(args.dest, path.replace("/", "__"))
             shutil.copy2(path, target)
+    if os.path.exists(ACCOUNTS_DB):  # user accounts (keys inside stay encrypted)
+        from .accounts import UserStore
+
+        accounts = UserStore(ACCOUNTS_DB)
+        try:
+            accounts.backup(os.path.join(args.dest, "accounts.db"))
+        finally:
+            accounts.close()
     print(f"backup written to {args.dest}")
     return 0
 
@@ -655,7 +663,11 @@ def cmd_web(s: Settings, args) -> int:
         print(exc, file=sys.stderr)
         return 1
     secure = e("AITRADER_WEB_SECURE_COOKIE", "false").strip().lower() in ("1", "true", "yes")
-    app = create_app(s, auth, JobRunner(env_file=args.env_file), secure_cookie=secure)
+    from .accounts import UserStore
+
+    signup = e("AITRADER_WEB_SIGNUP", "closed").strip().lower() in ("open", "true", "1", "yes")
+    app = create_app(s, auth, JobRunner(env_file=args.env_file), secure_cookie=secure,
+                     users=UserStore(ACCOUNTS_DB), keys_secret=e("AITRADER_KEYS_SECRET", ""), signup=signup)
     uvicorn.run(app, host=args.host, port=args.port, proxy_headers=False, server_header=False)
     return 0
 
@@ -823,6 +835,74 @@ def cmd_report(s: Settings, args) -> int:
         json.dump(rep, fh, indent=1)
     if not args.quiet:
         _events("report").emit("weekly_report", text, level="warning" if rep["flagged"] else "info")
+    return 0
+
+
+
+ACCOUNTS_DB = "data/accounts.db"
+
+
+def cmd_users(s: Settings, args) -> int:
+    """User accounts: list, approve, disable, allow live, and the per-user trading service."""
+    from .accounts import AccountError, UserStore
+
+    store = UserStore(ACCOUNTS_DB)
+    try:
+        cmd = args.users_cmd
+        if cmd == "list":
+            for u in store.list():
+                keys = ", ".join(f'{k["exchange"]}{"-testnet" if k["testnet"] else ""}' for k in store.key_info(u.id))
+                print(f"{u.id:4} {u.email:40} {u.status:9} {u.mode:8} live {'allowed' if u.live_allowed else 'off':8}"
+                      f" keys: {keys or '-'}")
+            return 0
+        if cmd in ("approve", "disable", "live-on", "live-off"):
+            u = store.by_email(args.email)
+            if u is None:
+                print(f"no account {args.email}", file=sys.stderr)
+                return 1
+            if cmd == "approve":
+                store.set_status(u.id, "active")
+            elif cmd == "disable":
+                store.set_status(u.id, "disabled")
+            else:
+                store.allow_live(u.id, cmd == "live-on")
+            print(f"{u.email}: {cmd} done")
+            return 0
+        if cmd == "add":
+            import getpass
+
+            pw = getpass.getpass("password for the new account: ")
+            try:
+                u = store.create(args.email, pw, status="active")
+            except AccountError as exc:
+                print(exc, file=sys.stderr)
+                return 1
+            print(f"created {u.email} (active)")
+            return 0
+        if cmd == "run":
+            return asyncio.run(_users_run(s, store, args))
+        raise SystemExit(f"unknown users command {cmd}")
+    finally:
+        store.close()
+
+
+async def _users_run(s: Settings, store, args) -> int:
+    from .accounts import AccountError, Vault
+    from .accounts.runner import UsersRunner
+    from .trade import Control, GateConfig, GoLive
+
+    try:
+        vault = Vault(os.environ.get("AITRADER_KEYS_SECRET", ""))
+    except AccountError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    gl = GoLive(events=_events("users"), cfg=GateConfig.from_env())
+    runner = UsersRunner(store, vault, s, PAPER_STATE, platform_control=Control(os.path.join(TRADE_DIR, "control.json")),
+                         live_guard=gl.guard, live_monitor=gl.monitor)
+    if args.once:
+        print(json.dumps(await runner.tick(), indent=1, default=str))
+    else:
+        await runner.run(args.interval)
     return 0
 
 
@@ -1020,6 +1100,20 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("--registry", default="data/learn/registry.json")
     rp.add_argument("--max-gap", type=float, default=0.15)
     rp.add_argument("--quiet", action="store_true", help="don't send it to the event log / Telegram")
+
+    us = sub.add_parser("users", help="user accounts: list, approve, disable, live on/off, run")
+    us_sub = us.add_subparsers(dest="users_cmd", required=True)
+    us_sub.add_parser("list", help="every account with its status, mode and connected keys")
+    for name, h in (("approve", "let a new account connect keys and trade on the testnet"),
+                    ("disable", "block an account: sells what the agent bought for it and stops it"),
+                    ("live-on", "allow an account to switch itself to real money"),
+                    ("live-off", "stop real money for an account (back to the testnet)"),
+                    ("add", "create an active account (asks for the password)")):
+        u = us_sub.add_parser(name, help=h)
+        u.add_argument("email")
+    ur = us_sub.add_parser("run", help="service: trade for every account on its own exchange account")
+    ur.add_argument("--interval", type=float, default=15)
+    ur.add_argument("--once", action="store_true")
     return p
 
 
@@ -1052,6 +1146,7 @@ def main(argv: list[str] | None = None) -> int:
         "golive": cmd_golive,
         "telegram": cmd_telegram,
         "report": cmd_report,
+        "users": cmd_users,
     }[args.cmd]
     result = handler(settings, args)
     if asyncio.iscoroutine(result):

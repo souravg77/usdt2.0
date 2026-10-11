@@ -185,6 +185,12 @@ Start the market-context service once (later updates keep it running):
 6. Only if it passes and you decide to go live: `golive attest`, `golive approve`, the pilot
    budget and the live lock in `.env`, then `docker compose --profile live up -d executor-live`.
 
+## 11. User accounts (optional)
+
+To let other people sign up and connect their own exchange keys, follow
+[user-accounts.md](user-accounts.md): set `AITRADER_KEYS_SECRET` and `AITRADER_WEB_SIGNUP`,
+then `docker compose --profile users up -d users`. Check the legal side first.
+
 ## Useful commands
 
 | Task | Command |
