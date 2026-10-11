@@ -10,7 +10,7 @@ service (dashboard, database, alerts) in one file.
   HTTP 451). Pick a VPS region where both Binance and HTX allow API access, and confirm they are
   legally available to you.
 - Phase 1 only needs public market data, so **no API keys are required yet**. When you do add keys:
-  read-only first; later trade-only; **never enable withdrawals**; whitelist the VPS IP on both exchanges.
+  read-only first; later trade-only; **never enable withdrawals**; whitelist the VPS IP on both exchanges. Keep only the money the bot trades with on each exchange (an exchange can fail or freeze withdrawals).
 
 ## 1. Harden the server (once)
 
@@ -70,7 +70,21 @@ docker compose up -d
 docker compose logs -f collector
 ```
 
-## 6. Updating
+## 6. Load the books into the knowledge base
+
+The notes in `docs/knowledge` are built into the image. To make the full books searchable too,
+copy your PDFs to the server (they stay on the server and are never committed):
+
+```bash
+mkdir -p data/books
+scp *.pdf you@your-vps:~/AI_crypto_trader/data/books/   # run this on your own computer
+docker compose run --rm collector kb build
+docker compose run --rm collector kb search "how does proof of work stop double spending"
+```
+
+Re-run `kb build` whenever you add a book. Identical files are only indexed once.
+
+## 7. Updating
 
 ```bash
 git pull
@@ -82,5 +96,6 @@ docker compose build && docker compose up -d
 | Task | Command |
 |---|---|
 | Status / live-gate check | `docker compose run --rm collector status` |
+| Search the knowledge base | `docker compose run --rm collector kb search "stop-market vs stop-limit"` |
 | Stop everything | `docker compose down` |
 | Back up data | `cp data/aitrader.db ~/aitrader-$(date +%F).db` (or `sqlite3 data/aitrader.db ".backup ..."`) |

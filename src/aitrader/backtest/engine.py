@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
-from ..indicators import ema, rsi
+from ..indicators import ema, parabolic_sar, rsi
 from ..models import TIMEFRAME_MS
 from ..strategies.base import Signal, Strategy
 
@@ -57,6 +57,8 @@ def _trailing_exit(rule: str | None, df: pd.DataFrame):
         return df["close"] < ema(df["close"], n)
     if rule.startswith("rsi>"):
         return rsi(df["close"]) > float(rule[4:])
+    if rule == "close<psar":
+        return df["close"] < parabolic_sar(df)["sar"]
     return None
 
 

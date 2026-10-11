@@ -247,6 +247,33 @@ def cmd_calendar(_s: Settings, args) -> int:
     return 0
 
 
+def cmd_kb(_s: Settings, args) -> int:
+    from .knowledge import DEFAULT_INDEX, KnowledgeBase, build_index
+
+    if args.kb_cmd == "build":
+        res = build_index(args.paths or None, out=args.index, include_notes=not args.no_notes)
+        for d in res["documents"]:
+            print(f"indexed  {d['title'][:60]:60} {d['pages']:4} parts {d['chunks']:5} passages  ({d['path']})")
+        for dup, orig in res["duplicates"]:
+            print(f"skipped  {dup}: identical to {orig}")
+        for path, why in res["skipped"]:
+            print(f"skipped  {path}: {why}")
+        print(f"{res['chunks']} passages from {len(res['documents'])} documents -> {res['index']}")
+        return 0 if res["documents"] else 1
+    if not os.path.exists(args.index):
+        print(f"no index at {args.index}; run `aitrader kb build` first (default {DEFAULT_INDEX})")
+        return 1
+    kb = KnowledgeBase.load(args.index)
+    hits = kb.search(" ".join(args.query), k=args.k, source=args.source)
+    if not hits:
+        print("no matches")
+        return 1
+    for n, h in enumerate(hits, 1):
+        text = h.chunk.text if args.full else h.chunk.text[:400] + ("..." if len(h.chunk.text) > 400 else "")
+        print(f"[{n}] {h.cite()}  (score {h.score:.1f})\n    {text}\n")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="aitrader", description=__doc__)
     p.add_argument("--env-file", default=".env")
@@ -305,6 +332,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     ca = sub.add_parser("calendar", help="show upcoming high-impact events and the current decision")
     ca.add_argument("--hours", type=float, default=72)
+
+    kb = sub.add_parser("kb", help="knowledge base: index the books and notes, then search them")
+    kb_sub = kb.add_subparsers(dest="kb_cmd", required=True)
+    kbb = kb_sub.add_parser("build", help="index PDFs/notes (default: data/books plus docs/knowledge)")
+    kbb.add_argument("paths", nargs="*", help="files or folders to index")
+    kbb.add_argument("--no-notes", action="store_true", help="leave out docs/knowledge")
+    kbb.add_argument("--index", default="data/kb/index.json")
+    kbs = kb_sub.add_parser("search", help="find the passages that best match a question")
+    kbs.add_argument("query", nargs="+")
+    kbs.add_argument("-k", type=int, default=5, help="number of passages")
+    kbs.add_argument("--source", help="only search documents whose title contains this")
+    kbs.add_argument("--full", action="store_true", help="print whole passages")
+    kbs.add_argument("--index", default="data/kb/index.json")
     return p
 
 
@@ -326,6 +366,7 @@ def main(argv: list[str] | None = None) -> int:
         "strategies": cmd_strategies,
         "backtest": cmd_backtest,
         "calendar": cmd_calendar,
+        "kb": cmd_kb,
     }[args.cmd]
     result = handler(settings, args)
     if asyncio.iscoroutine(result):

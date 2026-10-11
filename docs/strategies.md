@@ -1,6 +1,8 @@
-# Ebook strategies as rules
+# Book strategies as rules
 
-Source: *Crypto Trading For Beginner Traders* (Finance Illustrated, 2021), 25 pages.
+Sources: *Crypto Trading For Beginner Traders* (Finance Illustrated, 2021), 25 pages, and the
+Binance Academy trading eBook (for `bollinger_squeeze` and the indicator rules). See
+[knowledge/rules-from-books.md](knowledge/rules-from-books.md) for every rule taken from the books.
 
 **Read this first.** The ebook is an introductory guide. It names four strategies (day trading,
 trend trading, hedging, HODL) and a few ideas (buy the rumor and sell the news, sell at peak
@@ -52,6 +54,29 @@ Run `aitrader strategies` to print the current rule cards straight from the code
 | Target | Exit when RSI(14) > 70 ("sell at peak happiness"), capped at 3R |
 | Filter | BTC/USDT and ETH/USDT only by default |
 | Size | 0.5% of equity at risk |
+
+## bollinger_squeeze (Binance Academy: Bollinger squeeze, volume, VWAP, Parabolic SAR)
+
+| Field | Rule |
+|---|---|
+| Setup | Bollinger(20, 2) band width in the lowest 20% of its last 120 bars, at some point in the last 5 bars |
+| Entry | Close above the upper band on volume >= 1.5 x its 20-bar average, with close above the 50-bar VWAP; market order at the next open |
+| Stop | Lower of the middle band and entry - 1 x ATR(14); stop-market exit |
+| Target | 2R fixed; the backtest also scores a Parabolic SAR trailing stop |
+| Filter | Skip if the breakout bar's range is > 3 ATR; long breakouts only in the pilot |
+| Size | 0.5% of equity at risk |
+
+The book calls the squeeze direction-neutral. Downside breakouts are ignored until shorting is
+allowed. `trend_pullback` and `buy_the_dip` also record StochRSI (overbought above 0.8, oversold
+below 0.2) as a feature for the Phase 4 filter rather than as a hard rule.
+
+## Liquidity check
+
+Before an order, `strategies.liquidity_check(book, order_usdt)` requires a spread of at most
+0.10% and at least 10x the order size resting within 0.5% of the mid price on each side, so the
+entry and a stop-market exit can both fill (Binance Academy on spread and slippage; Treasury on
+wash-traded volume, which is why the live book is checked instead of the reported volume). The
+Phase 5 order loop will call it; the values are starting points.
 
 ## Checking the signal log (Phase 2 exit criterion)
 

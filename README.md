@@ -19,7 +19,8 @@ API keys are read from environment variables (a `.env` file), never from the rep
 ## Roadmap progress
 
 - [x] **Phase 1: data and exchange adapters**: one `ExchangeAdapter` interface, Binance and HTX adapters (ccxt), `PaperExchange`, SQLite candle store, resumable downloader, websocket feed with reconnect and stale-price heartbeat, request throttling, data-quality checks
-- [~] **Phase 2: strategies and filters**: technical indicators, 3 ebook strategies as explicit rules ([docs/strategies.md](docs/strategies.md)), signal log, economic-calendar no-trade filter. Still to do: funding/open-interest context and crypto event feeds
+- [~] **Phase 2: strategies and filters**: technical indicators (incl. StochRSI, VWAP, Parabolic SAR, Ichimoku, Fibonacci), 4 book strategies as explicit rules ([docs/strategies.md](docs/strategies.md)), liquidity/spread check, signal log, economic-calendar no-trade filter. Still to do: funding/open-interest context and crypto event feeds
+- [x] **Knowledge base**: notes on blockchain, Bitcoin, money, the crypto ecosystem, risks and trading basics from the supplied books ([docs/knowledge](docs/knowledge/README.md)), plus `aitrader kb build` / `aitrader kb search` over your own copies of the PDFs
 - [x] **Phase 3: backtest lab**: next-open fills, fees, slippage, funding, stop-first ambiguity, R metrics, in/out/final splits, walk-forward, parameter sensitivity, results calendar ([docs/backtesting.md](docs/backtesting.md))
 - [ ] Phase 4: AI signal filter and model registry
 - [ ] Phase 5: paper/testnet loop, dashboard, Telegram alerts
