@@ -78,7 +78,7 @@ def test_save_anthropic_key_encrypted_and_masked(web):
     assert "Not saved" in r.text and not os.path.exists(paths.keys_store)
     r = client.post("/settings/keys/anthropic", data={"csrf": csrf, "ANTHROPIC_API_KEY": KEY})
     assert "checked and saved" in r.text
-    assert KEY not in r.text and "…xxxx" in r.text  # only the last 4 characters
+    assert KEY not in r.text and "•" * 12 + " xxxx" in r.text  # dots and the last 4 characters
     raw = open(paths.keys_store, "rb").read()
     assert KEY.encode() not in raw  # encrypted on disk
     assert oct(os.stat(paths.keys_store).st_mode & 0o777) == "0o600"
@@ -227,3 +227,31 @@ def test_keys_are_saved_when_the_check_cannot_run(web):
         "csrf": csrf, "BINANCE_API_KEY": "c" * 64, "BINANCE_API_SECRET": "d" * 64})
     assert "Not saved" in r.text  # a real-money key needs its permissions confirmed
     assert "BINANCE_API_KEY" not in secrets.SecretStore(SECRET, paths.keys_store).load()
+
+
+def test_saved_keys_show_as_dots_and_can_be_tested_again(web):
+    client, csrf, calls, paths, _ = web
+    client.post("/settings/keys/anthropic", data={"csrf": csrf, "ANTHROPIC_API_KEY": KEY})
+    page = client.get("/settings").text
+    assert KEY not in page and 'placeholder="••••••••••••' in page and "xxxx" in page
+    assert "Last check: Working" in page and "Test saved key" in page
+
+    # a bad replacement isn't saved and doesn't mark the saved key as broken
+    client.post("/settings/keys/anthropic", data={"csrf": csrf, "ANTHROPIC_API_KEY": "bad"})
+    assert "Last check: Working" in client.get("/settings").text
+
+    # test the saved key without typing it: it is checked with the stored value
+    calls.clear()
+    r = client.post("/settings/keys/anthropic/test", data={"csrf": csrf})
+    assert "Anthropic (Claude): working." in r.text and calls == [("anthropic", KEY)]
+    client.down["anthropic"] = KeyRejected("Anthropic says this key is invalid")
+    r = client.post("/settings/keys/anthropic/test", data={"csrf": csrf})
+    assert "not working: Anthropic says this key is invalid" in r.text
+    assert "Last check: Not working" in r.text
+    assert secrets.SecretStore(SECRET, paths.keys_store).load()["ANTHROPIC_API_KEY"] == KEY  # kept
+
+    r = client.post("/settings/keys/anthropic/test", data={"csrf": "x" * 32})
+    assert r.status_code == 403
+    client.post("/settings/keys/anthropic/delete", data={"csrf": csrf})
+    page = client.get("/settings").text
+    assert "Last check" not in page.split("Anthropic (Claude)</h3>")[1].split("</div>")[0]
