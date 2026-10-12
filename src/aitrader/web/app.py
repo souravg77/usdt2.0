@@ -52,6 +52,7 @@ class Paths:
     report: str = "data/reports/backtest.json"
     news: str = "data/news"
     pairs: str = "data/pairs/ranking.json"
+    changes: str = "data/changes"
 
 
 def create_app(settings: Settings, auth: Auth, jobs: JobRunner, paths: Paths | None = None,
@@ -148,6 +149,7 @@ def create_app(settings: Settings, auth: Auth, jobs: JobRunner, paths: Paths | N
                         samesite="strict", secure=secure_cookie)
         return resp
 
+    from .change_pages import add_change_routes
     from .market_pages import add_market_routes
     from .news_pages import add_news_routes
     from .pair_pages import add_pair_routes
@@ -161,6 +163,7 @@ def create_app(settings: Settings, auth: Auth, jobs: JobRunner, paths: Paths | N
                       report_path=paths.report)
     add_news_routes(app, settings=settings, auth=auth, jobs=jobs, page=page, guard=guard, news_dir=paths.news)
     add_research_routes(app, auth=auth, jobs=jobs, page=page, guard=guard, news_dir=paths.news)
+    add_change_routes(app, auth=auth, jobs=jobs, page=page, guard=guard, changes_dir=paths.changes)
     add_pair_routes(app, settings=settings, auth=auth, jobs=jobs, page=page, guard=guard, ranking_path=paths.pairs,
                     paper_state=paths.paper_state, report_path=paths.report)
     add_replay_routes(app, settings=settings, auth=auth, jobs=jobs, page=page, guard=guard,
@@ -421,7 +424,8 @@ paper trading. Nothing trades real money.</p>
 
 
 NAV = [("/", "Overview"), ("/markets", "Markets"), ("/pairs", "Pairs"), ("/trading", "Trading"), ("/replay", "Replay"),
-       ("/news", "News"), ("/research", "Research"), ("/reports", "Reports"), ("/books", "Submit a book"), ("/admin/users", "Users"), ("/settings", "Settings")]
+       ("/news", "News"), ("/research", "Research"), ("/reports", "Reports"), ("/books", "Submit a book"), ("/changes", "Change requests"), ("/admin/users", "Users"),
+       ("/settings", "Settings")]
 
 
 def max_val(v) -> int:

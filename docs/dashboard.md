@@ -27,6 +27,10 @@ order it can cause is the kill switch selling what the executors bought.
   "Check the gate now" button. The page refreshes every minute. See
   [live-trading.md](live-trading.md).
 
+- **Change requests.** Describe a change in plain words; Claude reads the code on GitHub, writes
+  the change and opens a pull request. Nothing changes on the server until you merge it and run the
+  installer. Needs an Anthropic key and a GitHub token on Settings. See
+  [change-requests.md](change-requests.md).
 - **Research.** The trader-research log: public reports from traders and researchers (Reddit,
   TradingView, blogs, exchange and quant research, papers) about the strategy families the
   platform runs. Each finding has its URL, source, the date found, the source's date when known,
