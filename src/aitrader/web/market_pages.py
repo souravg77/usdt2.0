@@ -30,7 +30,7 @@ STATIC = os.path.join(os.path.dirname(__file__), "static")
 
 
 def add_market_routes(app, *, settings, page, guard, exchange: str = EXCHANGE, clock=None,
-                      live: LiveMarket | None = None, paper_state: str = "") -> None:
+                      live: LiveMarket | None = None, paper_state: str = "", registry: str = "") -> None:
     live = live or LiveMarket(settings.db_path, exchange)
     memo: dict[tuple, tuple[tuple, dict]] = {}  # (symbol, tf) -> (candle fingerprint, studies)
     symbols = list(settings.symbols)
@@ -99,6 +99,7 @@ def add_market_routes(app, *, settings, page, guard, exchange: str = EXCHANGE, c
                 db.close()
         except Exception:
             pass  # the live script fills the page from Bybit anyway
+        used = _strategy_indicators(registry)
         tabs = "".join(f'<button type="button" class="seg{" active" if t == tf else ""}" data-tf="{t}">{t}</button>'
                        for t in tfs)
         body = (
@@ -106,7 +107,8 @@ def add_market_routes(app, *, settings, page, guard, exchange: str = EXCHANGE, c
             f'<div id="tickers" class="tickers">{_ticker_buttons(rows, symbol)}</div>'
             f'<div class="card chart-card"><div class="chart-head"><h2 id="chart-title">{_e(symbol)}</h2>'
             f'<div class="segs js-only">{tabs}</div></div>'
-            f'<div id="studies" class="studies js-only" aria-label="indicators">{_study_chips()}</div>'
+            f'<div id="studies" class="studies js-only" aria-label="indicators">{_study_chips(used)}</div>'
+            f'{_used_line(used)}'
             f'<div id="ohlc" class="ohlc small"></div>'
             f'<div id="legend" class="legend js-only"></div>'
             f'<canvas id="chart" class="js-only" aria-label="live price chart"></canvas>'
@@ -140,10 +142,41 @@ STUDIES = [
 ]
 
 
-def _study_chips() -> str:
-    return "".join(f'<button type="button" class="chip" data-study="{k}" data-on="{int(on)}" '
-                   f'aria-pressed="{str(on).lower()}"><i style="background:{c}"></i>{_e(label)}</button>'
+# always shown, whatever the strategies use
+ALWAYS_ON = {"trades", "vol"}
+
+
+def _strategy_indicators(registry_path: str) -> dict[str, int]:
+    """How many paper-trading strategies use each chart indicator ({} when none can be read)."""
+    if not registry_path:
+        return {}
+    try:
+        from ..learn import Registry
+        from ..learn.keep import indicators_used
+
+        return indicators_used(Registry(registry_path))
+    except Exception:
+        return {}
+
+
+def _study_chips(used: dict[str, int] | None = None) -> str:
+    """The indicator switches. With strategies paper trading, the ones they use start on."""
+    def default(k: str, on: bool) -> bool:
+        return k in used or k in ALWAYS_ON if used else on
+
+    return "".join(f'<button type="button" class="chip" data-study="{k}" data-on="{int(default(k, on))}" '
+                   f'aria-pressed="{str(default(k, on)).lower()}"><i style="background:{c}"></i>{_e(label)}'
+                   f'{f" <small>{used[k]}</small>" if used and k in used else ""}</button>'
                    for k, label, c, _panel, on in STUDIES)
+
+
+def _used_line(used: dict[str, int]) -> str:
+    if not used:
+        return ""
+    labels = {k: label for k, label, *_ in STUDIES}
+    names = ", ".join(f"{_e(labels[k])} ({n})" for k, n in used.items() if k in labels)
+    return (f'<p class="small muted js-only">Indicators your paper-trading strategies use (how many use each): '
+            f'{names}. <button type="button" id="studies-reset" class="linkish">Show just these</button></p>')
 
 
 def _ticker(db: CandleStore, exchange: str, symbol: str, now: int) -> dict:

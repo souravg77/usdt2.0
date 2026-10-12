@@ -163,7 +163,8 @@ def create_app(settings: Settings, auth: Auth, jobs: JobRunner, paths: Paths | N
     from .report_pages import add_report_routes
     from .settings_pages import add_settings_routes
 
-    add_market_routes(app, settings=settings, page=page, guard=guard, live=live, paper_state=paths.paper_state)
+    add_market_routes(app, settings=settings, page=page, guard=guard, live=live, paper_state=paths.paper_state,
+                      registry=paths.registry)
     add_report_routes(app, settings=settings, auth=auth, jobs=jobs, page=page, guard=guard,
                       report_path=paths.report)
     add_news_routes(app, settings=settings, auth=auth, jobs=jobs, page=page, guard=guard, news_dir=paths.news)
@@ -401,11 +402,31 @@ paper trading. Nothing trades real money.</p>
                         [["learn", "add-library"], ["learn", "add-builtin"], ["learn", "add-shorts"],
                          ["learn", "paper-all"],
                          ["download", "--since", since, "--exchange", EXCHANGE],
-                         ["learn", "test", "--paper"]], meta={"kind": "paper-start"})
+                         ["learn", "test", "--paper"], ["learn", "keep-top"]], meta={"kind": "paper-start"})
             _event("paper_on", f"paper trading turned on from the dashboard by {user}")
             return ("Paper trading is on: every strategy is being loaded into paper trading, then a year of "
-                    "price history is downloaded and each one is backtested. Trades open when a strategy's "
-                    "signal appears on a closed candle.")
+                    "price history is downloaded, each one is backtested and only the best ones keep paper "
+                    "trading. Trades open when a strategy's signal appears on a closed candle.")
+        return _control_post(request, csrf, act)
+
+    @app.post("/trading/paper/keep")
+    def trading_paper_keep(request: Request, csrf: str = Form(""), n: str = Form("")):
+        def act(user):
+            from ..learn.keep import DEFAULT_N, MAX_N, MIN_N, clamp
+
+            try:
+                count = clamp(int(n or DEFAULT_N))
+            except ValueError:
+                return f"Not changed: enter a number from {MIN_N} to {MAX_N}."
+            busy = {j.get("meta", {}).get("kind") for j in jobs.list() if j["status"] in ("queued", "running")}
+            if busy & {"paper-start", "keep-top"}:
+                return "Strategies are already being loaded or ranked; see Recent jobs on the Overview page."
+            jobs.submit(f"Keep only the best {count} strategies paper trading",
+                        [["learn", "keep-top", "--n", str(count)]], meta={"kind": "keep-top"})
+            _event("keep_top", f"keep only the best {count} strategies, from the dashboard by {user}")
+            return (f"Ranking the strategies: the best {count} keep paper trading, the rest stop opening "
+                    "trades (their open trades still close normally). The Markets chart now starts with "
+                    "the indicators they use.")
         return _control_post(request, csrf, act)
 
     @app.post("/trading/ai/train")
@@ -867,16 +888,27 @@ def _paper_switch_card(c: dict, paths: Paths, events: list[dict], jobs: list[dic
     else:
         state, cls, why = "ON", "good", f"{in_paper} strategies trading with fake money"
     on = "Turn paper trading on" if state != "ON" else "Reload every strategy"
+    from ..learn.keep import MAX_N, MIN_N, saved_n
+
+    keep_n = saved_n(paths.registry)
     return (f'<div class="card"><h3>Paper trading (fake money)</h3><p>Paper trading <b class="{cls}">{state}</b>: {why}</p>'
             '<p class="small muted">On puts every strategy into paper trading, the untested and the '
             'backtest-rejected ones too, and downloads a year of history for all pairs. Each one then trades '
             'live prices with fake money; one that loses too much retires by itself. Each one is then backtested '
-            'too: only strategies that pass both the backtest and paper trading can ever be approved for live. '
+            'too, and only the best keep paper trading: only strategies that pass both the backtest and paper '
+            'trading can ever be approved for live. '
             'Off pauses new entries '
             '(pause and resume apply to the live trader too).</p><div class="row">'
             f'<form method="post" action="/trading/paper/on">{csrf}<button>{on}</button></form>'
             f'<form method="post" action="/trading/paper/off">{csrf}<button class="ghost">Turn paper trading off</button></form>'
-            '</div></div>')
+            '</div><p class="small muted">Keep only the best: strategies are ranked by their backtest and paper '
+            'results (ones that passed the backtest first, then result per trade, with few trades counting '
+            'for less). The best stay in paper trading and the rest stop opening trades; every reload ranks '
+            'them again, so one can come back.</p>'
+            f'<form method="post" action="/trading/paper/keep" class="row">{csrf}'
+            f'<label class="small">Keep the best <input type="number" name="n" min="{MIN_N}" max="{MAX_N}" '
+            f'value="{keep_n}" style="width:4.5em"> strategies</label><button class="ghost">Keep only the best</button></form>'
+            '</div>')
 
 
 def _live_card(settings, paths: Paths, events: list[dict]) -> str:
@@ -1067,6 +1099,7 @@ padding:10px 12px;border-radius:var(--radius);font-weight:400;transition:border-
 padding:4px 10px;border-radius:999px;font-weight:600;font-size:.8em}
 .chip:hover{border-color:var(--accent)}.chip[aria-pressed=true]{color:var(--fg);border-color:var(--accent);background:var(--card2)}
 .chip i{width:10px;height:3px;border-radius:2px;display:inline-block}
+.chip small{color:var(--muted);font-size:11px}.linkish{background:none;border:0;padding:0;color:var(--accent);cursor:pointer;font:inherit;text-decoration:underline}
 .legend{display:flex;flex-wrap:wrap;gap:2px 12px;font-size:.8em;min-height:1.3em}.legend b{font-weight:600}
 details.health summary{cursor:pointer;font-weight:600}details.health table{margin-top:12px}
 @media (max-width:640px){header{padding:8px 12px}main{padding:14px 12px}nav{margin-left:0;width:100%}

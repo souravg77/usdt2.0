@@ -30,6 +30,13 @@ book (PDF) ──read──> draft strategies ──backtest gate──> paper t
    `learn paper-all`) also paper-trades the ones that failed, but only strategies that passed
    this gate can be approved for live, and each one needs its own paper record (at least 30
    trades, above 0R) on top of the combined go/no-go numbers.
+   After that, only the best 10 to 20 keep paper trading (`learn keep-top --n 15`, or "Keep only
+   the best" on the Trading page; the number is remembered). They are ranked with the ones that
+   passed the backtest first, then by result per trade out of sample plus paper, shrunk toward 0
+   when there are few trades (30 trades of 0R are mixed in). The rest stop opening trades (open
+   ones still close) and are retired with the reason "not in the best N"; each ranking looks at
+   them again, so one can come back. The Markets chart starts with the indicators the kept
+   strategies use.
 4. **Paper trade.** The `paper` service (`aitrader learn paper`) trades every strategy that
    passed, on paper, using the closed candles the collector stores. It uses the same fill rules
    as the backtest (next open plus slippage, stop first, fees), sizes each trade at the
