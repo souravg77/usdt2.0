@@ -11,7 +11,8 @@
 #   3. downloads the code into ~/AI_crypto_trader
 #   4. creates .env with strong random secrets (the dashboard password is printed once)
 #   5. builds the image, prepares the database, starts collector, context, paper, web and caddy
-#   6. schedules a daily backup (cron, 03:30) and makes the first one, and a daily pair ranking (02:45)
+#   6. schedules a daily backup (cron, 03:30) and makes the first one, a daily pair ranking (02:45)
+#      and a weekly backtest-teacher lesson (Sunday 04:15; never turned on by itself)
 #   7. runs `aitrader doctor`
 # Live trading stays locked. Running it again is safe: existing settings are kept.
 set -euo pipefail
@@ -169,6 +170,10 @@ sudo systemctl enable --now cron >/dev/null 2>&1 || true
 # pairs trade only if you set AITRADER_PAIRS=ranked in .env.
 RANK_LINE="45 2 * * * cd '$DIR' && $DOCKER compose run --rm -T collector pairs rank >> data/pairs.log 2>&1"
 ( crontab -l 2>/dev/null | grep -v 'pairs rank' || true; echo "$RANK_LINE" ) | crontab -
+# Weekly backtest teacher, Sunday 04:15: fresh lessons from the backtests (Teacher page). They are
+# only a candidate: paper trading follows them only after you press Turn on.
+TEACH_LINE="15 4 * * 0 cd '$DIR' && $DOCKER compose run --rm -T collector learn teach >> data/teacher.log 2>&1"
+( crontab -l 2>/dev/null | grep -v 'learn teach' || true; echo "$TEACH_LINE" ) | crontab -
 DOCKER="$DOCKER" ./deploy/backup.sh || echo "warning: the first backup failed; run ./deploy/backup.sh to see why" >&2
 
 say "Health check"
