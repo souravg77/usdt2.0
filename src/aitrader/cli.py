@@ -114,7 +114,13 @@ async def cmd_stream(s: Settings, args) -> int:
     def on_tick(ex, sym, px, ts):
         print(f"{_fmt(ts)} {ex} {sym} {px}")
 
-    feed = LiveFeed(args.exchange, args.symbol or s.symbols, on_tick)
+    if args.bybit:  # Bybit V5 public spot WebSocket: best bid / ask and last price
+        from .data.bybit_ws import BybitSpotStream
+
+        feed = BybitSpotStream(args.symbol or s.symbols, on_update=lambda q: print(
+            f"{_fmt(q.ts)} bybit {q.symbol} bid {q.bid} ask {q.ask} last {q.last}", flush=True))
+    else:
+        feed = LiveFeed(args.exchange, args.symbol or s.symbols, on_tick)
     task = asyncio.create_task(feed.run())
     try:
         await asyncio.wait_for(task, timeout=args.seconds) if args.seconds else await task
@@ -336,6 +342,33 @@ def cmd_news(s: Settings, args) -> int:
         d = NewsFilter().decide(sym)
         print(f"{sym}: new buys {'allowed' if d.allow_entries else 'PAUSED'}, size x{d.size_multiplier:g}")
     return 0
+
+
+def cmd_research(s: Settings, args) -> int:
+    """Trader-research log (aitrader.news.research). Research input only: never changes trading."""
+    import time
+
+    from .news import research
+    from .ops import EventLog
+    from .ops.secrets import apply_to_env
+
+    if args.research_cmd == "show":
+        rows = [f for f in research.load() if not args.family or f["family"] in args.family]
+        for f in rows[:args.limit]:
+            print(f"{f['date_found']} [{f['family']}] ({f['evidence']}) {f['claim']}\n    {f['url']}"
+                  f"\n    {f['credibility']}")
+        print(f"{len(rows)} findings (research only: they never change trading, risk or strategy status)")
+        return 0
+    events = EventLog(service="research")
+    hours = args.every_hours or float(os.environ.get("AITRADER_RESEARCH_EVERY_HOURS", "168") or 168)
+    while True:
+        apply_to_env()  # a key saved on the Settings page is used from the next run on
+        out = research.update(families=args.family, max_searches=args.max_searches, events=events)
+        print(f"research: {len(out['added'])} new of {out['found']} findings, {out['searches']} web searches"
+              + (f" ({out['error']})" if out["error"] else ""), flush=True)
+        if args.research_cmd == "update":
+            return 1 if out["error"] else 0
+        time.sleep(max(1.0, hours) * 3600)
 
 
 def cmd_kb(_s: Settings, args) -> int:
@@ -1067,6 +1100,7 @@ def build_parser() -> argparse.ArgumentParser:
     st.add_argument("--exchange", default="binance", choices=EXCHANGES)
     st.add_argument("--symbol", action="append")
     st.add_argument("--seconds", type=float, default=0, help="stop after N seconds (0 = forever)")
+    st.add_argument("--bybit", action="store_true", help="Bybit V5 public spot WebSocket (bid/ask/last)")
 
     ps = sub.add_parser("paper-smoke", help="open and close a test position on the paper exchange")
     ps.add_argument("--exchange", default="binance", choices=EXCHANGES)
@@ -1102,6 +1136,15 @@ def build_parser() -> argparse.ArgumentParser:
     nw.add_argument("--every-hours", type=float, default=None,
                     help="for run: hours between briefs (default AITRADER_NEWS_EVERY_HOURS or 4)")
     nw.add_argument("--max-searches", type=int, default=None, help="web searches per brief (default 6)")
+
+    rs = sub.add_parser("research", help="trader-research log: public reports on our strategy families "
+                                         "(research only, never changes trading)")
+    rs.add_argument("research_cmd", choices=["update", "run", "show"])
+    rs.add_argument("--family", action="append", help="limit to a strategy family (repeatable)")
+    rs.add_argument("--every-hours", type=float, default=None,
+                    help="for run: hours between searches (default AITRADER_RESEARCH_EVERY_HOURS or 168)")
+    rs.add_argument("--max-searches", type=int, default=None, help="web searches per run (default 8)")
+    rs.add_argument("--limit", type=int, default=50, help="for show: findings to print")
 
     ca = sub.add_parser("calendar", help="show upcoming high-impact events and the current decision")
     ca.add_argument("--hours", type=float, default=72)
@@ -1295,6 +1338,7 @@ def main(argv: list[str] | None = None) -> int:
         "calendar": cmd_calendar,
         "context": cmd_context,
         "news": cmd_news,
+        "research": cmd_research,
         "kb": cmd_kb,
         "learn": cmd_learn,
         "ai": cmd_ai,

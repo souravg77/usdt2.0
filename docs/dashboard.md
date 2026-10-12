@@ -27,6 +27,20 @@ order it can cause is the kill switch selling what the executors bought.
   "Check the gate now" button. The page refreshes every minute. See
   [live-trading.md](live-trading.md).
 
+- **Research.** The trader-research log: public reports from traders and researchers (Reddit,
+  TradingView, blogs, exchange and quant research, papers) about the strategy families the
+  platform runs. Each finding has its URL, source, the date found, the source's date when known,
+  the family, the claim in one sentence, the evidence type (anecdote, backtest shown, live record
+  shown, peer-reviewed, other) and a credibility note; filter by family and evidence type.
+  "Search the web now" runs `aitrader research update` (Claude with web search; needs
+  `ANTHROPIC_API_KEY`). The optional `research` service (`docker compose --profile research up -d
+  research`) searches every `AITRADER_RESEARCH_EVERY_HOURS` (default 168). Findings are kept in
+  `data/news/research.jsonl`, one per URL. **They are research inputs only:** nothing that trades
+  reads them, so they never change trading, risk limits or a strategy's status. Votes,
+  testimonials and win-rate screenshots are not evidence of profit; an idea from here still has
+  to be written as a strategy and pass the backtest, out-of-sample and paper gates. Everything on
+  the page comes from web pages, so it is escaped and only http(s) links are shown.
+
 - **Users** (admin) and **My account** (users): sign-up, approval, each user's exchange keys,
   positions, trades and kill switch. See [user-accounts.md](user-accounts.md).
 

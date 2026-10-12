@@ -74,6 +74,8 @@ aitrader calendar
 aitrader backtest --strategy trend_pullback --symbol BTC/USDT --timeframe 1h
 aitrader ai retrain && aitrader ai list
 aitrader stream --exchange binance --symbol BTC/USDT --seconds 20
+aitrader stream --bybit --symbol BTC/USDT --seconds 20   # Bybit V5 spot WebSocket: bid/ask/last
+aitrader research update && aitrader research show       # trader-research log (research only)
 ```
 
 ## Deploying on an Ubuntu server
