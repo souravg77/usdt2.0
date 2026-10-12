@@ -37,6 +37,20 @@ def test_risk_sizing_and_caps():
     assert not tiny.ok and "minimum" in tiny.reasons[-1]
 
 
+def test_risk_sizes_a_short_from_the_stop_and_leverage_only_saves_margin():
+    eng = RiskEngine(RiskLimits(risk_per_trade=0.005, max_coin_exposure_pct=0.25))
+    s = eng.size("BTC/USDT", 10_000, 10_000, entry=100, stop=110, signal_risk=0.01, size_mult=1.0,
+                 open_positions=[], short=True, leverage=3)
+    assert s.ok and s.units == pytest.approx(5) and s.risk_usdt == pytest.approx(50)
+    assert not eng.size("BTC/USDT", 10_000, 10_000, 100, 95, 0.01, 1, [], short=True).ok  # stop below
+    # free cash 300 holds 300 USDT of spot but 900 USDT of a 3x short (exposure caps stay on notional)
+    spot = eng.size("BTC/USDT", 10_000, 300, 100, 99, 0.01, 1, [])
+    perp = eng.size("BTC/USDT", 10_000, 300, 100, 101, 0.01, 1, [], short=True, leverage=3)
+    assert perp.notional == pytest.approx(spot.notional * 3)
+    assert eng.size("BTC/USDT", 10_000, 10_000, 100, 101, 0.01, 1, [], short=True, leverage=3).notional \
+        == pytest.approx(2500)  # coin cap, same as a long
+
+
 def test_risk_defaults_follow_the_agreed_guardrails():
     lim = RiskLimits()
     assert lim.risk_per_trade == 0.0025 and lim.daily_loss_pct == 0.01
@@ -275,9 +289,9 @@ def test_executor_never_buys_for_a_short_signal(ex):
     short["signal"].update(side="sell", target=90.0)
     _paper(paper, {KEY: short})
     e = make()
-    out = run(e.tick())
+    out = run(e.tick())  # this adapter has no futures: skipped, never bought on spot
     assert out["skipped"] == [KEY] and not adapter.sent
-    assert "futures orders" in next(iter(e.state["skipped"].values()))
+    assert "can't trade futures" in next(iter(e.state["skipped"].values()))
 
 
 def test_executor_kill_switch_flattens(ex, tmp_path):
@@ -812,3 +826,217 @@ def test_streamed_price_triggers_the_stop_and_quiet_stream_blocks_entries(ex):
     assert e._stop_hit()
     out = run(e.tick())
     assert out["closed"] == [KEY]
+
+
+# ---- perpetual shorts ---------------------------------------------------------------------------
+
+
+class PerpAdapter(StopAdapter):
+    """StopAdapter plus Bybit USDT perpetuals: one-way shorts, reduce-only buys back."""
+
+    supports_perps = True
+
+    def __init__(self, margin_mode="ISOLATED_MARGIN", **kw):
+        super().__init__(**kw)
+        self.short: dict[str, float] = {}
+        self.margin_mode, self.prepared = margin_mode, []
+
+    async def prepare_perp(self, symbol, leverage):
+        from aitrader.exchanges import PerpNotReady
+
+        if self.margin_mode != "ISOLATED_MARGIN":
+            raise PerpNotReady("switch the Bybit account to Isolated Margin")
+        self.prepared.append((symbol, leverage))
+
+    async def perp_position(self, symbol):
+        return self.short.get(symbol, 0.0)
+
+    async def place_order(self, symbol, side, amount, type=OrderType.MARKET, price=None, reason="",
+                          client_id=None, reduce_only=False):
+        if ":" not in symbol:
+            return await super().place_order(symbol, side, amount, type, price, reason, client_id)
+        if client_id in self.orders:
+            return self.orders[client_id]
+        px = self.ask if side is Side.BUY else self.bid
+        held = self.short.get(symbol, 0.0)
+        if side is Side.BUY:
+            assert reduce_only and amount <= held + 1e-12, "a buy on the perp only ever closes the short"
+        o = Order(client_id, "bybit", symbol, side, type, amount, None, OrderStatus.FILLED, filled=amount,
+                  average=px, fee=amount * px * 0.00055, fee_currency="USDT")
+        self.short[symbol] = held + (amount if side is Side.SELL else -amount)
+        self.cash["USDT"] -= o.fee
+        self.orders[client_id] = o
+        self.sent.append(o)
+        return o
+
+    async def place_stop(self, symbol, amount, trigger_price, client_id, reason="", side=Side.SELL):
+        o = await super().place_stop(symbol, amount, trigger_price, client_id, reason)
+        o.side = side
+        return o
+
+    def rise(self, ask):
+        """The price climbs through a short's stop: Bybit buys it back."""
+        self.ask = ask
+        for o in self.stops.values():
+            if o.status is OrderStatus.OPEN and o.side is Side.BUY and ask >= o.price:
+                o.status, o.filled, o.average = OrderStatus.FILLED, o.amount, ask
+                o.fee, o.fee_currency = o.amount * ask * 0.00055, "USDT"
+                self.short[o.symbol] -= o.amount
+
+
+PERP = "BTC/USDT:USDT"
+
+
+@pytest.fixture
+def px(ex, monkeypatch):
+    make, _adapter, paper, events = ex
+    monkeypatch.setenv("AITRADER_LEVERAGE", "2")
+    short = _pos(SIG, stop=105.0)
+    short["signal"].update(side="sell", target=90.0)
+    _paper(paper, {KEY: short})
+    adapter = PerpAdapter()
+
+    def make2(**kw):
+        e = make(**kw)
+        e.adapter = adapter
+        return e
+
+    return make2, adapter, paper, events
+
+
+def test_a_short_signal_sells_the_perpetual_with_a_resting_buy_stop(px):
+    make, adapter, paper, events = px
+    e = make()
+    out = run(e.tick())
+    assert out["opened"] == [KEY] and adapter.prepared == [(PERP, 2.0)]
+    p = e.state["positions"][KEY]
+    assert p["side"] == "short" and p["market"] == PERP and p["leverage"] == 2.0 and p["entry"] == 100.0
+    assert adapter.sent[0].symbol == PERP and adapter.sent[0].side is Side.SELL
+    assert "BTC" not in adapter.cash  # nothing bought or sold on spot
+    cid = p["stop_cid"]
+    stop = adapter.stops[cid]
+    assert stop.symbol == PERP and stop.side is Side.BUY and stop.price == 105.0
+    assert p["risk_usdt"] == pytest.approx(p["amount"] * 5.0)
+    assert any("SELL SHORT" in x["text"] and "2x isolated" in x["text"] for x in events.read())
+    # the paper twin closes in profit: the stop is cancelled, then the short is bought back
+    _paper(paper, {}, [{"key": KEY, "signal_ts": SIG, "entry": 100.0, "exit": 95.0, "r": 1.0}])
+    adapter.ask = 95.0
+    out = run(e.tick())
+    assert out["closed"] == [KEY] and adapter.cancels == [cid] and adapter.short[PERP] == 0
+    row = e.state["closed"][0]
+    assert row["side"] == "sell" and row["pnl_usdt"] > 0 and row["r"] > 0
+    assert row["pnl_usdt"] == pytest.approx(5.0 * p["amount"] - p["amount"] * (100 + 95) * 0.00055)
+
+
+def test_a_short_exits_when_the_price_rises_to_its_stop(px):
+    make, adapter, *_ = px
+    e = make()
+    run(e.tick())
+    adapter.ask = 106.0  # the executor sees it before Bybit's stop does
+    out = run(e.tick())
+    assert out["closed"] == [KEY] and e.state["closed"][0]["r"] < 0 and adapter.short[PERP] == 0
+
+
+def test_a_short_stop_that_fired_on_bybit_is_booked_once(px):
+    make, adapter, *_ = px
+    e = make()
+    run(e.tick())
+    adapter.rise(106.0)
+    out = run(e.tick())
+    assert out["closed"] == [KEY] and e.state["closed"][0]["exit_reason"] == "stop on bybit"
+    assert len([o for o in adapter.sent if o.side is Side.BUY]) == 0  # Bybit bought; nothing doubled
+
+
+def test_kill_switch_buys_back_shorts(px):
+    make, adapter, *_ = px
+    e = make()
+    run(e.tick())
+    e.control.kill(by="test")
+    out = run(e.tick())
+    assert out["closed"] == [KEY] and e.state["flattened"] and adapter.short[PERP] == 0
+
+
+def test_no_short_without_isolated_margin_or_near_liquidation(px, monkeypatch):
+    make, adapter, paper, _events = px
+    adapter.margin_mode = "REGULAR_MARGIN"
+    e = make()
+    out = run(e.tick())
+    assert out["skipped"] == [KEY] and not adapter.sent
+    assert "Isolated Margin" in next(iter(e.state["skipped"].values()))
+    # at 3x the liquidation price is ~32.8% up; a stop 20% up uses more than half of that room
+    monkeypatch.setenv("AITRADER_LEVERAGE", "3")
+    far = _pos(SIG, stop=120.0)
+    far["signal"].update(side="sell", target=90.0)
+    _paper(paper, {KEY: far})
+    adapter.margin_mode = "ISOLATED_MARGIN"
+    e2 = make()
+    e2.state["skipped"] = {}
+    out = run(e2.tick())
+    assert out["skipped"] == [KEY] and "liquidation" in next(iter(e2.state["skipped"].values()))
+
+
+def test_leverage_is_never_above_three():
+    from aitrader.trade import futures
+
+    assert futures.leverage({"AITRADER_LEVERAGE": "10"}) == 3.0
+    assert futures.leverage({"AITRADER_LEVERAGE": "junk"}) == 1.0
+    assert futures.leverage({}) == 1.0
+
+
+def test_bybit_adapter_perp_orders_stops_and_margin_check():
+    from aitrader.config import LIVE_CONFIRM_PHRASE, Mode, Settings
+    from aitrader.exchanges import BybitAdapter, PerpNotReady
+
+    class Client:
+        markets = {PERP: {}}
+
+        def __init__(self):
+            self.calls, self.leverage, self.mode = [], [], "REGULAR_MARGIN"
+
+        def amount_to_precision(self, symbol, amount):
+            return f"{amount:.3f}"
+
+        def price_to_precision(self, symbol, price):
+            return f"{price:.1f}"
+
+        async def create_order(self, *args):
+            self.calls.append(args)
+            return {"id": "1", "symbol": args[0], "side": args[2], "type": args[1], "amount": args[3],
+                    "status": "closed", "filled": args[3], "average": 100.0, "timestamp": 1}
+
+        async def private_get_v5_account_info(self):
+            return {"result": {"marginMode": self.mode}}
+
+        async def set_leverage(self, lev, symbol):
+            self.leverage.append((lev, symbol))
+
+        async def fetch_positions(self, symbols):
+            return [{"symbol": PERP, "side": "short", "contracts": 0.5},
+                    {"symbol": "ETH/USDT:USDT", "side": "short", "contracts": 9}]
+
+    client = Client()
+    ad = BybitAdapter(Settings(mode=Mode.LIVE, live_unlocked=True, live_confirm=LIVE_CONFIRM_PHRASE), client=client)
+    with pytest.raises(PerpNotReady, match="Isolated Margin"):
+        run(ad.prepare_perp(PERP, 2.0))
+    assert client.leverage == []  # the agent never changes the account's margin mode itself
+    client.mode = "ISOLATED_MARGIN"
+    run(ad.prepare_perp(PERP, 2.0))
+    run(ad.prepare_perp(PERP, 2.0))
+    assert client.leverage == [(2, PERP)]  # set once
+    run(ad.place_order(PERP, Side.SELL, 0.5, client_id="ait1"))
+    assert client.calls[-1][2] == "sell" and client.calls[-1][5] == {"positionIdx": 0, "orderLinkId": "ait1"}
+    run(ad.place_order(PERP, Side.BUY, 0.5, client_id="ait2", reduce_only=True))
+    assert client.calls[-1][5] == {"positionIdx": 0, "reduceOnly": True, "orderLinkId": "ait2"}
+    client.calls.append(("x",))
+    run(ad.place_stop(PERP, 0.5, 105.04, "ait3", side=Side.BUY))
+    args = client.calls[-1]
+    assert args[2] == "buy" and args[5] == {"positionIdx": 0, "reduceOnly": True, "triggerPrice": 105.0,
+                                             "triggerDirection": "ascending", "orderLinkId": "ait3"}
+    with pytest.raises(ValueError):  # a spot stop never buys
+        run(ad.place_stop("BTC/USDT", 0.5, 105.0, "ait4", side=Side.BUY))
+    assert run(ad.perp_position(PERP)) == 0.5
+    locked = BybitAdapter(Settings(), client=Client())  # live lock closed: no futures either
+    with pytest.raises(Exception):
+        run(locked.prepare_perp(PERP, 1.0))
+    with pytest.raises(Exception):
+        run(locked.place_order(PERP, Side.SELL, 1, client_id="x"))
