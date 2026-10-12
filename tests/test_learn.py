@@ -252,6 +252,65 @@ def test_paper_trading_matches_backtest(tmp_path):
     assert json.load(open(tmp_path / "state.json"))["trades"]
 
 
+def test_short_twin_paper_trades_like_its_backtest(tmp_path, monkeypatch):
+    from aitrader.learn.registry import make_strategy, short_twin
+    from aitrader.trade import futures
+
+    df = synthetic(n=900)
+    store = CandleStore(str(tmp_path / "c.db"))
+    fill_store(store, df)
+    reg_path = str(tmp_path / "reg.json")
+    reg = Registry(reg_path)
+    long = Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR))
+    twin = short_twin(long)
+    twin.status = "paper"
+    reg.add(twin)
+    reg.save()
+    assert twin.id == "short-up" and Registry(reg_path).get("short-up").kind == "short"
+    monkeypatch.setenv("AITRADER_LEVERAGE", "2")
+    cfg = PaperConfig(retire=__import__("aitrader.learn", fromlist=["RetireRule"]).RetireRule(
+        min_trades=10_000, max_drawdown=1e9))
+    trader = PaperTrader(store, reg_path, ["bybit"], ["BTC/USDT"], cfg, state_path=str(tmp_path / "state.json"))
+    start = 600
+    for i in range(start, len(df)):
+        trader.tick(now_ms=int(df.ts.iloc[i]) + H)
+    paper = [(t["entry_ts"], t["exit_ts"], round(t["r"], 9)) for t in trader.state["trades"]]
+    assert len(paper) >= 5 and all(t["side"] == "sell" for t in trader.state["trades"])
+    first_signal_close = int(df.ts.iloc[start]) + H
+    bt = [t for t in run_backtest(make_strategy(twin), df, "bybit", "BTC/USDT", "1h", BacktestConfig())
+          if t.signal_ts >= first_signal_close and t.exit_ts < int(df.ts.iloc[-1])
+          and futures.short_stop_ok(t.entry, t.stop, 2.0)]
+    assert paper[:len(bt)] == [(t.entry_ts, t.exit_ts, round(t.r, 9)) for t in bt]
+    for t in trader.state["trades"]:  # a short's P&L has the right sign: price down = profit
+        assert (t["pnl_usdt"] > 0) == (t["r"] > 0)
+    assert all(p.get("leverage", 2.0) == 2.0 for p in trader.state["open"].values() if p.get("filled"))
+
+
+def test_short_stops_too_close_to_liquidation_are_refused():
+    from aitrader.trade import futures
+
+    assert futures.leverage({}) == 1.0 and futures.leverage({"AITRADER_LEVERAGE": "10"}) == futures.MAX_LEVERAGE
+    assert futures.leverage({"AITRADER_LEVERAGE": "x"}) == 1.0
+    assert futures.perp_symbol("BTC/USDT") == "BTC/USDT:USDT"
+    assert futures.short_stop_ok(100, 140, 1.0) and not futures.short_stop_ok(100, 99, 1.0)
+    assert futures.short_stop_ok(100, 116, 3.0) and not futures.short_stop_ok(100, 117, 3.0)
+    assert futures.short_liquidation_price(100, 3.0) == pytest.approx(132.83, abs=0.01)
+
+
+def test_add_shorts_cli(tmp_path, monkeypatch):
+    from aitrader.cli import main
+
+    monkeypatch.chdir(tmp_path)
+    reg = Registry("data/learn/registry.json")
+    reg.add(Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR)))
+    reg.add(Entry(id="builtin-trend_pullback", kind="builtin", name="trend_pullback"))
+    reg.save()
+    assert main(["--env-file", "none", "learn", "add-shorts"]) == 0
+    assert main(["--env-file", "none", "learn", "add-shorts"]) == 0  # no twins of twins, no duplicates
+    ids = sorted(Registry("data/learn/registry.json").entries)
+    assert ids == ["builtin-trend_pullback", "short-builtin-trend_pullback", "short-up", "up"]
+
+
 def test_paper_retires_losers(tmp_path):
     df = synthetic(n=900)
     store = CandleStore(str(tmp_path / "c.db"))

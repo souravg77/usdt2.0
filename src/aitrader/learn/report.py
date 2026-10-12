@@ -33,7 +33,8 @@ RISK_PCT = 1.0
 
 
 def known_entries(registry_entries: dict, builtins: bool = True) -> list[Entry]:
-    """Every strategy the agent knows: the registry, the book library and the built-ins."""
+    """Every strategy the agent knows: the registry, the book library, the built-ins and the short
+    twin of each (``strategies.mirror``)."""
     from ..strategies import STRATEGIES
     from .library import library_specs
     from .rules import spec_id
@@ -46,6 +47,11 @@ def known_entries(registry_entries: dict, builtins: bool = True) -> list[Entry]:
         for name in STRATEGIES:
             entries.setdefault(f"builtin-{name}", Entry(id=f"builtin-{name}", kind="builtin", name=name,
                                                        source=STRATEGIES[name].spec.source))
+    from .registry import short_twin
+
+    for e in [e for e in entries.values() if e.kind != "short"]:  # and each one's short twin
+        twin = short_twin(e)
+        entries.setdefault(twin.id, twin)
     return list(entries.values())
 
 

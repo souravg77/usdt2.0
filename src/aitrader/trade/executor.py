@@ -175,6 +175,11 @@ class Executor:
                 continue
             if self.strategies and entry_id not in self.strategies:
                 continue
+            if sig.get("side", "buy") != Side.BUY.value:
+                # short (perpetual futures) signals are paper-traded only for now; this executor
+                # trades spot and would otherwise buy where the strategy sells
+                self._skip(mark, key, "short signal: futures orders aren't sent by this executor yet", out)
+                continue
             if now_ms - sig["ts"] > self.max_signal_age_bars * TIMEFRAME_MS[tf]:
                 self._skip(mark, key, "signal is too old to enter now", out)
                 continue

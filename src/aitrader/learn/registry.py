@@ -45,7 +45,7 @@ def migrate_status(status: str) -> str:
 @dataclass
 class Entry:
     id: str
-    kind: str  # "rule" (written by the agent) or "builtin" (hand-coded in strategies/)
+    kind: str  # "rule" (written by the agent), "builtin" (hand-coded) or "short" (a long one's short twin)
     name: str
     status: str = "research"
     spec: dict | None = None
@@ -110,4 +110,22 @@ def make_strategy(entry: Entry):
 
     if entry.kind == "builtin":
         return STRATEGIES[entry.name]()
+    if entry.kind == "short":
+        from ..strategies.mirror import ShortMirror
+
+        s = entry.spec or {}
+        base = Entry(id=s["base_id"], kind=s["base_kind"], name=s["base_name"], spec=s.get("base_spec"))
+        return ShortMirror(make_strategy(base))
     return RuleStrategy(entry.spec)
+
+
+def short_twin(entry: Entry) -> Entry:
+    """A new research entry that trades ``entry`` (a long strategy) short on Bybit perpetuals
+    (``strategies.mirror``). It carries a copy of the long rules, so it doesn't change when the
+    long one is edited or retired."""
+    if entry.kind == "short":
+        raise ValueError("that is already a short twin")
+    return Entry(id=f"short-{entry.id}", kind="short", name=f"short: {entry.name}",
+                 spec={"base_id": entry.id, "base_kind": entry.kind, "base_name": entry.name,
+                       "base_spec": entry.spec},
+                 source=entry.source)

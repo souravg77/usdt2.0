@@ -112,7 +112,6 @@ def _perm(**p):
 @pytest.mark.parametrize("raw,msg", [
     (_perm(Wallet=["AccountTransfer", "Withdraw"]), "WITHDRAW"),
     (_perm(Wallet=["AccountTransfer"]), "transfer"),
-    (_perm(ContractTrade=["Order", "Position"]), "Derivatives"),
     (_perm(Spot=[]), "SPOT Trade"),
     ({**GOOD, "readOnly": 1}, "Read-Write"),
     ({**GOOD, "ips": ["*"]}, "IP"),
@@ -126,6 +125,10 @@ def test_real_keys_with_risky_permissions_are_refused(raw, msg):
 def test_key_checks_pass_and_fail():
     perms = run(verify_keys("bybit", API_KEY, API_SECRET, Settings(), client=KeyClient(GOOD)))
     assert perms["wallet"] == [] and perms["ip_restricted"] and perms["spot"] == ["SpotTrade"]
+    assert perms["futures"] is False
+    futures = run(verify_keys("bybit", API_KEY, API_SECRET, Settings(),
+                              client=KeyClient(_perm(ContractTrade=["Order", "Position"], Options=["OptionsTrade"]))))
+    assert futures["futures"] and futures["derivatives"]  # contracts are allowed now (perp shorts)
     with pytest.raises(KeyRejected, match="refused"):
         run(verify_keys("bybit", API_KEY, API_SECRET, Settings(), client=KeyClient(fail=True)))
     with pytest.raises(KeyUnverified, match="couldn't reach Bybit") as err:

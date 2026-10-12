@@ -269,6 +269,17 @@ def test_executor_drops_an_order_that_never_arrived(ex):
     assert e.state["positions"][KEY]["status"] == "open"
 
 
+def test_executor_never_buys_for_a_short_signal(ex):
+    make, adapter, paper, _events = ex
+    short = _pos(SIG, stop=105.0)
+    short["signal"].update(side="sell", target=90.0)
+    _paper(paper, {KEY: short})
+    e = make()
+    out = run(e.tick())
+    assert out["skipped"] == [KEY] and not adapter.sent
+    assert "futures orders" in next(iter(e.state["skipped"].values()))
+
+
 def test_executor_kill_switch_flattens(ex, tmp_path):
     make, adapter, _paper_path, events = ex
     e = make()
