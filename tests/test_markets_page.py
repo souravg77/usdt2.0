@@ -28,12 +28,16 @@ class FakeBybit:
             raise ConnectionError("no route")
         return [[NOW - (3 - i) * 60_000, 100 + i, 101 + i, 99 + i, 100.5 + i, 7] for i in range(3)]
 
-    async def fetch_tickers(self, symbols):
-        self.calls.append(("tickers", tuple(symbols)))
+    async def fetch_tickers(self, symbols=None):
+        self.calls.append(("tickers", symbols))
         if self.down:
             raise ConnectionError("no route")
+        if symbols is not None and "ETH/USDT" in symbols:
+            # like ccxt: one pair the exchange doesn't list fails the whole list
+            raise ValueError("bybit does not have market symbol ETH/USDT")
         return {"BTC/USDT": {"last": 62000.5, "percentage": 1.25, "high": 63000, "low": 61000,
-                             "quoteVolume": 1.5e9}}
+                             "quoteVolume": 1.5e9},
+                "SHIB/USDT": {"last": 0.00001}}
 
     async def close(self):
         pass
@@ -92,8 +96,10 @@ def test_market_api_reads_bybit_once_per_second(world):
     r = client.get("/api/market/candles?symbol=BTC/USDT&tf=1m").json()
     assert r["source"] == "live" and len(r["candles"]) == 3 and r["candles"][-1][4] == 102.5
     t = client.get("/api/market/tickers").json()
-    assert t["tickers"][0] == {"symbol": "BTC/USDT", "price": 62000.5, "change": 1.25, "high": 63000,
-                               "low": 61000, "volume": 1.5e9}
+    # every spot ticker in one call, ours picked out; a pair Bybit doesn't list doesn't stop the rest
+    assert t["source"] == "live" and t["tickers"] == [{"symbol": "BTC/USDT", "price": 62000.5, "change": 1.25,
+                                                       "high": 63000, "low": 61000, "volume": 1.5e9}]
+    assert ("tickers", None) in fake.calls
     for _ in range(5):  # many viewers within a second: one request to Bybit
         client.get("/api/market/candles?symbol=BTC/USDT&tf=1m")
         client.get("/api/market/tickers")

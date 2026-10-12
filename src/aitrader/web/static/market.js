@@ -89,6 +89,7 @@
         if (res[2]) state.studies = res[2];
       }
       renderTickers(res[1].tickers || []);
+      state.tickerSource = res[1].source;
       state.lastOk = Date.now();
       draw();
     }).catch(function () { /* status line shows the age of the last good update */ })
@@ -103,7 +104,9 @@
     statusEl.innerHTML = '<span class="dot"></span> ' +
       (live ? "Live · Bybit" : state.source === "database" ? "Saved prices" : "Reconnecting") +
       " · updated " + (age < 1 ? "just now" : age.toFixed(0) + "s ago") +
-      (state.note ? '<span class="muted"> · ' + escapeHtml(state.note) + "</span>" : "");
+      (state.note ? '<span class="muted"> · ' + escapeHtml(state.note) + "</span>" : "") +
+      (state.tickerSource === "database" && state.source === "live"
+        ? '<span class="muted"> · the price cards show saved prices: Bybit\'s price list didn\'t answer</span>' : "");
   }
 
   function escapeHtml(s) {

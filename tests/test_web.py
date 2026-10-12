@@ -308,3 +308,41 @@ def test_trading_page_shows_the_real_bybit_balance_read_only(tmp_path, monkeypat
     login(client)
     page = client.get("/trading").text
     assert "Bybit real account (read only)" in page and "185.00 USDT" in page and "<td>BTC</td>" in page
+
+
+def test_ai_filter_train_turn_on_and_off_from_the_trading_page(web, monkeypatch):
+    from test_ai import planted
+
+    from aitrader.ai import ModelRegistry, train
+
+    client, auth, runner, paths = web
+    submitted = []
+    monkeypatch.setattr(runner, "submit", lambda title, steps, meta=None: submitted.append((steps, meta)) or "j1")
+    csrf = auth.csrf(login(client))
+    r = client.get("/trading")
+    assert "AI trade filter" in r.text and "Train the AI filter" in r.text and "/trading/ai/on" not in r.text
+    assert client.post("/trading/ai/train", data={}, follow_redirects=False).status_code == 403
+    client.post("/trading/ai/train", data={"csrf": csrf})
+    assert submitted == [([["ai", "retrain", "--all"]], {"kind": "ai-train"})]  # trains, never promotes
+
+    reg = ModelRegistry(paths.models)
+    model, rep = train(planted())
+    good = reg.add(model, rep)
+    _, bad_rep = train(planted(edge=False, seed=1))
+    bad = reg.add(model, bad_rep)
+    r = client.get("/trading")
+    assert "rejected" in r.text and "/trading/ai/on" not in r.text  # the newest one failed its test
+    r = client.post("/trading/ai/on", data={"csrf": csrf, "version": bad}, follow_redirects=False)
+    assert "Not+turned+on" in r.headers["location"] or "Not%20turned%20on" in r.headers["location"]
+    assert ModelRegistry(paths.models).active is None
+
+    good2 = ModelRegistry(paths.models).add(model, rep)
+    r = client.get("/trading")
+    assert f'value="{good2}"' in r.text and f"Turn on {good2}" in r.text
+    client.post("/trading/ai/on", data={"csrf": csrf, "version": good2})
+    reg = ModelRegistry(paths.models)
+    assert reg.active == good2 and reg.info(good2)["approved_by"] == "admin" and good != good2
+    assert "Active model" in client.get("/").text
+    assert "Turn the AI filter off" in client.get("/trading").text
+    client.post("/trading/ai/off", data={"csrf": csrf})
+    assert ModelRegistry(paths.models).active is None
