@@ -499,6 +499,15 @@ def cmd_learn(s: Settings, args) -> int:
             print(("  + " if reg.add(e) else "  = ") + e.id)
         reg.save()
         return 0
+    if cmd == "add-shorts":
+        from .learn.registry import short_twin
+
+        added = 0
+        for e in [e for e in reg.entries.values() if e.kind != "short"]:
+            added += reg.add(short_twin(e))
+        reg.save()
+        print(f"{added} new short twins (Bybit USDT perpetual futures) -> {args.registry}")
+        return 0
     if cmd == "paper-all":
         moved = 0
         for e in reg.with_status(*UNTESTED, "rejected", "under_review"):
@@ -603,8 +612,8 @@ def _filter_strategies(reg, use_all: bool) -> list:
     from .learn.registry import Entry
     from .strategies import STRATEGIES
 
-    if not use_all:
-        entries = reg.with_status("paper", "retired")
+    if not use_all:  # the filter judges long trades only, so it learns from long strategies only
+        entries = [e for e in reg.with_status("paper", "retired") if e.kind != "short"]
     else:
         entries = [e for e in reg.entries.values() if e.kind == "rule"]
         entries += [Entry(id=f"builtin-{n}", kind="builtin", name=n) for n in STRATEGIES]
@@ -1248,6 +1257,7 @@ def build_parser() -> argparse.ArgumentParser:
     ll.add_argument("--test", action="store_true", help="backtest them straight away")
     lb = le_sub.add_parser("add-builtin", help="register the hand-coded strategies too")
     lb.add_argument("names", nargs="*")
+    le_sub.add_parser("add-shorts", help="add a short twin (Bybit perpetual futures) of every long strategy")
     le_sub.add_parser("paper-all", help="paper-trade every strategy, including untested and rejected "
                                         "ones (fake money; poor ones retire on their paper results)")
     lt = le_sub.add_parser("test", help="backtest candidates; passes go to paper trading")

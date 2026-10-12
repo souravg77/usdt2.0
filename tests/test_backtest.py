@@ -187,3 +187,65 @@ def test_walk_forward_without_a_grid_just_rolls_forward():
     wf = walk_forward(STRATEGIES["trend_pullback"], df, "bybit", "BTC/USDT", "1h",
                       grid={}, train_bars=250, test_bars=550)
     assert len(wf) == 5 and wf["train_score"].isna().all()
+
+
+# ---- perp shorts ------------------------------------------------------------------------------
+
+
+class FixedShort(Fixed):
+    @classmethod
+    def default_params(cls):
+        return {"at": [0], "stop": 105.0, "target": 90.0, "trailing": None}
+
+    def generate(self, df, exchange, symbol, timeframe):
+        return [Signal(**{**s.__dict__, "side": Side.SELL}) for s in super().generate(df, exchange, symbol, timeframe)]
+
+
+FREE_PERP = BacktestConfig(taker_fee=0, maker_fee=0, slippage_bps=0, perp_taker_fee=0, perp_maker_fee=0,
+                           perp_funding_8h=0)
+
+
+def test_short_target_stop_and_gap_mirror_the_long_rules():
+    df = bars([(100, 100, 100, 100), (100, 101, 99, 100), (100, 101, 89, 90)])
+    [t] = run_backtest(FixedShort(), df, "x", "BTC/USDT", "1h", FREE_PERP)
+    assert t.exit_reason == "target" and t.r == pytest.approx(2.0)
+    df = bars([(100, 100, 100, 100), (100, 100, 100, 100), (100, 106, 89, 100)])
+    [t] = run_backtest(FixedShort(), df, "x", "BTC/USDT", "1h", FREE_PERP)
+    assert t.exit_reason == "stop" and t.r == pytest.approx(-1.0)  # stop first when both touch
+    df = bars([(100, 100, 100, 100), (100, 100, 100, 100), (110, 111, 109, 110)])
+    [t] = run_backtest(FixedShort(), df, "x", "BTC/USDT", "1h", FREE_PERP)
+    assert t.exit_reason == "stop_gap" and t.r == pytest.approx(-2.0)
+    df = bars([(100, 100, 100, 100), (106, 107, 105, 106)])
+    assert run_backtest(FixedShort(), df, "x", "BTC/USDT", "1h", FREE_PERP) == []  # opened past the stop
+
+
+def test_short_pays_perp_fees_and_funding():
+    df = bars([(100, 100, 100, 100)] + [(100, 101, 99, 100)] * 8 + [(100, 101, 89, 90)])
+    [t] = run_backtest(FixedShort(), df, "x", "BTC/USDT", "1h", BacktestConfig(slippage_bps=0))
+    fees = 100 * 0.00055 + 90 * 0.0002
+    funding = 0.0001 * 9 / 8 * 100  # 9 one-hour bars held, charged as a cost
+    assert t.r == pytest.approx((10 - fees - funding) / 5)
+    assert t.funding_r == pytest.approx(funding / 5) and t.fee_r == pytest.approx(fees / 5)
+
+
+def test_short_twin_flips_the_chart_and_the_signal():
+    from aitrader.strategies.mirror import ShortMirror, flip
+
+    df = synthetic()
+    f = flip(df)
+    assert f["high"].iloc[5] == pytest.approx(1 / df["low"].iloc[5]) and (f["high"] >= f["low"]).all()
+    twin = ShortMirror(STRATEGIES["trend_pullback"]())
+    sigs = twin.generate(df, "bybit", "BTC/USDT", "1h")
+    assert sigs and all(s.side is Side.SELL and s.stop > s.entry for s in sigs)
+    assert all(s.target is None or s.target < s.entry for s in sigs)
+    assert twin.spec.name.startswith("short: ") and twin.spec.timeframes
+    trades = run_backtest(twin, df, "bybit", "BTC/USDT", "1h")
+    assert trades and all(t.exit_reason for t in trades)
+    # the long strategy on a falling market ~ its twin on the same market risen
+    falling = df.copy()
+    for c in ("open", "close"):
+        falling[c] = 10_000 / df[c]
+    falling["high"], falling["low"] = 10_000 / df["low"], 10_000 / df["high"]
+    longs = STRATEGIES["trend_pullback"]().generate(df, "bybit", "BTC/USDT", "1h")
+    shorts = twin.generate(falling, "bybit", "BTC/USDT", "1h")
+    assert [s.ts for s in longs] == [s.ts for s in shorts]

@@ -9,6 +9,12 @@ no new trades. When a person has promoted a Phase 4 trade-filter model, each new
 checked by it first: skipped below its threshold, sized by its confidence above. Each signal
 records the market regime of its bar (``aitrader.market.regime``) so results can be split by it;
 the regime never blocks a paper trade here. No exchange order is ever sent from here.
+
+Short signals (the short twins, ``strategies.mirror``) are paper-traded as Bybit USDT perpetual
+shorts: perp fees and funding in the result, isolated margin at ``AITRADER_LEVERAGE`` (only the
+margin counts against the strategy's equity), and a short whose stop is too close to the
+liquidation price is skipped. The AI trade filter learned from long trades, so it doesn't judge
+shorts.
 """
 
 from __future__ import annotations
@@ -27,6 +33,7 @@ from ..indicators import candles_to_frame
 from ..market.regime import breakdown, classify
 from ..models import TIMEFRAME_MS, Side
 from ..strategies.base import Signal
+from ..trade import futures
 from .lab import with_context
 from .registry import Registry, make_strategy
 
@@ -47,7 +54,7 @@ class RetireRule:
 @dataclass(frozen=True)
 class PaperConfig:
     start_equity: float = 10_000.0
-    max_position_frac: float = 0.5  # spot, no leverage: one position uses at most half the account
+    max_position_frac: float = 0.5  # one position is worth at most half the account (shorts too)
     backtest: BacktestConfig = field(default_factory=BacktestConfig)
     retire: RetireRule = field(default_factory=RetireRule)
 
@@ -113,6 +120,11 @@ class PaperTrader:
                             continue
                         sig = sigs[-1]
                         self.state["last_signal"][key] = sig.ts
+                        if sig.side is Side.SELL and not futures.short_stop_ok(sig.entry, sig.stop, self._lev()):
+                            events["filtered"].append(key)
+                            log.info("paper short %s skipped: stop %.6g too close to liquidation at %gx",
+                                     key, sig.stop, self._lev())
+                            continue
                         ctx_mult = self._context(ex, sym, now_ms)
                         if ctx_mult <= 0:
                             events["filtered"].append(key)
@@ -206,7 +218,8 @@ class PaperTrader:
             sig = self.state["open"][key]["signal"]
             ai = self.state["open"][key].get("ai_prob")
             regime = (self.state["open"][key].get("regime") or {}).get("label")
-            self.events.emit("trade_open", f"paper BUY signal {key} entry~{sig['entry']:.6g} "
+            side = "SELL (short, perp)" if sig.get("side") == Side.SELL.value else "BUY"
+            self.events.emit("trade_open", f"paper {side} signal {key} entry~{sig['entry']:.6g} "
                              f"stop {sig['stop']:.6g}" + (f" (AI p={ai:.2f})" if ai is not None else "")
                              + (f" regime {regime}" if regime else ""),
                              key=key, mode="paper")
@@ -218,8 +231,11 @@ class PaperTrader:
         for sid in events["retired"]:
             self.events.emit("error", f"paper: strategy {sid} retired by its results", level="warning")
 
+    def _lev(self) -> float:
+        return futures.leverage()
+
     def _ai_check(self, sig: Signal, entry_id: str, df) -> dict:
-        if self.ai_filter is None:
+        if self.ai_filter is None or sig.side is Side.SELL:
             return {"take": True, "size": 1.0, "prob": None, "version": None}
         recent = [t["r"] for t in self.state["trades"]
                   if t["entry_id"] == entry_id and t["exit_ts"] < sig.ts]
@@ -259,28 +275,35 @@ class PaperTrader:
                 continue
             if t is None:
                 del self.state["open"][key]
-                log.info("paper %s skipped: price opened below the stop", key)
+                log.info("paper %s skipped: price opened past the stop", key)
                 continue
             equity = self.state["equity"].get(entry_id, self.cfg.start_equity)
+            short = sig.side is Side.SELL
             if not pos["filled"]:
+                lev = self._lev() if short else 1.0
                 risk_usdt = equity * sig.risk_pct * pos.get("size_mult", 1.0)
-                units = risk_usdt / (sig.entry - sig.stop)
+                units = risk_usdt / abs(sig.entry - sig.stop)
                 units = min(units, equity * self.cfg.max_position_frac / t.entry)
-                # all of a strategy's open positions together may not use more than its equity
-                in_use = sum(o.get("units", 0) * o.get("entry", 0) for k, o in self.state["open"].items()
+                # all of a strategy's open positions together may not tie up more than its equity
+                # (a spot position ties up what it cost; a perp short only its margin)
+                in_use = sum(o.get("units", 0) * o.get("entry", 0) / o.get("leverage", 1.0)
+                             for k, o in self.state["open"].items()
                              if k != key and o.get("entry_id") == entry_id and o.get("filled"))
-                units = min(units, max(0.0, equity - in_use) / t.entry)
+                units = min(units, max(0.0, equity - in_use) * lev / t.entry)
                 if units <= 0:
                     del self.state["open"][key]
                     log.info("paper %s skipped: the strategy's equity is all in open positions", key)
                     continue
                 pos.update(filled=True, entry=t.entry, units=units, entry_ts=t.entry_ts)
+                if short:
+                    pos["leverage"] = lev
             if t.exit_reason == "end" and t.exit_ts == int(df["ts"].iloc[-1]):
                 pos["mark_r"] = round(t.r, 3)  # still open
                 continue
-            pnl = t.r * (sig.entry - sig.stop) * pos["units"]
+            pnl = t.r * abs(sig.entry - sig.stop) * pos["units"]
             self.state["equity"][entry_id] = equity + pnl
             row = {**_trade_dict(t), "key": key, "entry_id": entry_id, "units": pos["units"],
+                   "side": sig.side.value,
                    "pnl_usdt": pnl, "equity_after": equity + pnl,
                    "ai_prob": pos.get("ai_prob"), "ai_version": pos.get("ai_version"),
                    "regime": (pos.get("regime") or {}).get("label")}

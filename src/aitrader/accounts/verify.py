@@ -1,8 +1,10 @@
 """Check a user's exchange key before it is stored.
 
 Real-account keys are accepted only when Bybit itself reports (``/v5/user/query-api``) that the
-key can trade spot, is not read-only, **cannot withdraw** or transfer, has no derivatives or
-options permissions, and is bound to trusted IPs. Keys that fail are never stored.
+key can trade spot, is not read-only, **cannot withdraw** or transfer, and is bound to trusted
+IPs. Contracts / Derivatives / Options permissions are allowed (the agent sells USDT perpetuals
+short); ``futures`` in the result says whether the key can trade them. Keys that fail are never
+stored.
 """
 
 from __future__ import annotations
@@ -56,16 +58,14 @@ async def verify_keys(exchange: str, api_key: str, secret: str, settings: Settin
         ips = [str(x) for x in r.get("ips") or []]
         perms.update(read_only=str(r.get("readOnly")) == "1", spot=list(p.get("Spot") or []), wallet=wallet,
                      derivatives=bool(p.get("ContractTrade") or p.get("Derivatives") or p.get("Options")),
+                     futures=bool(p.get("ContractTrade") or p.get("Derivatives")),
                      ip_restricted=bool(ips) and "*" not in ips)
         if "Withdraw" in wallet:
             raise KeyRejected("this key can WITHDRAW funds. On Bybit (API Management) make a new key "
                               "without the Withdrawal permission")
         if wallet:
             raise KeyRejected("this key can transfer funds (Assets permissions); make a key with only "
-                              "SPOT trade permission")
-        if perms["derivatives"]:
-            raise KeyRejected("turn off Contracts, Derivatives and Options for this key; the agent "
-                              "trades spot only")
+                              "SPOT and Contracts trade permissions")
         if perms["read_only"] or "SpotTrade" not in perms["spot"]:
             raise KeyRejected("this key can't trade: choose 'Read-Write' and tick SPOT Trade")
         if not perms["ip_restricted"]:

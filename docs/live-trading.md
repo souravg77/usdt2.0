@@ -69,9 +69,10 @@ and so does Telegram (`/pause`, `/resume`, `/kill CONFIRM`).
 ## Step 1: your real Bybit key (read only until you go live)
 
 Make a key on bybit.com: **API Management → Create New Key → System-generated**, Read-Write, tick
-only **SPOT → Trade**, leave Contracts, Derivatives, Options, Wallet, Withdraw and Transfer off,
-and restrict it to the server's IP. Save it on the dashboard's Settings page (group "Bybit real
-account"); a key with any other permission is refused there. Never paste keys into a chat.
+**SPOT → Trade** (and Contracts / USDT Perpetual for the futures shorts, see
+[futures.md](futures.md)), leave Wallet, Withdraw and Transfer off, and restrict it to the
+server's IP. Save it on the dashboard's Settings page (group "Bybit real account"); a key that can
+withdraw or transfer, or isn't IP-bound, is refused there. Never paste keys into a chat.
 
 With the key saved, the Trading page shows your real Bybit balance (coins and their USDT value,
 read at most once a minute). That is the only thing the key is used for until the live pilot

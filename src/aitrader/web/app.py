@@ -398,7 +398,8 @@ paper trading. Nothing trades real money.</p>
                 return "Paper trading is already being switched on; see Recent jobs on the Overview page."
             since = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 365 * 86400))
             jobs.submit("Turn paper trading on: every strategy, then a year of price history",
-                        [["learn", "add-library"], ["learn", "add-builtin"], ["learn", "paper-all"],
+                        [["learn", "add-library"], ["learn", "add-builtin"], ["learn", "add-shorts"],
+                         ["learn", "paper-all"],
                          ["download", "--since", since, "--exchange", EXCHANGE],
                          ["learn", "test", "--paper"]], meta={"kind": "paper-start"})
             _event("paper_on", f"paper trading turned on from the dashboard by {user}")
@@ -599,7 +600,7 @@ def _positions_table(paper: dict, execs: dict) -> str:
         sig = p.get("signal", {})
         entry_id, ex, sym, tf = (key.split("|") + ["", "", "", ""])[:4]
         mark = p.get("mark_r")
-        rows.append(f"<tr><td>paper</td><td>{_e(sym)} <span class=muted>{_e(ex)} {_e(tf)}</span></td>"
+        rows.append(f"<tr><td>paper</td><td>{_e(sym)}{_short(sig.get('side'))} <span class=muted>{_e(ex)} {_e(tf)}</span></td>"
                     f"<td>{_e(entry_id)}</td><td>{p.get('entry', sig.get('entry', 0)):.6g}"
                     f"{'' if p.get('filled') else ' <span class=muted>(waiting)</span>'}</td>"
                     f"<td>{sig.get('stop', 0):.6g}</td><td>{'' if mark is None else f'{mark:+.2f}R'}</td>"
@@ -614,6 +615,10 @@ def _positions_table(paper: dict, execs: dict) -> str:
         return "<p class=muted>No open positions.</p>"
     return ("<table><tr><th>Where</th><th>Market</th><th>Strategy</th><th>Entry</th><th>Stop</th>"
             f"<th>Now</th><th>AI p</th></tr>{''.join(rows)}</table>")
+
+
+def _short(side) -> str:
+    return ' <span class="badge warn">short (perp)</span>' if side == "sell" else ""
 
 
 def _prob(p) -> str:
@@ -631,7 +636,7 @@ def _trades_table(paper: dict, execs: dict, limit: int = 40) -> str:
     for mode, t in rows[:limit]:
         r = t.get("r", 0)
         twin = f" (paper {t['paper_r']:+.2f}R)" if t.get("paper_r") is not None else ""
-        out.append(f"<tr><td>{_ms(t.get('exit_ts'))}</td><td>{_e(mode)}</td><td>{_e(t.get('symbol', ''))}</td>"
+        out.append(f"<tr><td>{_ms(t.get('exit_ts'))}</td><td>{_e(mode)}</td><td>{_e(t.get('symbol', ''))}{_short(t.get('side'))}</td>"
                    f"<td>{_e(t.get('entry_id', ''))}</td><td>{t.get('entry', 0):.6g} → {t.get('exit', 0):.6g}</td>"
                    f'<td class="{"good" if r > 0 else "bad"}">{r:+.2f}R{_e(twin)}</td>'
                    f"<td>{t.get('pnl_usdt', 0):+,.2f}</td><td>{_prob(t.get('ai_prob'))}</td>"

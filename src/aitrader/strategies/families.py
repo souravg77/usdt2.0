@@ -7,8 +7,8 @@ and each starts in the registry as an untested candidate that has to clear the s
 points chosen before any backtest, not tuned values.
 
 Rules shared by every strategy here:
-- Long spot entries only: no shorting, no leverage, no futures orders. Bearish versions of these
-  setups are left out.
+- Long spot entries. The bearish versions are their short twins (``strategies.mirror``), traded
+  on Bybit USDT perpetuals.
 - No trade while a candle is missing in the last ``clean_bars`` bars (``indicator_valid``): the
   indicators would cover more time than they claim to.
 - No trade when ATR(14) is above the 95th percentile of its last 500 values (disorderly market).

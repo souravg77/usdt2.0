@@ -80,7 +80,8 @@ in-sample and out-of-sample, after fees and slippage, t-stat >= 2) before it can
 most research candidates are expected to fail it. The thresholds are starting points written down
 before any test, not tuned values.
 
-Shared rules: long spot entries only (no shorting, leverage or futures orders); 0.5% of equity at
+Shared rules: long spot entries (each strategy also has a short twin for Bybit perpetuals, see
+[futures.md](futures.md)); 0.5% of equity at
 risk per trade, units = risk / (entry - stop); entry at the next bar's open; **no trade while a
 candle is missing in the last 100 bars, or when ATR(14) is above its 95th percentile of the last
 500 bars**. `aitrader strategies` prints every rule card, including its regime.
@@ -121,7 +122,7 @@ Notes:
 | Cross-exchange spread arbitrage (#36) | Needs a second exchange, transfers between venues, and selling inventory on one venue |
 | Pairs trading and cointegration (#37) | Needs a short leg on the other coin |
 | Funding very positive (short side of #33) | Shorting; very positive funding already only cuts or blocks longs in the context filter |
-| Bearish sides of every family above | Shorting is off: spot, long only, no leverage (owner decision 2026-10-12) |
+| Bearish sides of every family above | Covered by the short twins ([futures.md](futures.md)): each long strategy run on the flipped chart (owner decision 2026-10-12, later the same day: add futures) |
 
 ## New indicators
 

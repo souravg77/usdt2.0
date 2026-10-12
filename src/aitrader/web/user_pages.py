@@ -164,8 +164,8 @@ my account and I turn it on, and that I keep my exchange key without withdrawal 
 <input type="hidden" name="net" value="live">
 <label>API key <input name="api_key" autocomplete="off" required></label>
 <label>Secret key <input name="secret" type="password" autocomplete="off" required></label>
-<p class="small muted">Use a key from your real Bybit account. It is refused unless the key is Read-Write with only SPOT
-trade ticked (no withdrawals, transfers or contracts) and bound to the server's IP. Keys are
+<p class="small muted">Use a key from your real Bybit account. It is refused unless the key is Read-Write with SPOT
+trade ticked (Contracts is allowed too), has no withdrawal or transfer rights, and is bound to the server's IP. Keys are
 stored encrypted and never shown again.</p>
 <button>Check and connect</button></form>"""
         keys_card = f'<div class="card"><h3>Exchange keys</h3>{keys_table}{key_form}</div>'

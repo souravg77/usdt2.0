@@ -1,6 +1,12 @@
 """Bar-by-bar backtest of a strategy's signals with fees, slippage and (for perps) funding.
 
-Fill rules, chosen to avoid flattering results:
+Long signals (``Side.BUY``) are spot trades. Short signals (``Side.SELL``) are USDT perpetual
+futures trades on Bybit: perp fees, and a funding cost charged on every bar held. Funding is
+usually paid *to* shorts, but it isn't counted as income here (it can turn), so the result is on
+the cautious side. Signals and fills use the spot candles: the perp price tracks spot closely,
+and the small gap between them is not modelled.
+
+Fill rules, chosen to avoid flattering results (for a short, "below" and "above" swap):
 - Entries fill at the *next* bar's open plus slippage, after the signal bar has closed.
 - Stops and targets are checked against each later bar's high/low. If one bar touches both, the
   stop is assumed to fill first. A gap through the stop fills at the open (worse than the stop).
@@ -16,7 +22,7 @@ from dataclasses import dataclass, field
 import pandas as pd
 
 from ..indicators import ema, parabolic_sar, rsi
-from ..models import TIMEFRAME_MS
+from ..models import TIMEFRAME_MS, Side
 from ..strategies.base import Signal, Strategy
 
 
@@ -26,6 +32,9 @@ class BacktestConfig:
     maker_fee: float = 0.001
     slippage_bps: float = 5.0
     funding_rate_8h: float = 0.0  # set e.g. 0.0001 to charge perps funding on longs
+    perp_taker_fee: float = 0.00055  # Bybit USDT perpetual base rates (non-VIP)
+    perp_maker_fee: float = 0.0002
+    perp_funding_8h: float = 0.0001  # charged to shorts as a cost, never counted as income
     max_bars_in_trade: int = 10_000
 
 
@@ -97,6 +106,8 @@ def simulate_signal(sig: Signal, df: pd.DataFrame, pos: int, cfg: BacktestConfig
     """Simulate one signal; ``pos`` is the index of the bar after the signal bar."""
     if pos >= len(df):
         return None
+    if sig.side is Side.SELL:
+        return _simulate_short(sig, df, pos, cfg, trail_cache)
     slip = cfg.slippage_bps / 10_000
     o, h, lo, c, ts = (df[k].to_numpy() for k in ("open", "high", "low", "close", "ts"))
     entry = o[pos] * (1 + slip)
@@ -143,6 +154,65 @@ def simulate_signal(sig: Signal, df: pd.DataFrame, pos: int, cfg: BacktestConfig
     slipped_exit = exit_reason in ("stop", "stop_gap", "trail", "time")
     slippage = (entry - o[pos]) + (exit_px / (1 - slip) - exit_px if slipped_exit and slip < 1 else 0.0)
     gross = exit_px - entry
+    net = gross - fees - funding
+    return Trade(
+        strategy=sig.strategy, symbol=sig.symbol, timeframe=sig.timeframe, signal_ts=sig.ts,
+        entry_ts=int(ts[pos]), entry=entry, stop=sig.stop, target=target,
+        exit_ts=int(ts[exit_i]), exit=float(exit_px), exit_reason=exit_reason,
+        r=net / risk, gross_r=gross / risk, cost_r=(fees + funding) / risk,
+        fee_r=fees / risk, slippage_r=slippage / risk, funding_r=funding / risk,
+        features=dict(sig.features),
+    )
+
+
+def _simulate_short(sig: Signal, df: pd.DataFrame, pos: int, cfg: BacktestConfig,
+                    trail_cache: dict) -> Trade | None:
+    """The mirror of the long rules: sell at the next open minus slippage, buy back at the stop
+    (above), the target (below), a trailing rule or the time stop."""
+    slip = cfg.slippage_bps / 10_000
+    o, h, lo, c, ts = (df[k].to_numpy() for k in ("open", "high", "low", "close", "ts"))
+    entry = o[pos] * (1 - slip)
+    risk = sig.stop - sig.entry
+    if risk <= 0 or entry >= sig.stop:
+        return None  # gapped through the stop before we could enter
+    target = sig.target
+    if sig.trailing not in trail_cache:
+        trail_cache[sig.trailing] = _trailing_exit(sig.trailing, df)
+    trail = trail_cache[sig.trailing]
+    trail_arr = trail.to_numpy() if trail is not None else None
+    tstop = _time_stop(sig.trailing)
+
+    exit_px, exit_reason, exit_i, exit_fee = None, "", None, cfg.perp_taker_fee
+    end = min(len(df), pos + cfg.max_bars_in_trade)
+    for i in range(pos, end):
+        if i > pos and o[i] >= sig.stop:
+            exit_px, exit_reason, exit_i = o[i] * (1 + slip), "stop_gap", i
+            break
+        if h[i] >= sig.stop:
+            exit_px, exit_reason, exit_i = sig.stop * (1 + slip), "stop", i
+            break
+        if target is not None and lo[i] <= target:
+            exit_px, exit_reason, exit_i, exit_fee = target, "target", i, cfg.perp_maker_fee
+            break
+        held = i - pos + 1
+        if (trail_arr is not None and bool(trail_arr[i])) or (tstop and held >= tstop):
+            if i + 1 < len(df):
+                exit_px, exit_reason, exit_i = (o[i + 1] * (1 + slip),
+                                                "trail" if trail_arr is not None and trail_arr[i] else "time", i + 1)
+            else:
+                exit_px, exit_reason, exit_i = c[i], "end", i
+            break
+    if exit_px is None:
+        exit_i = end - 1
+        exit_px, exit_reason = c[exit_i], "end"
+
+    bars = exit_i - pos + 1
+    tf_hours = TIMEFRAME_MS[sig.timeframe] / 3_600_000
+    funding = cfg.perp_funding_8h * bars * tf_hours / 8 * entry
+    fees = entry * cfg.perp_taker_fee + exit_px * exit_fee
+    slipped_exit = exit_reason in ("stop", "stop_gap", "trail", "time")
+    slippage = (o[pos] - entry) + (exit_px - exit_px / (1 + slip) if slipped_exit else 0.0)
+    gross = entry - exit_px
     net = gross - fees - funding
     return Trade(
         strategy=sig.strategy, symbol=sig.symbol, timeframe=sig.timeframe, signal_ts=sig.ts,

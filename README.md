@@ -1,6 +1,8 @@
 # AI_crypto_trader
 
-AI-driven cryptocurrency trading agent for Bybit (spot only), built phase by phase from the project roadmap.
+AI-driven cryptocurrency trading agent for Bybit: spot longs, and shorts on USDT perpetual futures
+(isolated margin, leverage 1x by default, at most 3x; see [docs/futures.md](docs/futures.md)), built
+phase by phase from the project roadmap.
 
 **Safety defaults:** the agent runs in `paper` mode. Real-money orders are blocked in code unless
 `AITRADER_MODE=live`, `AITRADER_LIVE_UNLOCKED=true` **and** `AITRADER_LIVE_CONFIRM` holds the exact

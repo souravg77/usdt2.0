@@ -28,8 +28,8 @@ GROUPS = [
     ("anthropic", "Anthropic (Claude)", "Lets the agent read trading books and write strategies. "
      "Get a key at console.anthropic.com, under API keys."),
     ("bybit", "Bybit real account", "Shows your real Bybit balance on the Trading page (read only) and is "
-     "used by the live pilot. Paper trading needs no key. The key must be Read-Write with only SPOT "
-     "trade ticked (no withdrawals, no transfers, no contracts) and bound to this server's IP. Saving it "
+     "used by the live pilot. Paper trading needs no key. The key must be Read-Write with SPOT trade "
+     "ticked (and Contracts, for futures shorts), no withdrawals or transfers, and bound to this server's IP. Saving it "
      "does not start live trading: that stays locked in .env until you open it on the server."),
     ("telegram", "Telegram alerts", "Trade alerts and /status, /pause, /kill from your phone. Create a "
      "bot with @BotFather for the token; send it a message, then get your chat ID from @userinfobot."),
