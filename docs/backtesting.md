@@ -2,7 +2,7 @@
 
 ```bash
 # 1. get enough history (4h needs years; 15m needs months)
-aitrader download --since 2021-01-01 --exchange binance --timeframe 4h --timeframe 1h
+aitrader download --since 2021-01-01 --exchange bybit --timeframe 4h --timeframe 1h
 # 2. backtest on in-sample and out-of-sample periods
 aitrader backtest --strategy trend_pullback --timeframe 4h
 aitrader backtest --strategy momentum_breakout --timeframe 15m --symbol BTC/USDT
@@ -19,7 +19,7 @@ With Docker, prefix each command with `docker compose run --rm collector`.
 - A stop fills at the stop minus slippage. If the price gaps through it, the fill is at the
   open. If one bar touches both stop and target, the **stop** counts.
 - Targets fill at the target as maker. Trailing and time exits fill at the next open.
-- Fees default to 0.1% per side (Binance spot base rate). Use `--funding-8h 0.0001` to charge
+- Fees default to 0.1% per side (Bybit non-VIP spot rate, taker and maker). Use `--funding-8h 0.0001` to charge
   perpetual funding.
 - Only one trade per strategy and symbol is open at a time.
 - Results are in **R**, the net profit divided by the planned risk (entry minus stop), after all

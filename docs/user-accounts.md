@@ -1,7 +1,7 @@
 # User accounts: sign-up, exchange keys and trading for other people
 
 The dashboard can host other users. Each user signs up with an email and password, connects
-their own Binance API key, and the agent trades the platform's strategies on **their** account,
+their own Bybit API key, and the agent trades the platform's strategies on **their** account,
 sized from their own balance. You (the admin, the `AITRADER_WEB_USER` login) approve every
 account and decide who may use real money.
 
@@ -10,7 +10,8 @@ account and decide who may use real money.
 > may need a licence or registration, client agreements, KYC/AML checks and tax reporting. In
 > India, look at SEBI and FIU-IND rules and get advice from a lawyer before inviting anyone
 > beyond yourself. Until then, keep sign-up closed and use accounts only for yourself or for
-> testnet demos.
+> demo-trading demos. Bybit also restricts some countries; each user must check that Bybit
+> serves their country.
 
 ## Turn it on
 
@@ -31,9 +32,11 @@ account and decide who may use real money.
 1. **Sign up** at `/signup` with an email and a password of 12+ characters, and confirm they
    understand the risk. The account starts as *waiting for approval*.
 2. After you approve it, they log in and see **My account**:
-   - **Exchange keys.** They paste a Binance **testnet** key first. A real-account key is
-     accepted only if Binance itself reports that withdrawals, transfers, margin and futures are
-     **off**, spot trading is on, and the key is restricted to the server's IP. Keys that fail
+   - **Exchange keys.** They paste a Bybit **Demo Trading** key first (bybit.com, switch to Demo
+     Trading, avatar → API → create key). A real-account key is accepted only if Bybit itself
+     reports (`/v5/user/query-api`) that it is Read-Write with SpotTrade, has **no** Wallet
+     permissions (no withdrawals or transfers), **no** contract, derivatives or options rights,
+     and is bound to the server's IP. Keys that fail
      are not stored. Stored keys are encrypted and never shown again (only their last 4
      characters).
    - **Pause, resume and kill switch** for their own account. The kill switch sells everything
@@ -51,7 +54,7 @@ account and decide who may use real money.
      and types `I accept real-money risk`.
 
    Turning it **off** is one click and instant. No new real-money trades, the agent sells
-   everything it bought on the real account, then the account goes back to the testnet. The
+   everything it bought on the real account, then the account goes back to demo trading. The
    account's kill switch, removing the real-account key, your "Stop live" and disabling the
    account all switch it off the same way.
 
@@ -80,7 +83,7 @@ docker compose run --rm collector users add you@example.com             # create
 All of these must be true. Each one is checked before every order:
 
 1. The platform's live lock in `.env` is open (`AITRADER_MODE=live`, `AITRADER_LIVE_UNLOCKED=true`,
-   confirmation phrase). While it is closed, every user trades on the testnet, whatever they chose.
+   confirmation phrase). While it is closed, every user trades on Bybit Demo Trading, whatever they chose.
 2. The go/no-go gate passed and you approved the strategy (`golive approve`); approval breaks
    if the strategy or the AI model changes.
 3. You allowed live for that user.

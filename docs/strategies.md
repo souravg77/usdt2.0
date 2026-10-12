@@ -81,7 +81,7 @@ Phase 5 order loop will call it; the values are starting points.
 ## Checking the signal log (Phase 2 exit criterion)
 
 ```bash
-aitrader download --since 2023-01-01 --exchange binance --symbol BTC/USDT --timeframe 4h
+aitrader download --since 2023-01-01 --exchange bybit --symbol BTC/USDT --timeframe 4h
 aitrader signals --strategy trend_pullback --symbol BTC/USDT --timeframe 4h
 ```
 
