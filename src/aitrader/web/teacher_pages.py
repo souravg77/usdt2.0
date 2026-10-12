@@ -11,6 +11,7 @@ import urllib.parse
 from fastapi import Form, Request
 from fastapi.responses import PlainTextResponse, RedirectResponse
 
+from ..learn.improve import load_report
 from ..learn.teacher import Teacher, best_for, describe, now_situations
 
 
@@ -46,6 +47,39 @@ def _lesson_rows(lessons: dict, verdict: str, limit: int) -> str:
         return '<p class="muted">None yet.</p>'
     return ('<table><tr><th>Strategy</th><th>Market situation</th><th>Trades</th><th>Win rate</th>'
             '<th>Per trade</th><th>Unseen: trades · per trade</th><th>1R take</th></tr>' + "".join(out) + "</table>")
+
+
+def _improve_section(rep: dict, busy, form: str) -> str:
+    parts = ['<h2>Improve the strategies</h2><div class="card"><p class="small muted">For each strategy paper '
+             'trading, the improver tries up to 30 combinations of its settings (indicator lengths, thresholds, '
+             'stop and target sizes) on the older 60% of the history and keeps the best. That change is kept only '
+             'if it also did better on the next 20%, which the search never saw, and the improved version then '
+             'has to pass the full backtest gate like any new strategy, including the untouched newest 20%. Only '
+             'then does it replace the old version in paper trading. Live trading is never changed.</p>']
+    if busy:
+        parts.append(f'<p class="small">Improving now (<a href="/jobs/{_e(busy["id"])}">progress</a>)</p>')
+    else:
+        parts.append(f'<form method="post" action="/teacher/improve">{form}<button class="ghost">'
+                     'Improve the paper strategies</button></form>')
+    parts.append("</div>")
+    if rep:
+        rows = []
+        for r in rep.get("results", []):
+            oos = r.get("out_of_sample") or {}
+            b, a = oos.get("before") or {}, oos.get("after") or {}
+            unseen = (f'{_r(b.get("expectancy_r"))} → {_r(a.get("expectancy_r"))}<br>'
+                      f'win {_pct(b.get("win_rate"))} → {_pct(a.get("win_rate"))}') if oos else "–"
+            ch = "<br>".join(f"{_e(k)} {a_:g} → {b_:g}" for k, (a_, b_) in r.get("changes", {}).items()) or "–"
+            mark = '<b class="good">IMPROVED</b> ' if r.get("new_id") else ""
+            rows.append(f'<tr><td>{_e(r["strategy"])}</td><td>{r.get("tried", 0)}</td><td>{ch}</td>'
+                        f'<td>{unseen}</td><td>{mark}{_e(r["outcome"])}'
+                        + (f'<br>new: {_e(r["new_id"])}' if r.get("new_id") else "") + "</td></tr>")
+        parts.append(f'<p class="small">Last run {time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(rep["at"]))}: '
+                     f'{rep.get("improved", 0)} of {len(rep.get("results", []))} improved.</p>'
+                     '<table><tr><th>Strategy</th><th>Settings tried</th><th>Changes</th>'
+                     '<th>Newer data it never saw: per trade, win rate (before → after)</th><th>Result</th></tr>'
+                     + "".join(rows) + "</table>")
+    return "".join(parts)
 
 
 def add_teacher_routes(app, *, settings, page, guard, auth, paths, csrf, jobs, exchange: str,
@@ -103,6 +137,9 @@ def add_teacher_routes(app, *, settings, page, guard, auth, paths, csrf, jobs, e
                            '</button></form>')
         parts.append(f'<div class="row">{"".join(buttons)}</div></div>')
 
+        imp_busy = next((j for j in jobs.list() if j["status"] in ("queued", "running")
+                         and j.get("meta", {}).get("kind") == "improve"), None)
+        improve_html = _improve_section(load_report(paths.improve), imp_busy, form)
         lessons = (act or cand).get("lessons", {})
         if lessons:
             from ..data.store import CandleStore
@@ -127,6 +164,7 @@ def add_teacher_routes(app, *, settings, page, guard, auth, paths, csrf, jobs, e
                       "".join(rows), "</table>",
                       "<h2>Best lessons</h2>", _lesson_rows(lessons, "trade", 30),
                       "<h2>Situations to avoid</h2>", _lesson_rows(lessons, "avoid", 20)]
+        parts.append(improve_html)
         return page("Teacher", "".join(parts), user, token, refresh=120)
 
     def _post(request: Request, csrf_value: str, action):
@@ -147,6 +185,19 @@ def add_teacher_routes(app, *, settings, page, guard, auth, paths, csrf, jobs, e
                         [["learn", "teach", "--dir", root]], meta={"kind": "teach"})
             _event("teacher", f"backtest teacher started from the dashboard by {user}")
             return "Learning started. When it finishes this page shows the lessons and how they did on unseen data."
+        return _post(request, csrf, act)
+
+    @app.post("/teacher/improve")
+    def teacher_improve(request: Request, csrf: str = Form("")):
+        def act(user):
+            busy = {j.get("meta", {}).get("kind") for j in jobs.list() if j["status"] in ("queued", "running")}
+            if "improve" in busy:
+                return "The improver is already running; see its progress below."
+            jobs.submit("Improve the paper strategies: try their settings, keep what wins on unseen data",
+                        [["learn", "improve", "--report", paths.improve]], meta={"kind": "improve"})
+            _event("improve", f"strategy improver started from the dashboard by {user}")
+            return ("Improving started. It backtests many settings for every paper strategy, so it takes a while; "
+                    "the results appear at the bottom of this page.")
         return _post(request, csrf, act)
 
     @app.post("/teacher/on")
