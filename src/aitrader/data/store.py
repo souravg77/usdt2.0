@@ -83,6 +83,13 @@ class CandleStore:
         q += " ORDER BY ts"
         return [Candle(*row) for row in self.conn.execute(q, args)]
 
+    def first_ts(self, exchange: str, symbol: str, timeframe: str) -> int | None:
+        row = self.conn.execute(
+            "SELECT MIN(ts) FROM candles WHERE exchange=? AND symbol=? AND timeframe=?",
+            (exchange, symbol, timeframe),
+        ).fetchone()
+        return row[0]
+
     def last_ts(self, exchange: str, symbol: str, timeframe: str) -> int | None:
         row = self.conn.execute(
             "SELECT MAX(ts) FROM candles WHERE exchange=? AND symbol=? AND timeframe=?",

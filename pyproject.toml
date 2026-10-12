@@ -35,4 +35,4 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 
 [tool.setuptools.package-data]
-aitrader = ["learn/library/*.json"]
+aitrader = ["learn/library/*.json", "web/static/*"]

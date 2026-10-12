@@ -49,8 +49,9 @@ class Gate:
 
 
 def evaluate(entry: Entry, store: CandleStore, exchanges: list[str], symbols: list[str],
-             cfg: BacktestConfig | None = None, gate: Gate | None = None) -> dict:
-    """Backtest one registry entry and move it to paper or rejected. Returns the summary."""
+             cfg: BacktestConfig | None = None, gate: Gate | None = None, move: bool = True) -> dict:
+    """Backtest one registry entry and move it to paper or rejected (only record the result with
+    ``move=False``). Returns the summary."""
     cfg, gate = cfg or BacktestConfig(), gate or Gate()
     strat = make_strategy(entry)
     trades_in, trades_oos, markets = [], [], []
@@ -79,7 +80,9 @@ def evaluate(entry: Entry, store: CandleStore, exchanges: list[str], symbols: li
                "costs": {"taker_fee": cfg.taker_fee, "maker_fee": cfg.maker_fee,
                          "slippage_bps": cfg.slippage_bps}}
     entry.backtest = summary
-    if not markets:
+    if not move:
+        pass
+    elif not markets:
         pass  # stays a candidate until there is data to test it on
     elif why:
         entry.set_status("rejected", "; ".join(why))

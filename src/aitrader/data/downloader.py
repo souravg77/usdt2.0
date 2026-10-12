@@ -1,4 +1,5 @@
-"""Paginated historical candle download, resumable from the last stored candle."""
+"""Paginated historical candle download: fills in older history before the first stored candle,
+then resumes from the last one."""
 
 from __future__ import annotations
 
@@ -27,8 +28,19 @@ async def download(
 ) -> int:
     step = TIMEFRAME_MS[timeframe]
     until_ms = until_ms or int(time.time() * 1000)
+    first = store.first_ts(adapter.name, symbol, timeframe)
     last = store.last_ts(adapter.name, symbol, timeframe)
+    total = 0
+    if first is not None and since_ms < first:
+        # older history than what is stored (e.g. the collector keeps only recent weeks)
+        total += await _fetch(adapter, store, symbol, timeframe, since_ms, min(first, until_ms),
+                              drop_open_candle)
     cursor = max(since_ms, last + step) if last is not None else since_ms
+    return total + await _fetch(adapter, store, symbol, timeframe, cursor, until_ms, drop_open_candle)
+
+
+async def _fetch(adapter, store, symbol, timeframe, cursor, until_ms, drop_open_candle) -> int:
+    step = TIMEFRAME_MS[timeframe]
     limit = PAGE_LIMIT.get(adapter.name, 500)
     total = 0
     while cursor < until_ms:

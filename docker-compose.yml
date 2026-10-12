@@ -46,6 +46,13 @@ services:
     <<: *app
     command: ["context", "collect", "--interval", "900"]
 
+  # World and crypto news: free feeds (fear & greed, trending coins, headlines) plus a brief
+  # from Claude, which searches the web (wars, regulation, hacks, demand, coming coin events).
+  # Needs the Anthropic key (Settings page) for the brief; every AITRADER_NEWS_EVERY_HOURS (4).
+  news:
+    <<: *app
+    command: ["news", "run"]
+
   # Paper-trades every strategy that passed `aitrader learn test`, with the calendar, market
   # context and AI filters. Never sends exchange orders.
   paper:

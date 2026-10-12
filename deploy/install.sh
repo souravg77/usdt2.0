@@ -11,7 +11,8 @@
 #   3. downloads the code into ~/AI_crypto_trader
 #   4. creates .env with strong random secrets (the dashboard password is printed once)
 #   5. builds the image, prepares the database, starts collector, context, paper, web and caddy
-#   6. runs `aitrader doctor`
+#   6. schedules a daily backup (cron, 03:30) and makes the first one
+#   7. runs `aitrader doctor`
 # Live trading stays locked. Running it again is safe: existing settings are kept.
 set -euo pipefail
 
@@ -30,7 +31,7 @@ while [ $# -gt 0 ]; do
     --dir) DIR="$2"; shift 2 ;;
     --branch) BRANCH="$2"; shift 2 ;;
     --no-firewall) FIREWALL=0; shift ;;
-    -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
     *) echo "unknown option $1" >&2; exit 2 ;;
   esac
 done
@@ -53,7 +54,7 @@ say "Updating Ubuntu and installing base packages"
 sudo apt-get update -y
 sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl git ufw fail2ban \
-  unattended-upgrades openssl rsync
+  unattended-upgrades openssl rsync cron
 sudo dpkg-reconfigure -f noninteractive unattended-upgrades
 sudo systemctl enable --now fail2ban
 sudo timedatectl set-ntp true || true  # trading needs a correct clock
@@ -115,6 +116,10 @@ setkey() {  # setkey NAME VALUE: set NAME in .env if it is empty or missing
 say "Settings (.env)"
 NEW_PW=""
 [ -f .env ] || cp .env.example .env
+# the old 5-pair default becomes the top-20 list; a list you changed yourself is kept
+if grep -qx 'AITRADER_SYMBOLS=BTC/USDT,ETH/USDT,SOL/USDT,BNB/USDT,XRP/USDT' .env; then
+  sed -i 's#^AITRADER_SYMBOLS=.*#AITRADER_SYMBOLS=BTC/USDT,ETH/USDT,SOL/USDT,BNB/USDT,XRP/USDT,DOGE/USDT,ADA/USDT,TRX/USDT,LINK/USDT,AVAX/USDT,SUI/USDT,LTC/USDT,BCH/USDT,DOT/USDT,TON/USDT,NEAR/USDT,APT/USDT,UNI/USDT,AAVE/USDT,PEPE/USDT#' .env
+fi
 chmod 600 .env
 if ! grep -qE '^AITRADER_WEB_PASSWORD=.{12,}' .env; then
   NEW_PW="$(openssl rand -base64 18 | tr -d '/+=' | cut -c1-20)"
@@ -139,8 +144,25 @@ grep -q '^AITRADER_LIVE_UNLOCKED=true' .env && echo "NOTE: live trading is unloc
 say "Building and starting (the first build takes a few minutes)"
 $DOCKER compose build
 $DOCKER compose run --rm -T collector migrate
-$DOCKER compose up -d collector context paper web
+$DOCKER compose up -d collector context news paper web
+# The testnet trader (fake money) runs too: it waits until testnet keys are saved on the Settings
+# page. Telegram and user accounts are restarted on the new code only if they were running.
+# The live pilot (real money) is never started or restarted from here.
+$DOCKER compose --profile testnet up -d executor-testnet
+for svc in telegram users; do
+  if [ -n "$($DOCKER compose --profile "$svc" ps -q --status running "$svc" 2>/dev/null)" ]; then
+    $DOCKER compose --profile "$svc" up -d "$svc"
+  fi
+done
 $DOCKER compose --profile https up -d --force-recreate caddy  # picks up Caddyfile changes
+
+say "Daily backups"
+# Every day at 03:30 (server time): database, strategy registry, trade state, accounts. The newest
+# 14 are kept in data/backups/. One runs now as well, so there is a backup from the start.
+CRON_LINE="30 3 * * * cd $DIR && ./deploy/backup.sh >> data/backup.log 2>&1"
+( crontab -l 2>/dev/null | grep -v 'deploy/backup.sh' || true; echo "$CRON_LINE" ) | crontab -
+sudo systemctl enable --now cron >/dev/null 2>&1 || true
+DOCKER="$DOCKER" ./deploy/backup.sh || echo "warning: the first backup failed; run ./deploy/backup.sh to see why" >&2
 
 say "Health check"
 sleep 10

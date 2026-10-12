@@ -310,3 +310,81 @@ def test_paper_honours_pause_context_and_writes_events(tmp_path):
     assert "trade_open" in kinds
     assert all(s == pytest.approx(0.5) for s in sizes)
     store.close()
+
+
+def test_paper_tick_keeps_registry_changes_made_meanwhile(tmp_path):
+    """A `learn` command (or the dashboard) may change the registry while a paper tick runs."""
+    df = synthetic(n=700)
+    store = CandleStore(str(tmp_path / "c.db"))
+    fill_store(store, df)
+    reg_path = str(tmp_path / "reg.json")
+    reg = Registry(reg_path)
+    reg.add(Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR), status="paper"))
+    reg.add(Entry(id="new", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR)))
+    reg.save()
+    trader = PaperTrader(store, reg_path, ["binance"], ["BTC/USDT"], state_path=str(tmp_path / "s.json"))
+    real_score = trader._score
+
+    def score_while_someone_edits(r, events):
+        other = Registry(reg_path)
+        other.get("new").set_status("paper", "paper-all")
+        other.save()
+        real_score(r, events)
+
+    trader._score = score_while_someone_edits
+    for i in range(600, 650):
+        trader.tick(now_ms=int(df.ts.iloc[i]) + H)
+    saved = Registry(reg_path)
+    assert saved.get("new").status == "paper"
+    assert saved.get("up").paper["trades"] >= 1
+
+
+def test_paper_skips_markets_without_a_new_candle(tmp_path):
+    df = synthetic(n=700)
+    store = CandleStore(str(tmp_path / "c.db"))
+    fill_store(store, df)
+    reg_path = str(tmp_path / "reg.json")
+    reg = Registry(reg_path)
+    reg.add(Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR), status="paper"))
+    reg.add(Entry(id="broken", kind="rule", name="x", spec={"bad": True}, status="paper"))
+    reg.save()
+    trader = PaperTrader(store, reg_path, ["binance"], ["BTC/USDT"], state_path=str(tmp_path / "s.json"))
+    now = int(df.ts.iloc[650]) + H
+    trader.tick(now_ms=now)  # the broken strategy is skipped, not fatal
+    calls = []
+    real = trader._frame
+    trader._frame = lambda *a: calls.append(a) or real(*a)
+    trader.tick(now_ms=now + 1000)  # same closed candle: loaded once, nothing evaluated again
+    assert len(calls) == 1
+
+
+def test_learn_paper_all_moves_untested_and_rejected(tmp_path, monkeypatch):
+    from aitrader.cli import main
+
+    monkeypatch.chdir(tmp_path)
+    reg_path = str(tmp_path / "reg.json")
+    reg = Registry(reg_path)
+    for eid, status in (("a", "candidate"), ("b", "rejected"), ("c", "paper"), ("d", "retired")):
+        reg.add(Entry(id=eid, kind="rule", name=eid, spec=validate_spec(EVERY_UP_BAR), status=status))
+    reg.save()
+    assert main(["--env-file", "none", "learn", "--registry", reg_path, "paper-all"]) == 0
+    got = {e.id: e.status for e in Registry(reg_path).entries.values()}
+    assert got == {"a": "paper", "b": "paper", "c": "paper", "d": "retired"}
+
+
+def test_learn_test_paper_records_without_moving(tmp_path, monkeypatch):
+    from aitrader.cli import main
+
+    monkeypatch.chdir(tmp_path)
+    store = CandleStore(str(tmp_path / "c.db"))
+    fill_store(store, synthetic())
+    store.close()
+    monkeypatch.setenv("AITRADER_DB_PATH", str(tmp_path / "c.db"))
+    reg_path = str(tmp_path / "reg.json")
+    reg = Registry(reg_path)
+    reg.add(Entry(id="p", kind="rule", name="p", spec=validate_spec(EVERY_UP_BAR), status="paper"))
+    reg.save()
+    assert main(["--env-file", "none", "learn", "--registry", reg_path, "--symbol", "BTC/USDT",
+                 "--exchange", "binance", "test", "--paper"]) == 0
+    e = Registry(reg_path).get("p")
+    assert e.status == "paper" and e.backtest["markets"]

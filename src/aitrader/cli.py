@@ -283,6 +283,61 @@ async def cmd_context(s: Settings, args) -> int:
         ctx.close()
 
 
+def cmd_news(s: Settings, args) -> int:
+    """News and web search: free feeds plus Claude's web-search brief (see aitrader.news)."""
+    import time
+
+    from .news import NewsFilter, load_latest, update
+    from .ops import EventLog
+    from .ops.secrets import apply_to_env
+
+    symbols = args.symbol or s.symbols
+    if args.news_cmd in ("update", "run"):
+        from .news.service import x_reader
+
+        events = EventLog(service="news")
+        hours = args.every_hours or float(os.environ.get("AITRADER_NEWS_EVERY_HOURS", "4") or 4)
+        x_every = 60 * float(os.environ.get("AITRADER_X_EVERY_MIN", "15") or 15)
+        last_brief = 0.0
+        while True:
+            apply_to_env()  # a key saved on the Settings page is used from the next run on
+            due = time.time() - last_brief >= max(0.5, hours) * 3600
+            if not due and args.news_cmd == "run":
+                # between briefs: check the watched X accounts; a new post about one of our coins
+                # brings the next brief forward (at most one extra brief an hour)
+                x = x_reader()
+                new = x.check_watch(symbols) if x else []
+                hot = [p for p in new if p["pairs"]]
+                if hot:
+                    events.emit("news", f"X: @{hot[0]['username']} posted about {', '.join(hot[0]['pairs'])}: "
+                                        f"{hot[0]['text'][:200]}", url=hot[0]["url"])
+                    due = time.time() - last_brief >= 3600
+            if due:
+                out = update(symbols, events=events, max_searches=args.max_searches)
+                last_brief = time.time()
+                b = out["brief"]
+                print(f"news: market risk {b['market_risk']}, {b['searches']} web searches" if b
+                      else f"news: feeds saved, no AI brief ({out['brief_error']})", flush=True)
+                if args.news_cmd == "update":
+                    return 0 if b else 1
+            time.sleep(x_every)
+    latest = load_latest()
+    if not latest:
+        print("no news yet: run `aitrader news update`")
+        return 1
+    b = latest.get("brief")
+    if not b:
+        print(f"no AI brief: {latest.get('brief_error')}")
+    else:
+        print(f"market risk {b['market_risk']}: {b['market_risk_why']}\n{b['summary']}")
+        for p in b["pairs"]:
+            print(f"  {p['symbol']:10} risk {p['risk']:8} demand {p['demand']:7} sentiment {p['sentiment']:+.2f}  {p['why']}")
+    for sym in symbols:
+        d = NewsFilter().decide(sym)
+        print(f"{sym}: new buys {'allowed' if d.allow_entries else 'PAUSED'}, size x{d.size_multiplier:g}")
+    return 0
+
+
 def cmd_kb(_s: Settings, args) -> int:
     from .knowledge import DEFAULT_INDEX, KnowledgeBase, build_index
 
@@ -323,12 +378,15 @@ def cmd_learn(s: Settings, args) -> int:
     cfg = BacktestConfig(taker_fee=s.paper_taker_fee, maker_fee=s.paper_maker_fee,
                          slippage_bps=s.paper_slippage_bps)
 
-    def run_tests(entries) -> None:
+    def run_tests(entries, move: bool = True) -> None:
         store = CandleStore(s.db_path)
         for e in entries:
-            res = evaluate(e, store, exchanges, symbols, cfg)
+            res = evaluate(e, store, exchanges, symbols, cfg, move=move)
             m = res["out_of_sample"]
-            verdict = {"paper": "PASSED -> paper trading", "rejected": "rejected"}.get(e.status, "untested")
+            if move:
+                verdict = {"paper": "PASSED -> paper trading", "rejected": "rejected"}.get(e.status, "untested")
+            else:
+                verdict = "no data" if not res["markets"] else "failed" if res["failed"] else "passed"
             print(f"  {e.id:40} {verdict:24} oos trades={m['trades']:4d} exp={m['expectancy_r']:+.3f}R"
                   + (f"\n      why: {'; '.join(res['failed'])}" if res["failed"] else ""))
         store.close()
@@ -382,15 +440,42 @@ def cmd_learn(s: Settings, args) -> int:
             print(("  + " if reg.add(e) else "  = ") + e.id)
         reg.save()
         return 0
+    if cmd == "paper-all":
+        moved = 0
+        for e in reg.with_status("candidate", "rejected"):
+            e.set_status("paper", "paper-test every strategy (turned on from the dashboard or `learn paper-all`)")
+            moved += 1
+        reg.save()
+        n = len(reg.with_status("paper"))
+        print(f"{moved} strategies moved to paper trading; {n} paper trading now "
+              f"({len(reg.with_status('retired'))} retired after poor paper results stay retired)")
+        return 0
     if cmd == "test":
         if args.ids:
             entries = [reg.get(i) for i in args.ids]
+        elif args.paper:
+            entries = reg.with_status("paper")
         else:
             entries = reg.with_status("candidate", *(("rejected",) if args.retest else ()))
         if not entries:
             print("nothing to test (add strategies with `learn read` or `learn add-builtin`)")
             return 0
-        run_tests(entries)
+        run_tests(entries, move=not args.paper)
+        return 0
+    if cmd == "report":
+        from .learn.report import backtest_report, known_entries, report_text, save_report
+
+        store = CandleStore(s.db_path)
+        try:
+            rep = backtest_report(known_entries(reg.entries, builtins=not args.no_builtins), store, args.exchange or ["binance"], symbols,
+                                  years=args.years, cfg=cfg,
+                                  progress=lambda n, total, sid, k: print(f"  [{n}/{total}] {sid}: {k} trades",
+                                                                          flush=True))
+        finally:
+            store.close()
+        path = save_report(rep, args.out)
+        print(report_text(rep))
+        print(f"report saved to {path}")
         return 0
     if cmd == "list":
         if not reg.entries:
@@ -416,6 +501,7 @@ def cmd_learn(s: Settings, args) -> int:
         return 0
     if cmd == "paper":
         from .events import CalendarFilter
+        from .news import NewsFilter
 
         from .ai import LiveFilter
 
@@ -434,7 +520,8 @@ def cmd_learn(s: Settings, args) -> int:
                              calendar=None if args.no_calendar else CalendarFilter(),
                              ai_filter=None if args.no_ai else LiveFilter(args.models),
                              control=Control(os.path.join(TRADE_DIR, "control.json")),
-                             context=context, events=EventLog(service="paper"))
+                             context=context, events=EventLog(service="paper"),
+                             news=None if args.no_news else NewsFilter())
         try:
             if args.once:
                 print(trader.tick())
@@ -1009,6 +1096,13 @@ def build_parser() -> argparse.ArgumentParser:
     bt.add_argument("--months", type=int, default=12, help="months of the results calendar to print")
     bt.add_argument("--final", action="store_true", help="also run the untouched final test period")
 
+    nw = sub.add_parser("news", help="world and crypto news: feeds plus the AI's web-search brief")
+    nw.add_argument("news_cmd", choices=["update", "run", "show"])
+    nw.add_argument("--symbol", action="append")
+    nw.add_argument("--every-hours", type=float, default=None,
+                    help="for run: hours between briefs (default AITRADER_NEWS_EVERY_HOURS or 4)")
+    nw.add_argument("--max-searches", type=int, default=None, help="web searches per brief (default 6)")
+
     ca = sub.add_parser("calendar", help="show upcoming high-impact events and the current decision")
     ca.add_argument("--hours", type=float, default=72)
 
@@ -1047,9 +1141,18 @@ def build_parser() -> argparse.ArgumentParser:
     ll.add_argument("--test", action="store_true", help="backtest them straight away")
     lb = le_sub.add_parser("add-builtin", help="register the hand-coded strategies too")
     lb.add_argument("names", nargs="*")
+    le_sub.add_parser("paper-all", help="paper-trade every strategy, including untested and rejected "
+                                        "ones (fake money; poor ones retire on their paper results)")
     lt = le_sub.add_parser("test", help="backtest candidates; passes go to paper trading")
     lt.add_argument("ids", nargs="*")
     lt.add_argument("--retest", action="store_true", help="also re-test rejected strategies")
+    lt.add_argument("--paper", action="store_true", help="backtest the strategies already paper trading and "
+                                                        "record the result, without moving them")
+    lrp = le_sub.add_parser("report", help="backtest every strategy over the last N years: win report "
+                                           "per strategy and per year")
+    lrp.add_argument("--years", type=int, default=5)
+    lrp.add_argument("--out", default="data/reports/backtest.json")
+    lrp.add_argument("--no-builtins", action="store_true", help="leave out the hand-coded strategies")
     le_sub.add_parser("list", help="every strategy with its status and results")
     ls = le_sub.add_parser("show", help="full rules, sources and results of one strategy")
     ls.add_argument("id")
@@ -1060,6 +1163,7 @@ def build_parser() -> argparse.ArgumentParser:
     lp.add_argument("--interval", type=float, default=60)
     lp.add_argument("--once", action="store_true")
     lp.add_argument("--no-calendar", action="store_true", help="ignore the economic calendar filter")
+    lp.add_argument("--no-news", action="store_true", help="ignore the AI news filter")
     lp.add_argument("--no-ai", action="store_true", help="ignore the active AI trade filter")
     lp.add_argument("--models", default="data/ai/models", help="trade-filter model registry folder")
     lp.add_argument("--no-context", action="store_true", help="ignore the market-context filter")
@@ -1190,6 +1294,7 @@ def main(argv: list[str] | None = None) -> int:
         "backtest": cmd_backtest,
         "calendar": cmd_calendar,
         "context": cmd_context,
+        "news": cmd_news,
         "kb": cmd_kb,
         "learn": cmd_learn,
         "ai": cmd_ai,

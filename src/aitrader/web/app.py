@@ -49,11 +49,13 @@ class Paths:
     events: str = "data/ops/events.jsonl"
     users_dir: str = "data/users"
     keys_store: str = "data/settings/keys.enc"
+    report: str = "data/reports/backtest.json"
+    news: str = "data/news"
 
 
 def create_app(settings: Settings, auth: Auth, jobs: JobRunner, paths: Paths | None = None,
                secure_cookie: bool = False, users=None, keys_secret: str = "", signup: bool = False,
-               verifier=None, checkers: dict | None = None) -> FastAPI:
+               verifier=None, checkers: dict | None = None, live=None) -> FastAPI:
     """``users`` (an ``accounts.UserStore``) turns on user accounts: sign-up when ``signup`` is
     true, each user's own page, and the admin's Users page. Without it only the admin can log in."""
     paths = paths or Paths()
@@ -84,23 +86,24 @@ def create_app(settings: Settings, auth: Auth, jobs: JobRunner, paths: Paths | N
         return user, token, None
 
     def page(title: str, body: str, user: str | None = None, token: str | None = None,
-             refresh: int | None = None, nav_links: str | None = None) -> HTMLResponse:
+             refresh: int | None = None, nav_links: str | None = None, head_extra: str = "") -> HTMLResponse:
         nav = ""
         if user:
-            links = nav_links if nav_links is not None else (
-                '<a href="/">Overview</a><a href="/markets">Markets</a><a href="/trading">Trading</a>'
-                '<a href="/books">Submit a book</a>'
-                + ('<a href="/admin/users">Users</a>' if users is not None else "")
-                + '<a href="/settings">Settings</a>')
-            nav = (f'<nav>{links}'
+            links = nav_links if nav_links is not None else "".join(
+                f'<a href="{href}"{" class=active aria-current=page" if name == title else ""}>{name}</a>'
+                for href, name in NAV if href != "/admin/users" or users is not None)
+            nav = (f'<nav>{links}</nav><div class="who"><span class="muted small">{_e(user)}</span>'
                    f'<form method="post" action="/logout" class="inline">{_csrf(auth, token)}'
-                   f'<button>Log out {_e(user)}</button></form></nav>')
+                   f'<button class="link">Log out</button></form></div>')
         meta = f'<meta http-equiv="refresh" content="{refresh}">' if refresh else ""
+        mode = settings.mode.value
         return HTMLResponse(f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">{meta}
 <title>{_e(title)} · aitrader</title><style>{CSS}</style></head>
-<body><header><b>aitrader</b> <span class="pill">{_e(settings.mode.value)} mode</span>{nav}</header>
-<main><h1>{_e(title)}</h1>{body}</main></body></html>""")
+<body><header><a class="brand" href="/"><span class="logo" aria-hidden="true"></span>aitrader</a>
+<span class="mode mode-{_e(mode)}">{_e(mode)} mode</span>{nav}</header>
+<main><div class="page-head"><h1>{_e(title)}</h1>{head_extra}</div>{body}</main>
+<footer class="muted small">aitrader · live trading stays locked until you open it on the server</footer></body></html>""")
 
     # ---- login ----------------------------------------------------------------------------------
 
@@ -145,9 +148,17 @@ def create_app(settings: Settings, auth: Auth, jobs: JobRunner, paths: Paths | N
         return resp
 
     from .market_pages import add_market_routes
+    from .news_pages import add_news_routes
+    from .replay_pages import add_replay_routes
+    from .report_pages import add_report_routes
     from .settings_pages import add_settings_routes
 
-    add_market_routes(app, settings=settings, page=page, guard=guard)
+    add_market_routes(app, settings=settings, page=page, guard=guard, live=live)
+    add_report_routes(app, settings=settings, auth=auth, jobs=jobs, page=page, guard=guard,
+                      report_path=paths.report)
+    add_news_routes(app, settings=settings, auth=auth, jobs=jobs, page=page, guard=guard, news_dir=paths.news)
+    add_replay_routes(app, settings=settings, auth=auth, jobs=jobs, page=page, guard=guard,
+                      registry_path=paths.registry, report_path=paths.report)
 
     add_settings_routes(app, settings=settings, auth=auth, paths=paths, jobs=jobs,
                         keys_secret=keys_secret, page=page, guard=guard, checkers=checkers)
@@ -301,11 +312,15 @@ paper trading. Nothing trades real money.</p>
                     'Type KILL to confirm <input name="confirm" autocomplete="off" placeholder="KILL"></label>'
                     '<button class="danger">Pull the kill switch</button></form></div>')
         note = f'<p class="good">{_e(msg)}</p>' if msg else ""
-        body = [note, '<div class="grid">', controls, _gate_card(paths, csrf), "</div>",
+        events = EventLog(paths.events).read(limit=600)
+        body = [note, _trading_stats(c, settings, paths, paper, events),
+                '<div class="grid">', _paper_switch_card(c, paths, events, jobs.list(), csrf),
+                _live_card(settings, paths, events), "</div>",
+                '<div class="grid">', controls, _gate_card(paths, csrf), "</div>",
                 "<h2>Equity</h2>", _equity_svg(paper, execs),
                 "<h2>Open positions</h2>", _positions_table(paper, execs),
                 "<h2>Trade log</h2>", _trades_table(paper, execs),
-                "<h2>Events</h2>", _events_table(EventLog(paths.events).read(limit=60))]
+                "<h2>Events</h2>", _events_table(events)]
         return page("Trading", "".join(body), user, token, refresh=60)
 
     def _control_post(request: Request, csrf: str, action) -> Response:
@@ -347,6 +362,37 @@ paper trading. Nothing trades real money.</p>
             return "Kill switch on: entries stopped, executors are selling. Resume when ready."
         return _control_post(request, csrf, act)
 
+    @app.post("/trading/paper/on")
+    def trading_paper_on(request: Request, csrf: str = Form("")):
+        def act(user):
+            ctl = _control()
+            if ctl.killed:
+                return "The kill switch is on: press Resume under Controls first, then turn paper trading on."
+            if ctl.paused:
+                ctl.resume(by=user)
+                _event("resume", f"paper trading turned on from the dashboard by {user}")
+            if any(j["status"] in ("queued", "running") and j.get("meta", {}).get("kind") == "paper-start"
+                   for j in jobs.list()):
+                return "Paper trading is already being switched on; see Recent jobs on the Overview page."
+            since = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 365 * 86400))
+            jobs.submit("Turn paper trading on: every strategy, then a year of price history",
+                        [["learn", "add-library"], ["learn", "add-builtin"], ["learn", "paper-all"],
+                         ["download", "--since", since, "--exchange", "binance"],
+                         ["learn", "test", "--paper"]], meta={"kind": "paper-start"})
+            _event("paper_on", f"paper trading turned on from the dashboard by {user}")
+            return ("Paper trading is on: every strategy is being loaded into paper trading, then a year of "
+                    "price history is downloaded and each one is backtested. Trades open when a strategy's "
+                    "signal appears on a closed candle.")
+        return _control_post(request, csrf, act)
+
+    @app.post("/trading/paper/off")
+    def trading_paper_off(request: Request, csrf: str = Form("")):
+        def act(user):
+            _control().pause(f"paper trading turned off from the dashboard by {user}", by=user)
+            _event("risk_pause", f"paper trading turned off from the dashboard by {user}", "warning")
+            return "Paper trading is off: no new entries. Open positions are still managed until they close."
+        return _control_post(request, csrf, act)
+
     @app.post("/trading/gate")
     def trading_gate(request: Request, csrf: str = Form("")):
         def act(_user):
@@ -359,6 +405,10 @@ paper trading. Nothing trades real money.</p>
         return _control_post(request, csrf, act)
 
     return app
+
+
+NAV = [("/", "Overview"), ("/markets", "Markets"), ("/trading", "Trading"), ("/replay", "Replay"),
+       ("/news", "News"), ("/reports", "Reports"), ("/books", "Submit a book"), ("/admin/users", "Users"), ("/settings", "Settings")]
 
 
 def max_val(v) -> int:
@@ -562,14 +612,143 @@ def _trades_table(paper: dict, execs: dict, limit: int = 40) -> str:
             f"<th>Result</th><th>USDT</th><th>AI p</th><th>Exit</th></tr>{''.join(out)}</table>")
 
 
-def _events_table(events: list[dict]) -> str:
-    events = [e for e in events if e.get("kind") != "heartbeat"][-30:]
-    if not events:
+def _events_table(events: list[dict], limit: int = 30) -> str:
+    """Newest first; repeats of the same message in a row are shown once with a count."""
+    groups: list[dict] = []
+    for e in events:
+        if e.get("kind") == "heartbeat":
+            continue
+        key = (e.get("service"), e.get("kind"), e.get("text"))
+        if groups and groups[-1]["key"] == key:
+            groups[-1]["n"] += 1
+            groups[-1]["ts"] = e.get("ts")
+        else:
+            groups.append({"key": key, "n": 1, "ts": e.get("ts"), "first": e.get("ts"), "level": e.get("level")})
+    groups = groups[-limit:]
+    if not groups:
         return "<p class=muted>No events yet.</p>"
-    rows = "".join(f'<tr><td>{_ms(e.get("ts"))}</td><td>{_e(e.get("service", ""))}</td>'
-                   f'<td class="{"bad" if e.get("level") in ("error", "warning") else ""}">{_e(e.get("kind", ""))}</td>'
-                   f'<td class=small>{_e(str(e.get("text", ""))[:200])}</td></tr>' for e in reversed(events))
-    return f"<table><tr><th>When</th><th>Service</th><th>Kind</th><th>What</th></tr>{rows}</table>"
+    rows = []
+    for g in reversed(groups):
+        service, kind, text = g["key"]
+        lvl = g["level"] if g["level"] in ("error", "warning") else ""
+        badge = {"error": "bad", "warning": "warn"}.get(lvl, "")
+        times = f' <span class="badge">×{g["n"]}</span><div class="muted small">since {_ms(g["first"])}</div>' \
+            if g["n"] > 1 else ""
+        rows.append(f'<tr><td class=small>{_ms(g["ts"])}{times}</td><td>{_e(service or "")}</td>'
+                    f'<td><span class="badge {badge}">{_e(kind or "")}</span></td>'
+                    f'<td class=small>{_e(str(text or "")[:240])}</td></tr>')
+    return f"<table><tr><th>When</th><th>Service</th><th>Kind</th><th>What</th></tr>{''.join(rows)}</table>"
+
+
+def _service_state(events: list[dict], service: str, now_ms: int) -> tuple[str, str, str]:
+    """(label, css class, detail) for a service, from its latest events."""
+    mine = [e for e in events if e.get("service") == service]
+    if not mine:
+        return "not running", "", "no events yet"
+    last = mine[-1]
+    beats = [e for e in mine if e.get("kind") == "heartbeat"]
+    fresh = beats and now_ms - beats[-1].get("ts", 0) < 15 * 60_000
+    if last.get("kind") == "waiting":
+        return "waiting for keys", "warn", "add the testnet keys on the Settings page"
+    if last.get("level") == "error":
+        return "error", "bad", str(last.get("text", ""))[:120]
+    if fresh:
+        return "running", "good", f"last check-in {_ms(beats[-1].get('ts'))}"
+    return "quiet", "warn", f"last seen {_ms(last.get('ts'))}"
+
+
+def _trading_stats(c: dict, settings, paths: Paths, paper: dict, events: list[dict]) -> str:
+    from ..learn import Registry
+
+    now = int(time.time() * 1000)
+    if c["killed"]:
+        trading = ("Kill switch on", "bad")
+    elif c["paused"]:
+        trading = ("Paused", "warn")
+    else:
+        trading = ("Running", "good")
+    tn, tn_cls, tn_detail = _service_state(events, "executor-testnet", now)
+    trades = paper.get("trades", [])
+    pnl = sum(t.get("pnl_usdt", 0) for t in trades)
+    try:
+        in_paper = sum(1 for e in Registry(paths.registry).entries.values() if e.status == "paper")
+    except Exception:
+        in_paper = 0
+    tiles = [
+        ("Trading", trading[0], trading[1], "new entries" if not c["paused"] and not c["killed"] else ""),
+        ("Mode", settings.mode.value, "", "live orders locked" if live_gate_problems(settings) else "LIVE UNLOCKED"),
+        ("Testnet trader", tn, tn_cls, tn_detail),
+        ("Strategies trading", str(in_paper), "good" if in_paper else "warn", "in paper trading"),
+        ("Paper P&L", f"{pnl:+,.2f}", "good" if pnl > 0 else "bad" if pnl < 0 else "",
+         f"{len(paper.get('open', {}))} open · {len(trades)} closed"),
+    ]
+    return '<div class="stats">' + "".join(
+        f'<div class="stat"><span class="k">{_e(k)}</span><span class="v {cls}">{_e(v)}</span>'
+        f'<span class="s">{_e(sub)}</span></div>' for k, v, cls, sub in tiles) + "</div>"
+
+
+def _paper_switch_card(c: dict, paths: Paths, events: list[dict], jobs: list[dict], csrf: str) -> str:
+    """The paper-trading switch: on loads every strategy into paper trading; off pauses entries."""
+    from ..learn import Registry
+
+    try:
+        in_paper = sum(1 for e in Registry(paths.registry).entries.values() if e.status == "paper")
+    except Exception:
+        in_paper = 0
+    svc, svc_cls, svc_detail = _service_state(events, "paper", int(time.time() * 1000))
+    starting = next((j for j in jobs if j.get("meta", {}).get("kind") == "paper-start"
+                     and j["status"] in ("queued", "running")), None)
+    if c["killed"]:
+        state, cls, why = "OFF", "bad", "the kill switch is on"
+    elif c["paused"]:
+        state, cls, why = "OFF", "bad", "new entries are paused"
+    elif starting:
+        state, cls, why = "STARTING", "warn", f'loading strategies and price history (<a href="/jobs/{_e(starting["id"])}">progress</a>)'
+    elif not in_paper:
+        state, cls, why = "OFF", "bad", "no strategy is paper trading yet"
+    elif svc_cls != "good":
+        state, cls, why = "ON", "warn", f"but the paper service is {_e(svc)} ({_e(svc_detail)})"
+    else:
+        state, cls, why = "ON", "good", f"{in_paper} strategies trading with fake money"
+    on = "Turn paper trading on" if state != "ON" else "Reload every strategy"
+    return (f'<div class="card"><h3>Paper trading (fake money)</h3><p>Paper trading <b class="{cls}">{state}</b>: {why}</p>'
+            '<p class="small muted">On puts every strategy into paper trading, the untested and the '
+            'backtest-rejected ones too, and downloads a year of history for all pairs. Each one then trades '
+            'live prices with fake money; one that loses too much retires by itself. Each one is then backtested '
+            'too: only strategies that pass both the backtest and paper trading can ever be approved for live. '
+            'Off pauses new entries '
+            '(pause and resume apply to the testnet and live traders too).</p><div class="row">'
+            f'<form method="post" action="/trading/paper/on">{csrf}<button>{on}</button></form>'
+            f'<form method="post" action="/trading/paper/off">{csrf}<button class="ghost">Turn paper trading off</button></form>'
+            '</div></div>')
+
+
+def _live_card(settings, paths: Paths, events: list[dict]) -> str:
+    """Live (real money) readiness. It is switched on only on the server, never from the website."""
+    rep = _load_json(os.path.join(paths.golive_dir, "report.json"))
+    approval = _load_json(os.path.join(paths.golive_dir, "approval.json"))
+    svc, svc_cls, _detail = _service_state(events, "executor-live", int(time.time() * 1000))
+    checks = [
+        ("Real Binance keys saved (trade only, withdrawals off)",
+         bool(os.environ.get("BINANCE_API_KEY") and os.environ.get("BINANCE_API_SECRET"))),
+        ("Go/no-go gate passed", bool(rep.get("passed"))),
+        ("Strategies approved (aitrader golive approve)", bool(approval.get("by"))),
+        ("Pilot budget set (AITRADER_PILOT_MAX_USDT in .env)", bool(os.environ.get("AITRADER_PILOT_MAX_USDT"))),
+        ("Live lock opened in .env on the server", not live_gate_problems(settings)),
+        ("Live trader running", svc_cls == "good"),
+    ]
+    on = all(ok for _n, ok in checks)
+    rows = "".join(f'<li class="{"good" if ok else "bad"}">{"✓" if ok else "✗"} {_e(n)}</li>' for n, ok in checks)
+    return (f'<div class="card"><h3>Live trading (real money)</h3><p>Live trading <b class="{"good" if on else "bad"}">'
+            f'{"ON" if on else "OFF"}</b></p><ul class="small gate">{rows}</ul>'
+            '<p class="small">There is no switch for this on the website, on purpose: anyone who got your '
+            'dashboard password could otherwise trade your real money. When the first four lines are '
+            'ticked, turn it on from the server: in <code>~/AI_crypto_trader/.env</code> set '
+            '<code>AITRADER_MODE=live</code>, <code>AITRADER_LIVE_UNLOCKED=true</code> and '
+            '<code>AITRADER_LIVE_CONFIRM=I accept real-money risk</code>, then run '
+            '<code>docker compose up -d</code> and <code>docker compose --profile live up -d executor-live</code>. '
+            'To stop it at once, pull the kill switch below; on the server, '
+            '<code>docker compose stop executor-live</code>. See docs/live-trading.md.</p></div>')
 
 
 def _equity_svg(paper: dict, execs: dict) -> str:
@@ -629,22 +808,106 @@ def _gate_card(paths: Paths, csrf: str) -> str:
 
 
 CSS = """
-:root{--bg:#f7f7f5;--fg:#1c1c1c;--muted:#6b6b6b;--card:#fff;--line:#e2e2de;--good:#1f7a3a;--bad:#b3261e;--accent:#2457c5}
-@media (prefers-color-scheme:dark){:root{--bg:#141414;--fg:#ececec;--muted:#9a9a9a;--card:#1e1e1e;--line:#333;--good:#5cc77a;--bad:#ff7b72;--accent:#7aa2ff}}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,sans-serif}
-header{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:10px 16px;border-bottom:1px solid var(--line);background:var(--card)}
-nav{display:flex;gap:14px;align-items:center;margin-left:auto;flex-wrap:wrap}a{color:var(--accent)}
-main{max-width:1100px;margin:0 auto;padding:16px}h1{font-size:1.4em}h2{font-size:1.15em;margin-top:28px}h3{margin:0 0 6px;font-size:1em}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:14px}.narrow{max-width:380px}
-label{display:block;margin:10px 0}label.row{display:flex;gap:8px;align-items:center}input[type=text],input[type=password],input:not([type]),input[type=number],input[type=email],select{display:block;width:100%;max-width:360px;padding:7px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)}
-button{padding:7px 14px;border:1px solid var(--accent);background:var(--accent);color:#fff;border-radius:6px;cursor:pointer}
-form.inline{display:inline}form.inline button{background:none;color:var(--accent);border:none;padding:0}
-table{width:100%;border-collapse:collapse;display:block;overflow-x:auto}th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}
-pre{background:var(--card);border:1px solid var(--line);padding:12px;border-radius:8px;overflow-x:auto;white-space:pre-wrap;word-break:break-word}
-.row{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0}button.ghost{background:none;color:var(--accent)}button.danger{background:var(--bad);border-color:var(--bad)}
-form.kill{margin-top:12px;border-top:1px solid var(--line);padding-top:8px}ul.gate{padding-left:0;list-style:none;margin:6px 0}
+:root{--bg:#0b0e13;--bg2:#0f131a;--fg:#e6e9ef;--muted:#8a93a3;--card:#141922;--card2:#1a2030;--line:#252c3a;
+--good:#16c784;--bad:#ea3943;--warnc:#f0b90b;--accent:#4c8dff;--accent2:#2f6fe4;--radius:12px;--shadow:0 1px 2px rgba(0,0,0,.3)}
+@media (prefers-color-scheme:light){:root{--bg:#f4f6f9;--bg2:#eef1f5;--fg:#141821;--muted:#5f6b7c;--card:#fff;--card2:#f7f9fc;
+--line:#e1e6ee;--good:#0e9f6e;--bad:#d92d3a;--warnc:#b7791f;--accent:#2563eb;--accent2:#1d4ed8;--shadow:0 1px 3px rgba(16,24,40,.08)}}
+*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.55 Inter,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+font-feature-settings:"tnum" 1;min-height:100vh;display:flex;flex-direction:column}
+a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+header{position:sticky;top:0;z-index:5;display:flex;gap:10px 18px;align-items:center;flex-wrap:wrap;padding:10px 20px;
+background:color-mix(in srgb,var(--card) 92%,transparent);backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:8px;font-weight:700;font-size:1.08em;color:var(--fg);letter-spacing:.2px}
+.brand:hover{text-decoration:none}
+.logo{width:22px;height:22px;border-radius:6px;background:linear-gradient(135deg,var(--accent),var(--good));
+clip-path:polygon(50% 0,100% 50%,50% 100%,0 50%)}
+.mode{font-size:.72em;font-weight:600;text-transform:uppercase;letter-spacing:.6px;padding:3px 9px;border-radius:99px;
+border:1px solid var(--line);color:var(--muted)}
+.mode-paper{color:var(--warnc);border-color:color-mix(in srgb,var(--warnc) 45%,transparent)}
+.mode-testnet{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 45%,transparent)}
+.mode-live{color:#fff;background:var(--bad);border-color:var(--bad)}
+nav{display:flex;gap:2px;flex-wrap:wrap;margin-left:auto}
+nav a{color:var(--muted);padding:6px 11px;border-radius:8px;font-weight:500;font-size:.94em}
+nav a:hover{color:var(--fg);background:var(--card2);text-decoration:none}
+nav a.active{color:var(--fg);background:var(--card2);box-shadow:inset 0 -2px 0 var(--accent)}
+.who{display:flex;gap:10px;align-items:center}
+main{width:100%;max-width:1200px;margin:0 auto;padding:20px;flex:1}
+footer{text-align:center;padding:18px;border-top:1px solid var(--line)}
+.page-head{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:4px 0 16px}
+h1{font-size:1.5em;margin:0;letter-spacing:-.2px}h2{font-size:1.12em;margin:28px 0 10px}h3{margin:0 0 8px;font-size:.98em}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:16px;box-shadow:var(--shadow)}
+.narrow{max-width:400px}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:14px}
+.stat{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:12px 14px}
+.stat .k{display:block;color:var(--muted);font-size:.78em;text-transform:uppercase;letter-spacing:.5px}
+.stat .v{display:block;font-size:1.25em;font-weight:650;margin-top:2px}
+.stat .s{display:block;font-size:.82em;color:var(--muted)}
+label{display:block;margin:10px 0;font-size:.94em}label.row{display:flex;gap:8px;align-items:center}
+input[type=text],input[type=password],input:not([type]),input[type=number],input[type=email],input[type=file],input[type=month],select{
+display:block;width:100%;max-width:420px;margin-top:4px;padding:9px 11px;border:1px solid var(--line);border-radius:8px;
+background:var(--bg2);color:var(--fg);font:inherit}
+input:focus,select:focus{outline:2px solid color-mix(in srgb,var(--accent) 55%,transparent);outline-offset:1px;border-color:var(--accent)}
+button{padding:8px 16px;border:1px solid var(--accent);background:var(--accent);color:#fff;border-radius:8px;cursor:pointer;
+font:inherit;font-weight:600;font-size:.92em}
+button:hover{background:var(--accent2)}button.ghost{background:transparent;color:var(--accent)}
+button.ghost:hover{background:color-mix(in srgb,var(--accent) 12%,transparent)}
+button.danger{background:var(--bad);border-color:var(--bad)}button.danger:hover{filter:brightness(1.1)}
+button.link,form.inline button{background:none;border:none;color:var(--accent);padding:0;font-weight:500}
+form.inline{display:inline}
+table{width:100%;border-collapse:collapse;display:block;overflow-x:auto;background:var(--card);border:1px solid var(--line);
+border-radius:var(--radius);font-size:.92em}table>tbody{display:table;width:100%}
+th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--muted);font-weight:600;font-size:.8em;text-transform:uppercase;letter-spacing:.4px;background:var(--card2)}
+tr:last-child td{border-bottom:none}
+pre{background:var(--card);border:1px solid var(--line);padding:14px;border-radius:var(--radius);overflow-x:auto;
+white-space:pre-wrap;word-break:break-word}
+code{background:var(--card2);border:1px solid var(--line);border-radius:5px;padding:1px 5px;font-size:.9em}
+.row{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}form.row{align-items:center}
+.row select{width:auto;margin-top:0}form.inline{display:inline;margin:0}.hidden{display:none}
+.replay-form{display:flex;flex-wrap:wrap;gap:10px 14px;align-items:flex-end}.replay-form label{margin:0}
+.replay-form label.wide{flex:1 1 260px}.replay-form select,.replay-form input{margin-top:4px}.replay-form label:not(.wide) select{width:auto}
+.replay-controls{align-items:center}.replay-controls input[type=range]{flex:1 1 160px;max-width:none;padding:0;margin:0}
+.trade-log{list-style:none;padding:0;margin:0;max-height:320px;overflow:auto}.trade-log li{padding:6px 0;border-bottom:1px solid var(--line)}
+.chips{display:flex;flex-wrap:wrap;gap:8px}.tick-chip{display:inline-flex;align-items:center;gap:6px;padding:4px 6px 4px 12px;
+border:1px solid var(--line);border-radius:99px;font-size:.9em}button.small{padding:2px 8px;font-size:.8em}
+.posts{list-style:none;padding:0}.posts li{padding:10px 0;border-bottom:1px solid var(--line)}.row>label{margin:0}
+form.kill{margin-top:14px;border-top:1px solid var(--line);padding-top:10px}ul.gate{padding-left:0;list-style:none;margin:8px 0}
 .chart svg{width:100%;height:180px;display:block}.chart svg.candles{height:auto}
 .switch{font-size:1.1em}.switch.on b{color:var(--bad)}
-.good{color:var(--good)}.bad{color:var(--bad)}.warn{color:#a86b00}.stack{margin:12px 0}.muted{color:var(--muted)}.small{font-size:.85em}.pill{border:1px solid var(--line);border-radius:99px;padding:1px 8px;font-size:.85em}
+.good{color:var(--good)}.bad{color:var(--bad)}.warn{color:var(--warnc)}.stack{margin:12px 0}.muted{color:var(--muted)}
+.small{font-size:.85em}.pill{border:1px solid var(--line);border-radius:99px;padding:1px 8px;font-size:.85em}
+.badge{display:inline-block;white-space:nowrap;font-size:.75em;font-weight:600;padding:2px 8px;border-radius:99px;
+background:var(--card2);border:1px solid var(--line);color:var(--muted)}
+.badge.good{color:var(--good);border-color:color-mix(in srgb,var(--good) 40%,transparent)}
+.badge.bad{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 40%,transparent)}
+.badge.warn{color:var(--warnc);border-color:color-mix(in srgb,var(--warnc) 40%,transparent)}
+p.good,p.bad,p.warn{padding:10px 14px;border-radius:10px;border:1px solid;background:var(--card)}
+p.good{border-color:color-mix(in srgb,var(--good) 40%,transparent)}p.bad{border-color:color-mix(in srgb,var(--bad) 40%,transparent)}
+p.warn{border-color:color-mix(in srgb,var(--warnc) 40%,transparent)}
+/* markets */
+.live-status{display:inline-flex;align-items:center;gap:6px;font-size:.85em;color:var(--muted)}
+.live-status .dot{width:8px;height:8px;border-radius:50%;background:var(--muted)}
+.live-status.on .dot{background:var(--good);box-shadow:0 0 0 0 var(--good);animation:pulse 1.6s infinite}
+.live-status.off .dot{background:var(--warnc)}
+@keyframes pulse{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--good) 60%,transparent)}100%{box-shadow:0 0 0 8px transparent}}
+.tickers{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;margin-bottom:14px}
+.tick{display:grid;gap:1px;text-align:left;background:var(--card);border:1px solid var(--line);color:var(--fg);
+padding:10px 12px;border-radius:var(--radius);font-weight:400;transition:border-color .2s,background .4s}
+.tick:hover{background:var(--card2);border-color:var(--accent)}.tick.active{border-color:var(--accent);background:var(--card2)}
+.tick-sym{font-size:.8em;color:var(--muted);font-weight:600}.tick-px{font-size:1.12em;font-weight:650}
+.tick-ch{font-size:.85em;font-weight:600}.tick-vol{font-size:.75em}
+.tick.up{background:color-mix(in srgb,var(--good) 14%,var(--card))}.tick.down{background:color-mix(in srgb,var(--bad) 14%,var(--card))}
+.chart-card{padding:14px 14px 10px}.chart-head{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.chart-head h2{margin:0;font-size:1.1em}
+.segs{display:inline-flex;margin-left:auto;background:var(--bg2);border:1px solid var(--line);border-radius:9px;padding:2px}
+.seg{background:none;border:none;color:var(--muted);padding:5px 10px;border-radius:7px;font-weight:600;font-size:.85em}
+.seg:hover{background:var(--card2);color:var(--fg)}.seg.active{background:var(--accent);color:#fff}
+.ohlc{min-height:1.6em;margin:8px 0 6px;display:flex;flex-wrap:wrap;gap:4px 8px}
+#chart{display:block;width:100%;height:440px;touch-action:pan-y}
+#market:not(.js) .js-only{display:none}
+details.health summary{cursor:pointer;font-weight:600}details.health table{margin-top:12px}
+@media (max-width:640px){header{padding:8px 12px}main{padding:14px 12px}nav{margin-left:0;width:100%}
+nav a{white-space:nowrap}.who{margin-left:auto}#chart{height:340px}.segs{margin-left:0}h1{font-size:1.3em}}
 """

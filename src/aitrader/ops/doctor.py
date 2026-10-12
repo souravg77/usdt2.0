@@ -126,7 +126,7 @@ def run_checks(settings, root: str = ".", env_file: str = ".env", now: float | N
     reg = _load(p("data", "learn", "registry.json"))
     n_paper = sum(1 for e in reg.get("strategies", []) if e.get("status") == "paper")
     add(PASS if n_paper else WARN, "strategies",
-        f"{n_paper} in paper trading" if n_paper else "none in paper trading: run aitrader learn add-library --test")
+        f"{n_paper} in paper trading" if n_paper else "none in paper trading: press Turn paper trading on (Trading page), or run aitrader learn paper-all")
 
     # ---- services -------------------------------------------------------------------------------
     last: dict[str, float] = {}
@@ -157,7 +157,7 @@ def run_checks(settings, root: str = ".", env_file: str = ".env", now: float | N
         add(FAIL if free_gb < 0.5 else WARN if free_gb < 2 else PASS, "disk space", f"{free_gb:.1f} GB free")
         backups = sorted(glob.glob(p("data", "backups", "*")))
         if not backups:
-            add(WARN, "backups", "none yet: ./deploy/backup.sh (see the guide for a daily cron job)")
+            add(WARN, "backups", "none yet: run ./deploy/backup.sh once (the installer schedules it daily at 03:30)")
         else:
             age_d = (now - os.path.getmtime(backups[-1])) / 86400
             add(PASS if age_d < 8 else WARN, "backups", f"newest is {age_d:.1f} days old")
