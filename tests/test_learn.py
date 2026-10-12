@@ -1,4 +1,5 @@
 import json
+import os
 
 import numpy as np
 import pandas as pd
@@ -150,20 +151,74 @@ def test_gate_messages():
         assert words in why
 
 
+# every bar open: what the plumbing tests use to let a strategy through
+LAX = Gate(min_expectancy_oos=-99, min_profit_factor_oos=0, max_drawdown_oos=1e9, min_expectancy_in=-99,
+           min_trades_in=10, min_trades_oos=10, min_t_oos=-99, min_wf_windows=0, min_wf_positive_share=0,
+           max_mc_drawdown_p95=1e9, max_mc_loss_probability=1, min_trades_holdout=0,
+           min_expectancy_holdout=-99)
+
+
 def test_evaluate_moves_status(tmp_path):
     store = CandleStore(str(tmp_path / "c.db"))
     fill_store(store, synthetic())
     e = Entry(id="r", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR))
-    res = evaluate(e, store, ["bybit"], ["BTC/USDT"], gate=Gate(min_expectancy_oos=-99,
-                   min_profit_factor_oos=0, max_drawdown_oos=1e9, min_expectancy_in=-99,
-                   min_trades_in=10, min_trades_oos=10, min_t_oos=-99))
+    res = evaluate(e, store, ["bybit"], ["BTC/USDT"], gate=LAX)
     assert e.status == "paper" and res["out_of_sample"]["trades"] >= 10
+    assert [h["to"] for h in e.history] == ["backtested", "oos_validated", "paper"]
+    assert res["holdout"]["evaluated"] and res["holdout"]["looks"] == 1 and res["holdout"]["passed"]
     e2 = Entry(id="r2", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR))
     evaluate(e2, store, ["bybit"], ["BTC/USDT"], gate=Gate(min_expectancy_oos=5))
     assert e2.status == "rejected" and "expectancy" in e2.history[-1]["why"]
     e3 = Entry(id="r3", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR))
     evaluate(e3, store, ["htx"], ["BTC/USDT"])
-    assert e3.status == "candidate"  # no data: stays untested
+    assert e3.status == "research"  # no data: stays untested
+
+
+def test_holdout_is_only_looked_at_after_everything_else_passed(tmp_path):
+    store = CandleStore(str(tmp_path / "c.db"))
+    fill_store(store, synthetic())
+    e = Entry(id="r", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR))
+    res = evaluate(e, store, ["bybit"], ["BTC/USDT"], gate=Gate(**{**LAX.__dict__, "min_wf_windows": 99}))
+    assert e.status == "rejected" and "walk-forward" in e.history[-1]["why"]
+    assert e.history[0]["to"] == "backtested"
+    assert not res["holdout"]["evaluated"] and "trades_holdout" not in res["markets"][0]
+    # passes everything else, but the untouched holdout disagrees: a person has to look at it
+    res = evaluate(e, store, ["bybit"], ["BTC/USDT"], gate=Gate(**{**LAX.__dict__, "min_expectancy_holdout": 99}))
+    assert e.status == "under_review" and "final holdout" in e.history[-1]["why"]
+    assert res["holdout"]["evaluated"] and not res["holdout"]["passed"] and res["failed"]
+    assert res["markets"][0]["trades_holdout"] == res["holdout"]["trades"]
+    from aitrader.trade.golive import passed_backtest
+
+    assert not passed_backtest(e)  # never a live candidate
+    evaluate(e, store, ["bybit"], ["BTC/USDT"], gate=LAX, move=False)
+    assert e.backtest["holdout"]["looks"] == 2 and e.status == "under_review"  # every look is counted
+
+
+def test_gate_walk_forward_and_monte_carlo_messages():
+    g = Gate()
+    assert g.check_walk_forward({"counted": 6, "positive": 4, "positive_share": 4 / 6}) == []
+    assert "3 of 6" in g.check_walk_forward({"counted": 6, "positive": 3, "positive_share": 0.5})[0]
+    assert "only 2 windows" in g.check_walk_forward({"counted": 2, "positive": 2, "positive_share": 1})[0]
+    mc = {"horizon": 100, "max_drawdown_r_p95": 22.0, "loss_probability": 0.3}
+    why = " ".join(g.check_monte_carlo(mc))
+    assert "95th-percentile drawdown" in why and "30% chance" in why
+    assert g.check_monte_carlo({**mc, "max_drawdown_r_p95": 9.0, "loss_probability": 0.05}) == []
+    assert "only 3 trades" in g.check_holdout({"trades": 3, "expectancy_r": 0.4})[0]
+    assert g.check_holdout({"trades": 40, "expectancy_r": 0.1}) == []
+
+
+def test_evaluate_reports_walk_forward_monte_carlo_and_robust_metrics(tmp_path):
+    store = CandleStore(str(tmp_path / "c.db"))
+    fill_store(store, synthetic())
+    res = evaluate(Entry(id="r", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR)),
+                   store, ["bybit"], ["BTC/USDT"], move=False)
+    wf = res["walk_forward"]
+    assert len(wf["windows"]) == Gate().wf_windows and wf["counted"] <= len(wf["windows"])
+    assert sum(w["trades"] for w in wf["windows"]) > 0
+    assert res["monte_carlo"]["runs"] == Gate().mc_runs and res["monte_carlo"]["seed"] == Gate().mc_seed
+    for k in ("sharpe", "sortino", "recovery_trades", "fee_r_per_trade", "slippage_r_per_trade"):
+        assert k in res["out_of_sample"]
+    assert res["gate"]["min_wf_positive_share"] == 0.6
 
 
 def test_paper_trading_matches_backtest(tmp_path):
@@ -221,8 +276,58 @@ def test_paper_retires_losers(tmp_path):
 
 def test_registry_has_no_live_status(tmp_path):
     e = Entry(id="a", kind="builtin", name="trend_pullback")
-    with pytest.raises(ValueError):
-        e.set_status("live", "nope")
+    for status in ("live", "shadow", "live_eligible", "live_enabled"):  # only read from evidence
+        with pytest.raises(ValueError):
+            e.set_status(status, "nope")
+
+
+def test_registry_migrates_old_statuses(tmp_path):
+    path = tmp_path / "reg.json"
+    old = [{"id": i, "kind": "rule", "name": i, "status": s, "spec": validate_spec(EVERY_UP_BAR)}
+           for i, s in (("a", "candidate"), ("b", "rejected"), ("c", "paper"), ("d", "retired"))]
+    path.write_text(json.dumps({"version": 1, "strategies": old}))
+    reg = Registry(str(path))
+    assert {e.id: e.status for e in reg.entries.values()} == {
+        "a": "research", "b": "rejected", "c": "paper", "d": "retired"}
+    assert [e.id for e in reg.with_status("candidate")] == ["a"]  # old names still select
+    reg.save()
+    assert {r["id"]: r["status"] for r in json.loads(path.read_text())["strategies"]}["a"] == "research"
+
+
+def test_ladder_reads_shadow_eligible_and_approval_from_evidence(tmp_path):
+    from aitrader.learn.ladder import Evidence, label, ladder_state
+    from aitrader.trade.golive import GoLive
+
+    reg_path, golive, trade, models = (str(tmp_path / n) for n in ("reg.json", "golive", "trade", "models"))
+    passed = {"failed": [], "out_of_sample": {"trades": 40, "expectancy_r": 0.2}}
+    reg = Registry(reg_path)
+    for eid in ("p", "s", "el", "ap"):
+        reg.add(Entry(id=eid, kind="rule", name=eid, status="paper", spec={"n": eid}, backtest=passed))
+    reg.add(Entry(id="untested", kind="rule", name="u", status="paper", spec={"n": 0}))
+    reg.add(Entry(id="rv", kind="rule", name="rv", status="under_review"))
+    reg.save()
+
+    def states():
+        ev = Evidence(golive, trade, reg_path, models)
+        return {e.id: ladder_state(e, ev)[0] for e in Registry(reg_path).entries.values()}
+
+    assert set(states().values()) == {"paper", "under_review"}
+    os.makedirs(trade)
+    with open(os.path.join(trade, "testnet_state.json"), "w") as fh:
+        json.dump({"closed": [{"entry_id": "s", "r": 0.5, "paper_r": 0.6}], "positions": {}}, fh)
+    gl = GoLive(root=golive, registry_path=reg_path, models_dir=models)
+    gl._save("report.json", {"passed": True, "strategies": ["el", "ap"]})
+    gl._save("approval.json", {"by": "me", **gl._fingerprint(["ap"])})
+    got = states()
+    assert got == {"p": "paper", "s": "shadow", "el": "live_eligible", "ap": "live_enabled",
+                   "untested": "paper", "rv": "under_review"}
+    assert "-0.100R" in ladder_state(Registry(reg_path).get("s"), Evidence(golive, trade, reg_path, models))[1]
+    assert label("live_enabled").startswith("LIVE ENABLED") and label("oos_validated") == "OUT-OF-SAMPLE VALIDATED"
+    # the approval stops counting once the rules change, as golive's guard says
+    reg = Registry(reg_path)
+    reg.get("ap").spec = {"n": "changed"}
+    reg.save()
+    assert states()["ap"] == "live_eligible"
 
 
 # ---- book library and the newer rule features ----------------------------------------------------
@@ -268,6 +373,9 @@ def test_exit_when_condition_closes_trade():
     "bar_range", "nr(7)", "range_atr(10)", "bullish_engulfing", "hammer", "doji", "inside_bar", "outside_bar", "body_pct",
     "lower_shadow_ratio", "green_streak", "red_streak", "closes_above_sma(5)", "closes_below_sma(20)",
     "rsi_bull_div(14,30)", "cci_bull_div", "macd_bull_div(40)", "highest_high(30)[1]",
+    "supertrend(10,3)", "supertrend_dir(7,2.5)", "keltner_upper(20,2,10)", "keltner_mid", "keltner_lower(20,1.5)",
+    "williams_r(14)", "obv", "obv_high(20)", "obv_sma(30)", "mfi(14)", "cmf(20)", "sma_dev_atr(20,14)",
+    "no_gaps(100)",
 ])
 def test_every_new_feature_evaluates(expr):
     from aitrader.learn.rules import _feature
@@ -404,3 +512,65 @@ def test_open_paper_trade_keeps_its_exit_rule_after_a_restart():
 def test_lab_gate_rejects_results_that_could_be_luck():
     noisy = {"trades": 40, "expectancy_r": 0.1, "profit_factor": 1.2, "max_drawdown_r": 5, "t_stat": 0.6}
     assert any("luck" in w for w in Gate().check({**noisy, "trades": 60}, noisy))
+
+
+def test_new_indicator_features_match_the_indicators():
+    from aitrader.indicators import cmf, keltner, mfi, obv, supertrend, williams_r
+    from aitrader.learn.rules import _feature
+
+    df = synthetic(n=400)
+
+    def f(expr):
+        return _feature(df, parse_expr(expr), {})
+
+    pd.testing.assert_series_equal(f("mfi(10)"), mfi(df, 10).astype(float), check_names=False)
+    pd.testing.assert_series_equal(f("cmf"), cmf(df, 20).astype(float), check_names=False)
+    pd.testing.assert_series_equal(f("williams_r(21)"), williams_r(df, 21).astype(float), check_names=False)
+    pd.testing.assert_series_equal(f("keltner_upper(20,1.5,14)"), keltner(df, 20, 1.5, 14)["upper"],
+                                   check_names=False)
+    st = supertrend(df, 10, 3)
+    pd.testing.assert_series_equal(f("supertrend"), st["supertrend"], check_names=False)
+    pd.testing.assert_series_equal(f("supertrend_dir"), st["direction"].astype(float), check_names=False)
+    assert f("obv_high(5)").iloc[10] == obv(df).iloc[5:10].max()  # previous bars only
+    gapped = df.drop(df.index[200])
+    ok = _feature(gapped, parse_expr("no_gaps(50)"), {})
+    assert ok.iloc[100] == 1 and ok.iloc[210] == 0 and ok.iloc[260] == 1
+
+
+def test_spec_with_new_indicators_validates_and_trades():
+    spec = {
+        "name": "supertrend_obv", "timeframes": ["1h"], "source": {"book": "t"},
+        "entry": [{"left": "supertrend_dir(10,3)", "op": "crosses_above", "right": 0},
+                  {"left": "obv", "op": ">", "right": "obv_sma(20)"},
+                  {"left": "cmf(20)", "op": ">", "right": 0},
+                  {"left": "no_gaps(200)", "op": ">=", "right": 1}],
+        "stop": {"type": "indicator", "expr": "supertrend(10,3)"},
+        "target": {"r": 2},
+        "exit": {"when": [{"left": "williams_r(14)", "op": ">", "right": -5},
+                          {"left": "mfi(14)", "op": ">", "right": 85}]},
+    }
+    strat = RuleStrategy(spec)
+    sigs = strat.generate(synthetic(), "b", "X", "1h")
+    assert sigs and all(s.stop < s.entry for s in sigs)
+    assert run_backtest(strat, synthetic(), "b", "X", "1h", BacktestConfig())
+    with pytest.raises(RuleError, match="supertrend"):
+        validate_spec({**spec, "entry": [{"left": "supertrend(10,3,7)", "op": ">", "right": 0}]})
+
+
+
+def test_lab_gives_context_only_to_strategies_that_read_it(tmp_path):
+    from aitrader.data.context import ContextStore
+    from aitrader.learn.lab import with_context
+    from aitrader.strategies import STRATEGIES
+
+    store = CandleStore(str(tmp_path / "c.db"))
+    df = synthetic(n=300)
+    funding = STRATEGIES["funding_extreme_long"]()
+    assert "funding_rate" not in with_context(funding, df, store, "bybit", "BTC/USDT", "1h")
+    ContextStore(store).upsert(("bybit", "BTC/USDT", "funding_rate", int(t), -0.001)
+                               for t in df["ts"].iloc[::8])
+    got = with_context(funding, df, store, "bybit", "BTC/USDT", "1h")
+    assert got["funding_rate"].notna().all() and (got["funding_rate"] == -0.001).all()
+    plain = STRATEGIES["trend_pullback"]()
+    assert with_context(plain, df, store, "bybit", "BTC/USDT", "1h") is df
+    store.close()

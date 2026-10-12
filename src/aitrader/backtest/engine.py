@@ -44,7 +44,10 @@ class Trade:
     exit_reason: str = ""
     r: float = 0.0  # net result in R after all costs
     gross_r: float = 0.0
-    cost_r: float = 0.0
+    cost_r: float = 0.0  # fees + funding (slippage is already in the fill prices)
+    fee_r: float = 0.0
+    slippage_r: float = 0.0  # what slippage took from the fills, in R
+    funding_r: float = 0.0
     features: dict = field(default_factory=dict)
 
 
@@ -136,6 +139,9 @@ def simulate_signal(sig: Signal, df: pd.DataFrame, pos: int, cfg: BacktestConfig
     tf_hours = TIMEFRAME_MS[sig.timeframe] / 3_600_000
     funding = cfg.funding_rate_8h * bars * tf_hours / 8 * entry
     fees = entry * cfg.taker_fee + exit_px * exit_fee
+    # slipped exits were priced at (1 - slip) times the quoted price; targets and "end" were not
+    slipped_exit = exit_reason in ("stop", "stop_gap", "trail", "time")
+    slippage = (entry - o[pos]) + (exit_px / (1 - slip) - exit_px if slipped_exit and slip < 1 else 0.0)
     gross = exit_px - entry
     net = gross - fees - funding
     return Trade(
@@ -143,6 +149,7 @@ def simulate_signal(sig: Signal, df: pd.DataFrame, pos: int, cfg: BacktestConfig
         entry_ts=int(ts[pos]), entry=entry, stop=sig.stop, target=target,
         exit_ts=int(ts[exit_i]), exit=float(exit_px), exit_reason=exit_reason,
         r=net / risk, gross_r=gross / risk, cost_r=(fees + funding) / risk,
+        fee_r=fees / risk, slippage_r=slippage / risk, funding_r=funding / risk,
         features=dict(sig.features),
     )
 

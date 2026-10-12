@@ -106,6 +106,13 @@ def _r(x) -> str:
     return "-" if x is None else f"{x:+.1f}"
 
 
+def _pair(a: dict, k1: str, k2: str, fmt: str) -> str:
+    """Two numbers as "x / y"; a report saved before they existed shows "-"."""
+    if a.get(k1) is None or a.get(k2) is None:
+        return "-"
+    return f"{a[k1]:{fmt}} / {a[k2]:{fmt}}"
+
+
 def _report(rep: dict) -> str:
     t = rep.get("totals", {})
     span = f"{_ms(rep.get('data_from'))[:10]} to {_ms(rep.get('data_to'))[:10]}"
@@ -124,7 +131,8 @@ def _report(rep: dict) -> str:
             f'not compounded · <a href="/reports/backtest.json">download the full report</a></p>')
     years = sorted({y for s in rep.get("strategies", []) for y in s.get("by_year", {})})
     head = ("<tr><th>#</th><th>Strategy</th><th>Verdict</th><th>Trades</th><th>Win %</th><th>R / trade</th>"
-            "<th>Profit factor</th><th>Max DD (R)</th><th>Total R</th><th>USDT at 1%</th>"
+            "<th>Profit factor</th><th>Max DD (R)</th><th>Sharpe / Sortino</th><th>Fees / slippage (R per trade)</th>"
+            "<th>Total R</th><th>USDT at 1%</th>"
             + "".join(f"<th>{_e(y)}</th>" for y in years) + "</tr>")
     rows = []
     for i, s in enumerate(rep.get("strategies", []), 1):
@@ -141,7 +149,9 @@ def _report(rep: dict) -> str:
             f' · {_e(", ".join(s["timeframes"]))}</div></td><td><span class="badge {vcls}" title="{_e(v)}">{_e(_short(v))}</span></td>'
             f'<td>{a["trades"]:,}</td><td>{a["win_rate"]:.1f}</td><td class="{tcls}">{a["expectancy_r"]:+.3f}</td>'
             f'<td>{pf}</td>'
-            f'<td>{a["max_drawdown_r"]:.1f}</td><td class="{tcls}"><b>{a["total_r"]:+.1f}</b></td>'
+            f'<td>{a["max_drawdown_r"]:.1f}</td>'
+            f'<td>{_pair(a, "sharpe", "sortino", "+.2f")}</td><td>{_pair(a, "fee_r", "slippage_r", ".3f")}</td>'
+            f'<td class="{tcls}"><b>{a["total_r"]:+.1f}</b></td>'
             f'<td class="{tcls}">{s["usdt_at_1pct"]:+,.0f}</td>{cells}</tr>')
     out += f"<table>{head}{''.join(rows)}</table>"
     if rep.get("skipped"):

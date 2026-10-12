@@ -1,11 +1,15 @@
 """The risk engine (roadmap "Risk, security and compliance"). Every order the executor sends is
 sized and checked here; strategies cannot switch it off.
 
-- Risk per trade is capped (default 0.5% of equity, never above 1%); the position size comes
+- Risk per trade is capped (default 0.25% of equity, never above 1%); the position size comes
   from the stop distance.
-- Daily and weekly loss caps. Hitting either pauses trading until a person resumes it.
+- Daily and weekly loss caps (default 1% and 5%). Hitting either pauses trading until a person
+  resumes it.
 - A maximum number of open positions, a maximum exposure per coin, and total exposure capped
   at the account's cash (spot, no leverage).
+- Coins that move together (default BTC, ETH and SOL) form a correlation group: the group as a
+  whole has a position limit and an exposure cap, so three of them don't count as three
+  independent bets.
 - Orders below the exchange minimum are skipped rather than rounded up.
 """
 
@@ -20,13 +24,16 @@ HARD_MAX_RISK = 0.01  # no setting can raise risk per trade above 1%
 
 @dataclass(frozen=True)
 class RiskLimits:
-    risk_per_trade: float = 0.005
-    daily_loss_pct: float = 0.02
+    risk_per_trade: float = 0.0025
+    daily_loss_pct: float = 0.01
     weekly_loss_pct: float = 0.05
     max_open_positions: int = 3
     max_coin_exposure_pct: float = 0.25
     max_total_exposure_pct: float = 0.9
     min_order_usdt: float = 10.0
+    correlation_groups: tuple[tuple[str, ...], ...] = (("BTC", "ETH", "SOL"),)
+    max_group_positions: int = 2
+    max_group_exposure_pct: float = 0.4
 
     @classmethod
     def from_env(cls) -> "RiskLimits":
@@ -40,7 +47,16 @@ class RiskLimits:
             max_coin_exposure_pct=float(e("AITRADER_MAX_COIN_EXPOSURE_PCT", d.max_coin_exposure_pct)),
             max_total_exposure_pct=min(float(e("AITRADER_MAX_TOTAL_EXPOSURE_PCT", d.max_total_exposure_pct)), 1.0),
             min_order_usdt=float(e("AITRADER_MIN_ORDER_USDT", d.min_order_usdt)),
+            correlation_groups=_groups(e("AITRADER_CORRELATION_GROUPS")) or d.correlation_groups,
+            max_group_positions=int(e("AITRADER_MAX_GROUP_POSITIONS", d.max_group_positions)),
+            max_group_exposure_pct=min(float(e("AITRADER_MAX_GROUP_EXPOSURE_PCT", d.max_group_exposure_pct)), 1.0),
         )
+
+
+def _groups(text: str | None) -> tuple[tuple[str, ...], ...]:
+    """``"BTC,ETH,SOL;DOGE,SHIB"`` -> two groups."""
+    return tuple(tuple(c.strip().upper() for c in g.split(",") if c.strip())
+                 for g in (text or "").split(";") if g.strip())
 
 
 @dataclass
@@ -68,10 +84,17 @@ class RiskEngine:
             return Sizing(0, 0, 0, ["stop is not below the entry"])
         if len(open_positions) >= lim.max_open_positions:
             return Sizing(0, 0, 0, [f"{len(open_positions)} positions open (max {lim.max_open_positions})"])
+        group = self.group(symbol)
+        in_group = [p for p in open_positions if group and self.group(p["symbol"]) == group]
+        if group and len(in_group) >= lim.max_group_positions:
+            return Sizing(0, 0, 0, [f"{len(in_group)} positions open in the correlated group "
+                                    f"{'/'.join(group)} (max {lim.max_group_positions})"])
         risk_pct = min(signal_risk, lim.risk_per_trade, HARD_MAX_RISK) * max(0.0, min(size_mult, 1.0))
         units = equity * risk_pct / (entry - stop)
         caps = {
             "coin exposure": self.coin_room(equity, symbol, open_positions),
+            "correlated group exposure": (lim.max_group_exposure_pct * equity - sum(p["notional"] for p in in_group)
+                                          if group else float("inf")),
             "total exposure": lim.max_total_exposure_pct * equity - sum(p["notional"] for p in open_positions),
             "free cash": free_cash * 0.995,  # leave room for the fee
         }
@@ -84,6 +107,10 @@ class RiskEngine:
             return Sizing(0, notional, 0, why + [f"order of {notional:.2f} USDT is below the "
                                                   f"{lim.min_order_usdt:g} USDT minimum"])
         return Sizing(units, notional, units * (entry - stop), why)
+
+    def group(self, symbol: str) -> tuple[str, ...] | None:
+        base = symbol.split("/")[0]
+        return next((g for g in self.limits.correlation_groups if base in g), None)
 
     def coin_room(self, equity: float, symbol: str, open_positions: list[dict]) -> float:
         base = symbol.split("/")[0]

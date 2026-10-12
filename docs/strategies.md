@@ -70,6 +70,78 @@ The book calls the squeeze direction-neutral. Downside breakouts are ignored unt
 allowed. `trend_pullback` and `buy_the_dip` also record StochRSI (overbought above 0.8, oversold
 below 0.2) as a feature for the Phase 4 filter rather than as a hard rule.
 
+## Strategy families from the master prompt (untested research candidates)
+
+Twelve more hand-coded strategies cover families from section 4 of the master prompt that fit
+**long-only spot** trading. They live in `src/aitrader/strategies/families.py`. None of them has
+been backtested on real data yet, and nothing here claims or expects a profit. `learn
+add-builtin` registers them as `candidate`; each must pass the same backtest gate (`learn test`:
+in-sample and out-of-sample, after fees and slippage, t-stat >= 2) before it can paper trade, and
+most research candidates are expected to fail it. The thresholds are starting points written down
+before any test, not tuned values.
+
+Shared rules: long spot entries only (no shorting, leverage or futures orders); 0.5% of equity at
+risk per trade, units = risk / (entry - stop); entry at the next bar's open; **no trade while a
+candle is missing in the last 100 bars, or when ATR(14) is above its 95th percentile of the last
+500 bars**. `aitrader strategies` prints every rule card, including its regime.
+
+| Strategy | Family (prompt #) | Regime | Entry | Stop | Exit | Must not trade when |
+|---|---|---|---|---|---|---|
+| `supertrend_trend` | Supertrend following (#5) | close > EMA200, ADX >= 20 | Supertrend(10, 3) flips up | Supertrend line, at most 4 ATR | 3R, or next open after Supertrend flips down | RSI > 80 |
+| `mtf_trend_alignment` | Multi-timeframe alignment (#7) | 4x higher frame (rebuilt from this frame's candles) EMA20 > EMA50, close > EMA50; this frame EMA20 > EMA50 | close crosses back above EMA20 | lower of 10-bar low and 2 ATR | 2R, or close < EMA50 | latest higher bar incomplete; RSI > 75 |
+| `keltner_breakout` | Keltner breakout (#11) | close > EMA200 | close crosses above Keltner(20, 2, ATR10) upper, volume >= 1.2x average | lower of EMA20 and 1.5 ATR | 2R, or close < EMA20 | bar range > 3 ATR; RSI > 80 |
+| `atr_expansion_breakout` | ATR expansion breakout (#14) | quiet before (prior ATR percentile <= 60%), close > EMA50 | true range >= 2x prior ATR, close in top 25% of bar and above 20-bar high | bar low - 0.1 ATR | 2R, time stop 24 bars | bar range > 4 ATR |
+| `volatility_regime_switch` | Volatility-regime switching (#38) | trend: ADX >= 25, uptrend, ATR pct <= 85%; range: ADX < 20, ATR pct <= 60%, close > SMA200 | trend: 20-bar high breakout; range: close back above lower Bollinger band | 2 ATR (trend) / 1.5 ATR (range) | trend 3R or close < EMA50; range: Bollinger middle (>= 0.8R), 24-bar time stop | ATR pct > 85% or neither regime |
+| `williams_r_reversal` | Williams %R reversal (mean reversion) | close > SMA200 | %R(14) crosses above -80 | 5-bar low - 0.25 ATR | %R > -20, 2R cap, 30-bar time stop | ADX > 35 with -DI > +DI |
+| `ma_deviation_reversion` | MA deviation reversion (#21) | close > SMA200 | up bar within 3 bars of close <= SMA20 - 2.5 ATR | 5-bar low - 0.25 ATR | SMA20 at the signal (>= 1R away), 20-bar time stop | ADX > 35 with -DI > +DI |
+| `obv_breakout` | OBV breakout confirmation (#27) | close > EMA50 | close above 20-bar high and OBV above its 20-bar high | 1.5 ATR | 2R, or close < EMA50 | RSI > 80; a zero-volume bar in the window |
+| `mfi_momentum` | MFI momentum confirmation (#28) | close > EMA50 > EMA200 | MFI(14) crosses above 50 after being < 40 within 10 bars | lower of 10-bar low and 2 ATR | 2R, or close < EMA50 | MFI > 80; a zero-volume bar |
+| `cmf_pressure` | CMF buying pressure (#29) | close > EMA50 | CMF(20) crosses above +0.05, close > previous high | 2 ATR | 2R, or CMF < -0.05 | RSI > 80; a zero-volume bar |
+| `funding_extreme_long` | Funding-rate extreme reversal (#33), long side | perp funding <= -0.03% per 8h (shorts crowded) | close crosses above EMA20 | lower of 10-bar low and 2 ATR | 2R, close < EMA50, or 48-bar time stop | funding missing or stale; RSI > 70 |
+| `ensemble_vote` | Ensemble voting (#40) | its members' | a member signals and >= 2 of 3 families (trend, breakout, volume) voted in the last 3 bars | 2 ATR | 2R, or close < EMA50 | two members of one family count as one vote |
+
+Notes:
+
+- `funding_extreme_long` reads the Bybit USDT-perpetual funding rate stored by `aitrader context` (the
+  same data as the market-context filter). The backtest gate, report and paper trader attach it to
+  the candles for this strategy only, using the newest value stamped by each bar's close. Without
+  that history it makes no trades and the gate rejects it for too few trades. The trade is a spot
+  buy; the perpetual is only read.
+- `mtf_trend_alignment` builds the higher frame (4h for 1h bars, 1h for 15m bars) from the
+  strategy's own candles, because the engine hands a strategy one timeframe. A higher bar counts
+  only after its last candle has closed, and never if one of its candles is missing.
+- `ensemble_vote` gives every family one equal vote. It does not weight members by past results,
+  because that would leak the test period into the rule.
+
+### Skipped families and why
+
+| Family (prompt #) | Why it is not coded |
+|---|---|
+| Spot/perpetual basis trading (#35) | Needs a short perpetual leg (futures, shorting) |
+| Cross-exchange spread arbitrage (#36) | Needs a second exchange, transfers between venues, and selling inventory on one venue |
+| Pairs trading and cointegration (#37) | Needs a short leg on the other coin |
+| Funding very positive (short side of #33) | Shorting; very positive funding already only cuts or blocks longs in the context filter |
+| Bearish sides of every family above | Shorting is off: spot, long only, no leverage (owner decision 2026-10-12) |
+
+## New indicators
+
+Added to `aitrader.indicators` with unit tests (warm-up, value checks, no look-ahead):
+
+| Indicator | Function | Warm-up | Rule-language features |
+|---|---|---|---|
+| Supertrend | `supertrend(df, n=10, mult=3)` | ATR(n) bars; direction 0 before | `supertrend(10,3)`, `supertrend_dir(10,3)` |
+| On-Balance Volume | `obv(df)` | none, but its level is arbitrary: compare it with its own highs or average | `obv`, `obv_high(20)`, `obv_sma(20)` |
+| Money Flow Index | `mfi(df, n=14)` | n + 1 bars | `mfi(14)` |
+| Chaikin Money Flow | `cmf(df, n=20)` | n bars | `cmf(20)` |
+| Keltner Channels | `keltner(df, n=20, mult=2, atr_n=10)` | max(n, atr_n) bars | `keltner_upper/mid/lower(20,2,10)` |
+| Williams %R | `williams_r(df, n=14)` | n bars | `williams_r(14)` |
+| Validity | `missing_candles(df)`, `indicator_valid(df, warmup)` | - | `no_gaps(200)`, `sma_dev_atr(20,14)` (stretch from the mean in ATRs) |
+
+`indicator_valid(df, warmup, step_ms, value)` is the shared validity status: True only when the
+indicator has `warmup` bars of history, no candle is missing inside that window, and (if given)
+the value is a finite number. Book-derived rule specs can require it with
+`{"left": "no_gaps(200)", "op": ">=", "right": 1}`.
+
 ## Liquidity check
 
 Before an order, `strategies.liquidity_check(book, order_usdt)` requires a spread of at most

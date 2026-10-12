@@ -71,6 +71,7 @@ def test_overview_shows_lock_strategies_and_escapes(web):
     assert "<script>" not in r.text and "evil&lt;script&gt;" in r.text
     assert r.headers["X-Frame-Options"] == "DENY" and "default-src 'self'" in r.headers["Content-Security-Policy"]
     assert "Off: every signal is taken" in r.text
+    assert "PAPER/DEMO" in r.text and "did not pass the backtest gate" in r.text  # ladder state
 
 
 def test_submit_book_runs_the_pipeline(web, monkeypatch):

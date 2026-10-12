@@ -17,6 +17,7 @@ from .data.feeds import LiveFeed
 from .data.quality import check_candles
 from .data.store import CandleStore
 from .exchanges import PaperExchange, make_adapter
+from .market.pairs import configured_symbols, open_paper_symbols
 from .models import OrderType, Side
 from .safety import live_gate_problems
 
@@ -45,7 +46,8 @@ def cmd_status(s: Settings, _args) -> int:
     for name, k in s.keys.items():
         print(f"keys[{name}]: {'set' if k.present else 'not set'}")
     print(f"db: {s.db_path}")
-    print(f"symbols: {', '.join(s.symbols)}")
+    print(f"symbols: {', '.join(configured_symbols(s.symbols))} "
+          f"(AITRADER_PAIRS={os.environ.get('AITRADER_PAIRS') or 'fixed'})")
     print(f"timeframes: {', '.join(s.timeframes)}")
     return 0
 
@@ -58,7 +60,7 @@ async def cmd_download(s: Settings, args) -> int:
     for ex in exchanges:
         adapter = make_adapter(ex, s)
         try:
-            for sym in args.symbol or s.symbols:
+            for sym in args.symbol or configured_symbols(s.symbols):
                 for tf in args.timeframe or s.timeframes:
                     try:
                         n = await download(adapter, store, sym, tf, since, until)
@@ -94,8 +96,10 @@ async def cmd_collect(s: Settings, args) -> int:
     try:
         while True:
             since = int(time.time() * 1000) - args.backfill_days * 86_400_000
+            # the ranked pairs when AITRADER_PAIRS=ranked, plus any with an open paper position
+            symbols = configured_symbols(s.symbols, keep=open_paper_symbols(PAPER_STATE))
             for ex, adapter in adapters.items():
-                for sym in s.symbols:
+                for sym in symbols:
                     for tf in s.timeframes:
                         try:
                             n = await download(adapter, store, sym, tf, since)
@@ -114,7 +118,13 @@ async def cmd_stream(s: Settings, args) -> int:
     def on_tick(ex, sym, px, ts):
         print(f"{_fmt(ts)} {ex} {sym} {px}")
 
-    feed = LiveFeed(args.exchange, args.symbol or s.symbols, on_tick)
+    if args.bybit:  # Bybit V5 public spot WebSocket: best bid / ask and last price
+        from .data.bybit_ws import BybitSpotStream
+
+        feed = BybitSpotStream(args.symbol or s.symbols, on_update=lambda q: print(
+            f"{_fmt(q.ts)} bybit {q.symbol} bid {q.bid} ask {q.ask} last {q.last}", flush=True))
+    else:
+        feed = LiveFeed(args.exchange, args.symbol or s.symbols, on_tick)
     task = asyncio.create_task(feed.run())
     try:
         await asyncio.wait_for(task, timeout=args.seconds) if args.seconds else await task
@@ -227,8 +237,9 @@ def cmd_strategies(_s: Settings, _args) -> int:
     for cls in STRATEGIES.values():
         sp = cls.spec
         print(f"== {sp.name} ({sp.source}); timeframes {', '.join(sp.timeframes)}")
-        for label in ("setup", "entry", "stop", "target", "filter", "size"):
-            print(f"  {label:7} {getattr(sp, label)}")
+        for label in ("regime", "setup", "entry", "stop", "target", "filter", "size"):
+            if getattr(sp, label):
+                print(f"  {label:7} {getattr(sp, label)}")
         print()
     return 0
 
@@ -338,6 +349,33 @@ def cmd_news(s: Settings, args) -> int:
     return 0
 
 
+def cmd_research(s: Settings, args) -> int:
+    """Trader-research log (aitrader.news.research). Research input only: never changes trading."""
+    import time
+
+    from .news import research
+    from .ops import EventLog
+    from .ops.secrets import apply_to_env
+
+    if args.research_cmd == "show":
+        rows = [f for f in research.load() if not args.family or f["family"] in args.family]
+        for f in rows[:args.limit]:
+            print(f"{f['date_found']} [{f['family']}] ({f['evidence']}) {f['claim']}\n    {f['url']}"
+                  f"\n    {f['credibility']}")
+        print(f"{len(rows)} findings (research only: they never change trading, risk or strategy status)")
+        return 0
+    events = EventLog(service="research")
+    hours = args.every_hours or float(os.environ.get("AITRADER_RESEARCH_EVERY_HOURS", "168") or 168)
+    while True:
+        apply_to_env()  # a key saved on the Settings page is used from the next run on
+        out = research.update(families=args.family, max_searches=args.max_searches, events=events)
+        print(f"research: {len(out['added'])} new of {out['found']} findings, {out['searches']} web searches"
+              + (f" ({out['error']})" if out["error"] else ""), flush=True)
+        if args.research_cmd == "update":
+            return 1 if out["error"] else 0
+        time.sleep(max(1.0, hours) * 3600)
+
+
 def cmd_kb(_s: Settings, args) -> int:
     from .knowledge import DEFAULT_INDEX, KnowledgeBase, build_index
 
@@ -370,6 +408,7 @@ def cmd_learn(s: Settings, args) -> int:
     from .backtest import BacktestConfig
     from .learn import (Entry, Registry, RuleError, claude_caller, evaluate, extract_strategies,
                         spec_id, PaperConfig, PaperTrader)
+    from .learn.registry import UNTESTED
     from .strategies import STRATEGIES
 
     reg = Registry(args.registry)
@@ -380,14 +419,21 @@ def cmd_learn(s: Settings, args) -> int:
 
     def run_tests(entries, move: bool = True) -> None:
         store = CandleStore(s.db_path)
+        regimes: dict = {}  # each market's regime labels, worked out once for all entries
         for e in entries:
-            res = evaluate(e, store, exchanges, symbols, cfg, move=move)
+            res = evaluate(e, store, exchanges, symbols, cfg, move=move, regimes=regimes)
             m = res["out_of_sample"]
             if move:
-                verdict = {"paper": "PASSED -> paper trading", "rejected": "rejected"}.get(e.status, "untested")
+                verdict = {"paper": "PASSED -> paper trading", "rejected": "rejected",
+                           "under_review": "UNDER REVIEW (holdout)"}.get(e.status, "untested")
             else:
                 verdict = "no data" if not res["markets"] else "failed" if res["failed"] else "passed"
+            wf, mc, h = res["walk_forward"], res["monte_carlo"], res["holdout"]
             print(f"  {e.id:40} {verdict:24} oos trades={m['trades']:4d} exp={m['expectancy_r']:+.3f}R"
+                  f" sharpe={m['sharpe']:+.2f} sortino={m['sortino']:+.2f}"
+                  f"\n      walk-forward {wf['positive']}/{wf['counted']} windows > 0R; Monte Carlo p95 DD "
+                  f"{mc['max_drawdown_r_p95']:.1f}R, P(loss) {mc['loss_probability']:.0%}; holdout "
+                  + (f"{h['trades']} trades {h['expectancy_r']:+.3f}R" if h["evaluated"] else "not looked at")
                   + (f"\n      why: {'; '.join(res['failed'])}" if res["failed"] else ""))
         store.close()
         reg.save()
@@ -432,7 +478,7 @@ def cmd_learn(s: Settings, args) -> int:
         reg.save()
         print(f"{added} new strategies from the book library ({len(specs)} in it) -> {args.registry}")
         if args.test:
-            run_tests(reg.with_status("candidate"))
+            run_tests(reg.with_status("research"))
         return 0
     if cmd == "add-builtin":
         for name in args.names or list(STRATEGIES):
@@ -442,7 +488,7 @@ def cmd_learn(s: Settings, args) -> int:
         return 0
     if cmd == "paper-all":
         moved = 0
-        for e in reg.with_status("candidate", "rejected"):
+        for e in reg.with_status(*UNTESTED, "rejected", "under_review"):
             e.set_status("paper", "paper-test every strategy (turned on from the dashboard or `learn paper-all`)")
             moved += 1
         reg.save()
@@ -456,7 +502,7 @@ def cmd_learn(s: Settings, args) -> int:
         elif args.paper:
             entries = reg.with_status("paper")
         else:
-            entries = reg.with_status("candidate", *(("rejected",) if args.retest else ()))
+            entries = reg.with_status(*UNTESTED, *(("rejected",) if args.retest else ()))
         if not entries:
             print("nothing to test (add strategies with `learn read` or `learn add-builtin`)")
             return 0
@@ -480,10 +526,13 @@ def cmd_learn(s: Settings, args) -> int:
     if cmd == "list":
         if not reg.entries:
             print("no strategies yet")
+        from .learn.ladder import Evidence, ladder_state, label
+
+        ev = Evidence(registry_path=args.registry)
         for e in sorted(reg.entries.values(), key=lambda e: (e.status, e.id)):
             bt = e.backtest.get("out_of_sample", {})
             pp = e.paper or {}
-            print(f"{e.status:9} {e.id:40} bt oos {bt.get('trades', 0):4d} tr {bt.get('expectancy_r', 0):+.3f}R"
+            print(f"{label(ladder_state(e, ev)[0]):23} {e.id:40} bt oos {bt.get('trades', 0):4d} tr {bt.get('expectancy_r', 0):+.3f}R"
                   f" | paper {pp.get('trades', 0):3d} tr {pp.get('expectancy_r', 0):+.3f}R "
                   f"{pp.get('equity_usdt', 0) or 0:,.0f} USDT  {e.source[:40]}")
         return 0
@@ -515,7 +564,8 @@ def cmd_learn(s: Settings, args) -> int:
             from .strategies.context_filter import ContextFilter
 
             context = ContextFilter(ContextStore(store))
-        trader = PaperTrader(store, args.registry, exchanges, symbols,
+        pairs = symbols if args.symbol else (lambda: configured_symbols(s.symbols))  # re-read each tick
+        trader = PaperTrader(store, args.registry, exchanges, pairs,
                              PaperConfig(start_equity=s.paper_start_usdt, backtest=cfg),
                              calendar=None if args.no_calendar else CalendarFilter(),
                              ai_filter=None if args.no_ai else LiveFilter(args.models),
@@ -864,12 +914,22 @@ async def _trade_run(s: Settings, args, control) -> int:
                   state_path=os.path.join(TRADE_DIR, f"{mode}_state.json"), strategies=strategies,
                   control=control, risk=RiskEngine(RiskLimits.from_env()), events=events,
                   live_guard=guard, monitor=monitor, pilot_max_usdt=pilot)
+    stream = None
+    if not args.once and args.exchange == "bybit":
+        from .data.bybit_ws import BybitSpotStream
+
+        # streamed prices: stops checked every second, quiet coins get no new entries
+        ex.prices = BybitSpotStream(s.symbols)
+        stream = asyncio.create_task(ex.prices.run())
     try:
         if args.once:
             print(json.dumps(await ex.tick(), indent=1))
         else:
             await ex.run(args.interval)
     finally:
+        if stream is not None:
+            ex.prices.stop()
+            stream.cancel()
         await adapter.close()
     return 0
 
@@ -1031,6 +1091,44 @@ async def _users_run(s: Settings, store, args) -> int:
 
 
 
+def cmd_pairs(s: Settings, args) -> int:
+    """Rank Bybit spot USDT pairs from public data, or show the ranking and current regimes."""
+    from .market import pairs
+    from .market.regime import current_regimes
+
+    if args.pairs_cmd == "rank":
+        async def run():
+            client = pairs.public_client(args.exchange)
+            try:
+                return await pairs.rank_pairs(client, pairs.RankConfig(min_turnover_usdt=args.min_turnover,
+                                                                       depth_top=args.depth_top),
+                                              args.registry, PAPER_STATE, exchange=args.exchange)
+            finally:
+                await client.close()
+
+        rk = asyncio.run(run())
+        pairs.save_ranking(rk, args.out)
+        print(pairs.ranking_text(rk, args.top))
+        print(f"ranking saved to {args.out}")
+        return 0
+    if args.pairs_cmd == "show":
+        rk = pairs.load_ranking(args.out)
+        if not rk.get("pairs"):
+            print("no pair ranking yet: run `aitrader pairs rank`")
+            return 1
+        print(pairs.ranking_text(rk, args.top))
+        return 0
+    store = CandleStore(s.db_path)
+    try:
+        rows = current_regimes(store, args.symbol or configured_symbols(s.symbols),
+                               args.timeframe or ["1h", "4h", "1d"], args.exchange_data or EXCHANGES)
+    finally:
+        store.close()
+    for r in rows:
+        print(f"{r['symbol']:12} {r['timeframe']:4} {r['label'] or '-':16} {r['confidence']:.2f}  {r['reason']}")
+    return 0
+
+
 def cmd_doctor(s: Settings, args) -> int:
     """Health check of this installation: settings, secrets, live lock, data, services, disk, backups."""
     from .ops.doctor import report, run_checks
@@ -1067,6 +1165,7 @@ def build_parser() -> argparse.ArgumentParser:
     st.add_argument("--exchange", default=EXCHANGE, choices=EXCHANGES)
     st.add_argument("--symbol", action="append")
     st.add_argument("--seconds", type=float, default=0, help="stop after N seconds (0 = forever)")
+    st.add_argument("--bybit", action="store_true", help="Bybit V5 public spot WebSocket (bid/ask/last)")
 
     ps = sub.add_parser("paper-smoke", help="open and close a test position on the paper exchange")
     ps.add_argument("--exchange", default=EXCHANGE, choices=EXCHANGES)
@@ -1102,6 +1201,15 @@ def build_parser() -> argparse.ArgumentParser:
     nw.add_argument("--every-hours", type=float, default=None,
                     help="for run: hours between briefs (default AITRADER_NEWS_EVERY_HOURS or 4)")
     nw.add_argument("--max-searches", type=int, default=None, help="web searches per brief (default 6)")
+
+    rs = sub.add_parser("research", help="trader-research log: public reports on our strategy families "
+                                         "(research only, never changes trading)")
+    rs.add_argument("research_cmd", choices=["update", "run", "show"])
+    rs.add_argument("--family", action="append", help="limit to a strategy family (repeatable)")
+    rs.add_argument("--every-hours", type=float, default=None,
+                    help="for run: hours between searches (default AITRADER_RESEARCH_EVERY_HOURS or 168)")
+    rs.add_argument("--max-searches", type=int, default=None, help="web searches per run (default 8)")
+    rs.add_argument("--limit", type=int, default=50, help="for show: findings to print")
 
     ca = sub.add_parser("calendar", help="show upcoming high-impact events and the current decision")
     ca.add_argument("--hours", type=float, default=72)
@@ -1252,6 +1360,18 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("--max-gap", type=float, default=0.15)
     rp.add_argument("--quiet", action="store_true", help="don't send it to the event log / Telegram")
 
+    pa = sub.add_parser("pairs", help="rank Bybit spot USDT pairs; show the ranking and market regimes")
+    pa.add_argument("pairs_cmd", choices=["rank", "show", "regimes"])
+    pa.add_argument("--out", default="data/pairs/ranking.json", help="ranking file")
+    pa.add_argument("--top", type=int, default=30, help="rows to print")
+    pa.add_argument("--exchange", default="bybit", help="rank: ccxt exchange id (public data only)")
+    pa.add_argument("--min-turnover", type=float, default=2_000_000, help="rank: 24h USDT turnover floor")
+    pa.add_argument("--depth-top", type=int, default=40, help="rank: order books to check")
+    pa.add_argument("--registry", default="data/learn/registry.json")
+    pa.add_argument("--symbol", action="append", help="regimes: pairs (default: the configured list)")
+    pa.add_argument("--timeframe", action="append", help="regimes: default 1h, 4h, 1d")
+    pa.add_argument("--exchange-data", action="append", help="regimes: stored candles to use")
+
     us = sub.add_parser("users", help="user accounts: list, approve, disable, live on/off, run")
     us_sub = us.add_subparsers(dest="users_cmd", required=True)
     us_sub.add_parser("list", help="every account with its status, mode and connected keys")
@@ -1295,6 +1415,7 @@ def main(argv: list[str] | None = None) -> int:
         "calendar": cmd_calendar,
         "context": cmd_context,
         "news": cmd_news,
+        "research": cmd_research,
         "kb": cmd_kb,
         "learn": cmd_learn,
         "ai": cmd_ai,
@@ -1307,6 +1428,7 @@ def main(argv: list[str] | None = None) -> int:
         "report": cmd_report,
         "users": cmd_users,
         "doctor": cmd_doctor,
+        "pairs": cmd_pairs,
     }[args.cmd]
     result = handler(settings, args)
     if asyncio.iscoroutine(result):

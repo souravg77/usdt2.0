@@ -141,3 +141,49 @@ def test_parabolic_sar_trailing_exit():
     (t,) = run_backtest(strat, df, "bybit", "BTC/USDT", "1h", FREE)
     assert t.exit_reason == "trail"
     assert t.exit_ts > int(df.ts.iloc[19]) and t.r > 0
+
+
+def test_cost_breakdown_splits_fees_and_slippage():
+    cfg = BacktestConfig(taker_fee=0.001, maker_fee=0.001, slippage_bps=10)
+    df = bars([(100, 100, 100, 100), (100, 101, 99, 100), (100, 111, 99, 110)])
+    [t] = run_backtest(Fixed(), df, "x", "BTC/USDT", "1h", cfg)  # target exit: slippage on entry only
+    assert t.fee_r == pytest.approx((100.1 * 0.001 + 110 * 0.001) / 5)
+    assert t.slippage_r == pytest.approx(0.1 / 5) and t.funding_r == 0
+    df = bars([(100, 100, 100, 100), (100, 100, 100, 100), (100, 100, 94, 96)])
+    [t] = run_backtest(Fixed(), df, "x", "BTC/USDT", "1h", cfg)  # stop: slipped both ways
+    assert t.exit_reason == "stop" and t.slippage_r == pytest.approx((0.1 + 95 * 0.001) / 5)
+    m = metrics([t])
+    assert m["slippage_r_per_trade"] == pytest.approx(t.slippage_r) and m["fee_r_per_trade"] == pytest.approx(t.fee_r)
+
+
+def test_sharpe_sortino_and_recovery():
+    class T:
+        def __init__(self, r):
+            self.r, self.cost_r = r, 0.0
+
+    r = [1.0, -1.0, -2.0, 1.0, 1.0, 1.0, 2.0]
+    m = metrics([T(x) for x in r])
+    assert m["sharpe"] == pytest.approx(np.mean(r) / np.std(r, ddof=1))
+    assert m["sortino"] == pytest.approx(np.mean(r) / np.sqrt(np.mean(np.minimum(r, 0) ** 2)))
+    assert m["max_drawdown_r"] == 3 and m["recovery_trades"] == 3  # bottom after trade 3, back at +1 after trade 6
+    assert metrics([T(1), T(-1)])["recovery_trades"] is None  # not recovered yet
+    assert metrics([T(1), T(2)])["recovery_trades"] == 0
+
+
+def test_monte_carlo_is_repeatable_and_bounded():
+    from aitrader.backtest import monte_carlo
+
+    r = [1.5, -1.0, -1.0, 2.0, -1.0, 0.5]
+    a, b = monte_carlo(r, runs=500, horizon=50, seed=1), monte_carlo(r, runs=500, horizon=50, seed=1)
+    assert a == b and 0 <= a["loss_probability"] <= 1 and a["max_drawdown_r_p95"] > 0
+    assert a["losing_streak_p95"] >= 2
+    win = monte_carlo([0.5, 1.0], runs=200, horizon=30)
+    assert win["loss_probability"] == 0 and win["max_drawdown_r_p95"] == 0
+    assert monte_carlo([-0.5, -1.0], runs=200, horizon=30)["loss_probability"] == 1
+
+
+def test_walk_forward_without_a_grid_just_rolls_forward():
+    df = synthetic()
+    wf = walk_forward(STRATEGIES["trend_pullback"], df, "bybit", "BTC/USDT", "1h",
+                      grid={}, train_bars=250, test_bars=550)
+    assert len(wf) == 5 and wf["train_score"].isna().all()

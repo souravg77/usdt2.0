@@ -2,8 +2,10 @@
 
 Unlike the backtest gate (``lab.evaluate``), which keeps the last 20% of history untouched to
 judge a strategy, this report runs each strategy over the whole window to show its track record:
-trades, win rate, average result per trade (R), profit factor, worst drawdown, and the same for
-each calendar year, pair and timeframe. Costs (fees and slippage) are included.
+trades, win rate, average result per trade (R), profit factor, worst drawdown and the trades it
+took to recover, per-trade Sharpe and Sortino, and the same for each calendar year, pair,
+timeframe and market regime (the regime of each signal's bar, see ``aitrader.market.regime``).
+Costs (fees and slippage) are included, and their share per trade is shown apart.
 
 Results are in R, the amount risked per trade. "At 1% risk" turns R into USDT for a 10,000 USDT
 account risking 1% (100 USDT) per trade, without compounding.
@@ -20,7 +22,8 @@ from datetime import datetime, timezone
 from ..backtest import BacktestConfig, metrics, run_backtest
 from ..data.store import CandleStore
 from ..indicators import candles_to_frame
-from .lab import MIN_BARS
+from ..market.regime import breakdown, labels_by_close
+from .lab import MIN_BARS, with_context
 from .registry import Entry, make_strategy
 
 YEAR_MS = 365 * 86_400_000
@@ -53,6 +56,7 @@ def backtest_report(entries: list[Entry], store: CandleStore, exchanges: list[st
     now_ms = now_ms or int(time.time() * 1000)
     since = now_ms - years * YEAR_MS
     frames: dict = {}  # (ex, sym, tf) -> DataFrame, loaded once for every strategy
+    regimes: dict = {}  # (ex, sym, tf) -> {bar close: regime label}
     rows, skipped = [], []
     for n, entry in enumerate(entries, 1):
         try:
@@ -60,7 +64,7 @@ def backtest_report(entries: list[Entry], store: CandleStore, exchanges: list[st
         except Exception as exc:
             skipped.append({"id": entry.id, "why": f"can't build it ({type(exc).__name__})"})
             continue
-        trades, markets = [], []
+        trades, markets, tagged = [], [], []
         for ex in exchanges:
             for sym in symbols:
                 for tf in strat.spec.timeframes:
@@ -71,8 +75,11 @@ def backtest_report(entries: list[Entry], store: CandleStore, exchanges: list[st
                     df = frames[key]
                     if df is None:
                         continue
-                    t = run_backtest(strat, df, ex, sym, tf, cfg)
+                    t = run_backtest(strat, with_context(strat, df, store, ex, sym, tf), ex, sym, tf, cfg)
                     trades += t
+                    if key not in regimes:
+                        regimes[key] = labels_by_close(df, tf)
+                    tagged += [(regimes[key].get(x.signal_ts), x) for x in t]
                     markets.append({"exchange": ex, "symbol": sym, "timeframe": tf, "bars": len(df),
                                     "from": int(df["ts"].iloc[0]), "to": int(df["ts"].iloc[-1]),
                                     "trades": len(t), "total_r": round(sum(x.r for x in t), 2)})
@@ -82,7 +89,7 @@ def backtest_report(entries: list[Entry], store: CandleStore, exchanges: list[st
             skipped.append({"id": entry.id, "why": "no price history for its timeframes "
                                                    + ", ".join(strat.spec.timeframes)})
             continue
-        rows.append(_summary(entry, trades, markets, now_ms))
+        rows.append({**_summary(entry, trades, markets, now_ms), "by_regime": breakdown(tagged)})
     rows.sort(key=lambda r: (r["all"]["total_r"], r["all"]["expectancy_r"]), reverse=True)
     covered = [m for r in rows for m in r["markets"]]
     return {
@@ -94,6 +101,7 @@ def backtest_report(entries: list[Entry], store: CandleStore, exchanges: list[st
         "account_usdt": ACCOUNT_USDT, "risk_pct": RISK_PCT,
         "strategies": rows, "skipped": skipped,
         "totals": _totals(rows),
+        "by_regime": _regime_totals(rows),
     }
 
 
@@ -124,7 +132,10 @@ def _m(trades: list) -> dict:
     return {"trades": out["trades"], "wins": int(round(out["win_rate"] * out["trades"])),
             "win_rate": round(out["win_rate"] * 100, 1), "expectancy_r": round(out["expectancy_r"], 3),
             "profit_factor": None if pf == float("inf") else round(pf, 2),
-            "max_drawdown_r": round(out["max_drawdown_r"], 1), "total_r": round(out["total_r"], 1)}
+            "max_drawdown_r": round(out["max_drawdown_r"], 1), "total_r": round(out["total_r"], 1),
+            "sharpe": round(out["sharpe"], 3), "sortino": round(out["sortino"], 3),
+            "recovery_trades": out["recovery_trades"], "fee_r": round(out["fee_r_per_trade"], 4),
+            "slippage_r": round(out["slippage_r_per_trade"], 4)}
 
 
 def _verdict(m: dict, good_years: int, years: int) -> str:
@@ -149,6 +160,20 @@ def _totals(rows: list[dict]) -> dict:
             "best": rows[0]["id"] if rows else None}
 
 
+def _regime_totals(rows: list[dict]) -> dict:
+    """Every strategy's trades pooled, per regime."""
+    out: dict = {}
+    for r in rows:
+        for label, m in r.get("by_regime", {}).items():
+            o = out.setdefault(label, {"trades": 0, "wins": 0.0, "total_r": 0.0})
+            o["trades"] += m["trades"]
+            o["wins"] += m["win_rate"] * m["trades"]
+            o["total_r"] += m["total_r"]
+    return {k: {"trades": v["trades"], "win_rate": round(v["wins"] / v["trades"], 4) if v["trades"] else 0.0,
+                "expectancy_r": round(v["total_r"] / v["trades"], 4) if v["trades"] else 0.0,
+                "total_r": round(v["total_r"], 2)} for k, v in out.items()}
+
+
 def save_report(report: dict, path: str = DEFAULT_PATH) -> str:
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     tmp = path + ".tmp"
@@ -171,4 +196,7 @@ def report_text(report: dict, top: int = 60) -> str:
                      f"{r['profitable_years']:>3}/{r['years_traded']:<4}  {r['verdict']}")
     for s in report["skipped"]:
         lines.append(f"  skipped {s['id']}: {s['why']}")
+    if report.get("by_regime"):
+        lines.append("by market regime (all strategies pooled): " + ", ".join(
+            f"{k} {v['trades']} tr {v['expectancy_r']:+.3f}R" for k, v in report["by_regime"].items()))
     return "\n".join(lines)

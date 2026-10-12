@@ -8,6 +8,9 @@ with real orders on one exchange:
   account's equity (never more than the strategy's risk, capped at 1%);
 - it is sold at market when the paper twin closes, or at once if the live price is at or below
   the stop;
+- a stop-loss order also rests on the exchange for every open position (when the adapter
+  supports it), so the position is protected while this server is down. It is cancelled before
+  the executor sells, and a stop that fired is booked as the exit;
 - every fill is compared with its paper twin, so real slippage is measured.
 
 Safety and failure handling:
@@ -20,6 +23,8 @@ Safety and failure handling:
 - Pause and kill come from ``trade.control``. Kill sells everything this executor bought.
 - Stale paper signals, exchange errors and disconnects are reported to the event log; new entries
   stop while either is unhealthy, exits keep being tried.
+- With a live price stream (``prices``, the Bybit WebSocket), stops are checked every second
+  between ticks on streamed prices, and a coin whose stream has gone quiet gets no new entry.
 """
 
 from __future__ import annotations
@@ -55,7 +60,8 @@ class Executor:
                  control: Control | None = None, risk: RiskEngine | None = None,
                  events: EventLog | None = None, live_guard=None, monitor=None,
                  pilot_max_usdt: float | None = None, quote: str = "USDT",
-                 max_signal_age_bars: int = 2, paper_stale_s: float = 300, clock=time.time):
+                 max_signal_age_bars: int = 2, paper_stale_s: float = 300, clock=time.time,
+                 prices=None, price_max_age: float = 10.0):
         if mode not in ("testnet", "live"):
             raise ValueError("mode must be testnet or live (paper trading is `learn paper`)")
         if mode == "live" and live_guard is None:
@@ -71,6 +77,7 @@ class Executor:
         self.pilot_max_usdt, self.quote = pilot_max_usdt, quote
         self.max_signal_age_bars, self.paper_stale_s, self.clock = max_signal_age_bars, paper_stale_s, clock
         self.heartbeat = Heartbeat(self.events)
+        self.prices, self.price_max_age = prices, price_max_age
         self.state = {"positions": {}, "closed": [], "orders": [], "skipped": {}, "failures": 0,
                       "disconnected": False, "paper_stale": False, "flattened": False, "checked": False}
         if os.path.exists(self.state_path):
@@ -89,7 +96,7 @@ class Executor:
         ctl = self.control.state()
         try:
             if not self.state["checked"]:
-                await self._check_holdings()
+                await self._check_holdings(out)
             await self._reconcile_pending(out)
             if ctl["killed"]:
                 # flatten once per kill: a new kill (new "since") flattens again
@@ -102,6 +109,7 @@ class Executor:
                 await self._manage_exits(paper, out)
                 if paper is not None and not ctl["paused"]:
                     await self._enter_new(paper, out)
+                await self._arm_stops(out)
             await self.record_equity()
             self._check_risk()
             self._healthy()
@@ -119,12 +127,41 @@ class Executor:
                 await self.tick()
                 n += 1
                 if stop_after is None or n < stop_after:
-                    await asyncio.sleep(interval)
+                    await self._wait(interval)
         except asyncio.CancelledError:
             raise
         except BaseException as exc:
             self.events.emit("crash", f"{self.mode} executor stopped: {exc!r}", level="error")
             raise
+
+    async def _wait(self, interval: float) -> None:
+        """Sleep until the next tick, waking early when a streamed price reaches a stop."""
+        if self.prices is None:
+            await asyncio.sleep(interval)
+            return
+        end = time.monotonic() + interval
+        while time.monotonic() < end and not self._stop_hit():
+            await asyncio.sleep(min(1.0, max(0.0, end - time.monotonic())))
+
+    def _stop_hit(self) -> bool:
+        for p in self._open():
+            if p["status"] == "open" and not self.prices.stale(p["symbol"], self.price_max_age):
+                bid = self.prices.best_bid(p["symbol"])
+                if bid is not None and bid <= p["stop"]:
+                    return True
+        return False
+
+    def _price_stale(self, symbol: str) -> bool:
+        """The stream covers ``symbol`` but has said nothing for a while: don't trust prices."""
+        return (self.prices is not None and symbol in self.prices.symbols
+                and self.prices.stale(symbol, 3 * self.price_max_age))
+
+    async def _bid(self, symbol: str) -> float | None:
+        if self.prices is not None and not self.prices.stale(symbol, self.price_max_age):
+            bid = self.prices.best_bid(symbol)
+            if bid is not None:
+                return bid
+        return (await self.adapter.get_orderbook(symbol, 5)).best_bid
 
     # ---- entries --------------------------------------------------------------------------------
 
@@ -141,6 +178,9 @@ class Executor:
             if now_ms - sig["ts"] > self.max_signal_age_bars * TIMEFRAME_MS[tf]:
                 self._skip(mark, key, "signal is too old to enter now", out)
                 continue
+            if self._price_stale(symbol):
+                log.info("%s: no fresh streamed price for %s; entry waits", self.mode, symbol)
+                continue  # not a skip: it may still enter once prices flow again
             if self.live_guard is not None:
                 problems = self.live_guard(entry_id)
                 if problems:
@@ -212,12 +252,14 @@ class Executor:
         for key, p in list(self.state["positions"].items()):
             if p["status"] != "open":
                 continue
+            if p.get("stop_cid") and await self._stop_fired(key, out):
+                continue
             reason = None
             twin = (paper or {}).get("open", {}).get(key)
             if paper is not None and (twin is None or twin["signal"]["ts"] != p["signal_ts"]):
                 reason = "paper twin closed"
             else:
-                bid = (await self.adapter.get_orderbook(p["symbol"], 5)).best_bid
+                bid = await self._bid(p["symbol"])
                 if bid is not None and bid <= p["stop"]:
                     reason = f"live price {bid:g} at or below the stop"
             if reason:
@@ -234,6 +276,14 @@ class Executor:
 
     async def _exit(self, key: str, reason: str, out: dict) -> None:
         p = self.state["positions"][key]
+        if p.get("stop_cid"):
+            # the resting stop must go first: left behind, it could later sell coins of another position
+            if not await self.adapter.cancel_stop(p["stop_cid"], p["symbol"]):
+                if await self._stop_fired(key, out, force=True, after_cancel=True):
+                    return
+            p.pop("stop_cid", None)
+            p.pop("stop_armed", None)
+            self.save()
         base = p["symbol"].split("/")[0]
         bal = await self.adapter.balance()
         amount = min(p["amount"], bal.free.get(base, 0.0))
@@ -314,6 +364,70 @@ class Executor:
             self.events.emit("kill", f"{self.mode}: kill switch done, {len(targets)} position(s) sold",
                              level="warning")
 
+    # ---- resting stops on the exchange ---------------------------------------------------------
+
+    async def _arm_stops(self, out: dict) -> None:
+        """Give every open position a stop-loss order that waits on the exchange."""
+        place = getattr(self.adapter, "place_stop", None)
+        if place is None:
+            return
+        now = self.clock()
+        for key, p in list(self.state["positions"].items()):
+            if p["status"] != "open" or now < p.get("stop_retry_at", 0):
+                continue
+            if p.get("stop_cid"):
+                if not p.get("stop_armed"):
+                    await self._stop_fired(key, out, force=True)  # a send that may not have arrived
+                continue
+            amount = await self._sellable(p["symbol"], p["amount"], p["stop"])
+            if amount <= 0:
+                continue
+            n = p.get("stops", 0)
+            p.update(stops=n + 1, stop_cid=client_id(self.mode, key, p["signal_ts"], f"stop{n}"), stop_armed=False)
+            self.save()  # written before sending, like every order
+            try:
+                order = await place(p["symbol"], amount, p["stop"], p["stop_cid"],
+                                    reason=f"{p['entry_id']}: resting stop")
+            except Exception as exc:
+                # it may still have reached the exchange: the next pass looks it up by its id
+                self.events.emit("error", f"{self.mode}: resting stop for {key} not confirmed: "
+                                 f"{type(exc).__name__}: {exc}", level="warning", key=key)
+                continue
+            if order.status in (OrderStatus.REJECTED, OrderStatus.CANCELED):
+                p.pop("stop_cid")
+                p["stop_retry_at"] = now + 300
+                self.events.emit("error", f"{self.mode}: resting stop for {key} was {order.status.value} "
+                                 f"({order.reason}); the executor still watches the stop itself",
+                                 level="warning", key=key)
+            else:
+                p["stop_armed"] = True
+                self.events.emit("stop_armed", f"{self.mode}: stop for {p['symbol']} rests on "
+                                 f"{self.exchange} at {p['stop']:g}", key=key)
+
+    async def _stop_fired(self, key: str, out: dict, force: bool = False, after_cancel: bool = False) -> bool:
+        """Look the resting stop up (once a minute unless ``force``). True when it sold
+        (the sale is booked as the exit). A stop the exchange no longer holds is dropped, so a
+        new one is placed. ``after_cancel``: a cancel just failed, so an open stop is an error."""
+        p = self.state["positions"][key]
+        now = self.clock()
+        if not force and now - p.get("stop_checked", 0) < 60:
+            return False
+        p["stop_checked"] = now
+        order = await self.adapter.find_order(p["stop_cid"], p["symbol"])
+        if order is not None and order.filled > 0:
+            p.update(status="pending_exit", exit_cid=p.pop("stop_cid"), exit_reason=f"stop on {self.exchange}")
+            p.pop("stop_armed", None)
+            await self._apply_exit(key, order, out)
+            return True
+        if order is not None and order.status is OrderStatus.OPEN:
+            if after_cancel:  # triggered but not filled yet, most likely: the next tick looks again
+                raise RuntimeError(f"resting stop for {key} is still open after cancelling it")
+            p["stop_armed"] = True  # also confirms a send whose answer was lost
+            return False
+        p.pop("stop_cid", None)  # never arrived, cancelled or expired: arm a new one
+        p.pop("stop_armed", None)
+        return False
+
     async def _sellable(self, symbol: str, amount: float, price: float) -> float:
         check = getattr(self.adapter, "sellable", None)
         return amount if check is None else await check(symbol, amount, price)
@@ -352,8 +466,11 @@ class Executor:
                 else:
                     await self._apply_exit(key, order, out)
 
-    async def _check_holdings(self) -> None:
+    async def _check_holdings(self, out: dict) -> None:
         """After a restart: every open position must still be in the account."""
+        for key, p in list(self.state["positions"].items()):
+            if p["status"] == "open" and p.get("stop_cid"):
+                await self._stop_fired(key, out, force=True)  # it may have sold while the server was down
         bal = await self.adapter.balance()
         for key, p in self.state["positions"].items():
             if p["status"] != "open":

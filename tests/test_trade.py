@@ -37,6 +37,24 @@ def test_risk_sizing_and_caps():
     assert not tiny.ok and "minimum" in tiny.reasons[-1]
 
 
+def test_risk_defaults_follow_the_agreed_guardrails():
+    lim = RiskLimits()
+    assert lim.risk_per_trade == 0.0025 and lim.daily_loss_pct == 0.01
+
+
+def test_correlated_coins_count_as_one_group(monkeypatch):
+    eng = RiskEngine(RiskLimits(max_open_positions=5))
+    two = [{"symbol": "BTC/USDT", "notional": 100}, {"symbol": "ETH/USDT", "notional": 100}]
+    s = eng.size("SOL/USDT", 10_000, 10_000, 100, 90, 0.01, 1, two)
+    assert not s.ok and "correlated group BTC/ETH/SOL" in s.reasons[0]
+    assert eng.size("DOGE/USDT", 10_000, 10_000, 100, 90, 0.01, 1, two).ok  # not in the group
+    big = [{"symbol": "BTC/USDT", "notional": 3_900}]
+    s = eng.size("ETH/USDT", 10_000, 10_000, 100, 99.9, 0.01, 1, big)
+    assert s.ok and s.notional == pytest.approx(100) and "correlated group exposure" in s.reasons[-1]
+    monkeypatch.setenv("AITRADER_CORRELATION_GROUPS", "doge, shib; BTC,ETH")
+    assert RiskLimits.from_env().correlation_groups == (("DOGE", "SHIB"), ("BTC", "ETH"))
+
+
 def test_risk_limits_env_never_above_hard_cap(monkeypatch):
     monkeypatch.setenv("AITRADER_RISK_PER_TRADE", "0.05")
     assert RiskLimits.from_env().risk_per_trade == HARD_MAX_RISK
@@ -640,3 +658,156 @@ def test_gate_needs_every_strategy_to_stand_on_its_own(tmp_path):
     rep = gl.evaluate(["s1", "s2"])  # s2 has no paper trades: s1's good results can't carry it
     row = next(c for c in rep["criteria"] if c["name"].startswith("Every strategy profitable"))
     assert not row["passed"] and "s2" in row["value"]
+
+
+# ---- resting stops on the exchange --------------------------------------------------------------
+
+
+class StopAdapter(FakeAdapter):
+    """FakeAdapter plus stop orders that rest on the exchange until the price falls to them."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.stops: dict[str, Order] = {}
+        self.cancels: list[str] = []
+
+    async def place_stop(self, symbol, amount, trigger_price, client_id, reason=""):
+        o = Order(client_id, "bybit", symbol, Side.SELL, OrderType.MARKET, amount, trigger_price,
+                  OrderStatus.OPEN)
+        self.stops[client_id] = self.orders[client_id] = o
+        return o
+
+    async def cancel_stop(self, client_id, symbol):
+        o = self.stops.get(client_id)
+        if o is None or o.status is not OrderStatus.OPEN:
+            return False
+        self.cancels.append(client_id)
+        o.status = OrderStatus.CANCELED
+        return True
+
+    def fire(self, bid):
+        """The price falls through the stops: Bybit sells while the executor isn't looking."""
+        self.bid = bid
+        for o in self.stops.values():
+            if o.status is OrderStatus.OPEN and bid <= o.price:
+                base = o.symbol.split("/")[0]
+                o.status, o.filled, o.average = OrderStatus.FILLED, o.amount, bid
+                o.fee, o.fee_currency = o.amount * bid * 0.001, "USDT"
+                self.cash[base] -= o.amount
+                self.cash["USDT"] += o.amount * bid - o.fee
+
+
+@pytest.fixture
+def sx(ex):
+    make, _adapter, paper, events = ex
+    adapter = StopAdapter()
+
+    def make2(**kw):
+        e = make(**kw)
+        e.adapter = adapter
+        return e
+
+    return make2, adapter, paper, events
+
+
+def test_every_open_position_gets_a_stop_resting_on_the_exchange(sx):
+    make, adapter, paper, events = sx
+    e = make()
+    run(e.tick())
+    p = e.state["positions"][KEY]
+    stop = adapter.stops[p["stop_cid"]]
+    assert p["stop_armed"] and stop.price == 95.0 and stop.amount == p["amount"]
+    run(e.tick())
+    assert len(adapter.stops) == 1  # armed once, not every tick
+    assert any(x["kind"] == "stop_armed" for x in events.read())
+
+
+def test_the_resting_stop_is_cancelled_before_the_executor_sells(sx):
+    make, adapter, paper, _events = sx
+    e = make()
+    run(e.tick())
+    cid = e.state["positions"][KEY]["stop_cid"]
+    _paper(paper, {}, [{"key": KEY, "signal_ts": SIG, "entry": 100.0, "exit": 104.0, "r": 0.8}])
+    adapter.bid = 104.0
+    out = run(e.tick())
+    assert out["closed"] == [KEY] and adapter.cancels == [cid]
+    assert adapter.stops[cid].status is OrderStatus.CANCELED  # nothing left to sell another position's coins
+
+
+def test_a_stop_that_fired_on_the_exchange_is_booked_once(sx):
+    make, adapter, *_ = sx
+    e = make()
+    run(e.tick())
+    adapter.fire(94.0)
+    out = run(e.tick())
+    assert out["closed"] == [KEY] and not e.state["positions"]
+    row = e.state["closed"][0]
+    assert row["exit_reason"] == "stop on bybit" and row["exit"] == 94.0 and row["r"] < 0
+    assert not [o for o in adapter.sent if o.side is Side.SELL]  # Bybit sold; the executor didn't sell again
+
+
+def test_a_stop_that_fired_while_the_server_was_down(sx):
+    make, adapter, *_ = sx
+    run(make().tick())
+    adapter.fire(94.0)
+    adapter.bid = 96.0  # bounced back above the stop before the restart
+    e = make()
+    e.state["checked"] = False  # a restart checks holdings first
+    out = run(e.tick())
+    assert out["closed"] == [KEY] and e.state["closed"][0]["exit_reason"] == "stop on bybit"
+
+
+def test_a_stop_whose_answer_was_lost_is_found_not_doubled(sx):
+    make, adapter, *_ = sx
+    real = adapter.place_stop
+
+    async def lost(*a, **k):
+        await real(*a, **k)
+        raise TimeoutError("lost")
+
+    adapter.place_stop = lost
+    e = make()
+    run(e.tick())
+    assert not e.state["positions"][KEY]["stop_armed"]
+    adapter.place_stop = real
+    run(e.tick())
+    assert e.state["positions"][KEY]["stop_armed"] and len(adapter.stops) == 1
+
+
+def test_kill_switch_cancels_resting_stops_and_sells(sx):
+    make, adapter, *_ = sx
+    e = make()
+    run(e.tick())
+    e.control.kill(by="test")
+    out = run(e.tick())
+    assert out["closed"] == [KEY] and e.state["flattened"] and len(adapter.cancels) == 1
+    assert all(o.status is not OrderStatus.OPEN for o in adapter.stops.values())
+
+
+# ---- streamed prices (Bybit WebSocket) ----------------------------------------------------------
+
+
+class FakePrices:
+    def __init__(self, symbols=("BTC/USDT",)):
+        self.symbols, self.bid, self.age = list(symbols), {}, {}
+
+    def stale(self, symbol, max_age):
+        return self.age.get(symbol, float("inf")) > max_age
+
+    def best_bid(self, symbol):
+        return self.bid.get(symbol)
+
+
+def test_streamed_price_triggers_the_stop_and_quiet_stream_blocks_entries(ex):
+    make, adapter, *_ = ex
+    prices = FakePrices()
+    e = make(prices=prices)
+    assert run(e.tick())["opened"] == []  # BTC is streamed but nothing has arrived: wait
+    assert not adapter.sent and not e.state["skipped"]  # waiting, not skipped for good
+    prices.age["BTC/USDT"], prices.bid["BTC/USDT"] = 1.0, 100.0
+    assert run(e.tick())["opened"] == [KEY]
+    assert not e._stop_hit()
+    prices.bid["BTC/USDT"] = 94.0  # the order book still says 100: the stream is ahead
+    assert e._stop_hit()
+    out = run(e.tick())
+    assert out["closed"] == [KEY]

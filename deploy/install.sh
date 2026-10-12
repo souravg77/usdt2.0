@@ -11,7 +11,7 @@
 #   3. downloads the code into ~/AI_crypto_trader
 #   4. creates .env with strong random secrets (the dashboard password is printed once)
 #   5. builds the image, prepares the database, starts collector, context, paper, web and caddy
-#   6. schedules a daily backup (cron, 03:30) and makes the first one
+#   6. schedules a daily backup (cron, 03:30) and makes the first one, and a daily pair ranking (02:45)
 #   7. runs `aitrader doctor`
 # Live trading stays locked. Running it again is safe: existing settings are kept.
 set -euo pipefail
@@ -120,6 +120,8 @@ NEW_PW=""
 if grep -qx 'AITRADER_SYMBOLS=BTC/USDT,ETH/USDT,SOL/USDT,BNB/USDT,XRP/USDT' .env; then
   sed -i 's#^AITRADER_SYMBOLS=.*#AITRADER_SYMBOLS=BTC/USDT,ETH/USDT,SOL/USDT,BNB/USDT,XRP/USDT,DOGE/USDT,ADA/USDT,TRX/USDT,LINK/USDT,AVAX/USDT,SUI/USDT,LTC/USDT,BCH/USDT,DOT/USDT,TON/USDT,NEAR/USDT,APT/USDT,UNI/USDT,AAVE/USDT,PEPE/USDT#' .env
 fi
+# the tighter risk defaults you chose (2026-10-12): only replaces the old default values, never your own
+sed -i 's#^AITRADER_RISK_PER_TRADE=0.005$#AITRADER_RISK_PER_TRADE=0.0025#; s#^AITRADER_DAILY_LOSS_PCT=0.02$#AITRADER_DAILY_LOSS_PCT=0.01#' .env
 chmod 600 .env
 if ! grep -qE '^AITRADER_WEB_PASSWORD=.{12,}' .env; then
   NEW_PW="$(openssl rand -base64 18 | tr -d '/+=' | cut -c1-20)"
@@ -162,6 +164,10 @@ say "Daily backups"
 CRON_LINE="30 3 * * * cd '$DIR' && ./deploy/backup.sh >> data/backup.log 2>&1"
 ( crontab -l 2>/dev/null | grep -v 'deploy/backup.sh' || true; echo "$CRON_LINE" ) | crontab -
 sudo systemctl enable --now cron >/dev/null 2>&1 || true
+# Daily Bybit pair ranking at 02:45 (public data, no key), shown on the Pairs page. It changes which
+# pairs trade only if you set AITRADER_PAIRS=ranked in .env.
+RANK_LINE="45 2 * * * cd '$DIR' && $DOCKER compose run --rm -T collector pairs rank >> data/pairs.log 2>&1"
+( crontab -l 2>/dev/null | grep -v 'pairs rank' || true; echo "$RANK_LINE" ) | crontab -
 DOCKER="$DOCKER" ./deploy/backup.sh || echo "warning: the first backup failed; run ./deploy/backup.sh to see why" >&2
 
 say "Health check"

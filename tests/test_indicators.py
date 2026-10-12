@@ -6,7 +6,8 @@ from aitrader.indicators import (
     atr, bollinger, ema, ema_stack, macd, market_structure, rsi, sma, support_resistance,
     swing_points, volume_profile, fib_levels, ichimoku, parabolic_sar, relative_volume, stoch_rsi,
     vwap, bullish_divergence, candle_patterns, cci, directional_index, force_index, heikin_ashi,
-    stochastic, streak,
+    stochastic, streak, supertrend, obv, mfi, cmf, keltner, williams_r, missing_candles,
+    indicator_valid,
 )
 
 
@@ -197,3 +198,88 @@ def test_bullish_divergence_detects_lower_low_with_higher_osc():
     osc2 = osc.copy()
     osc2[8] = 10.0  # oscillator also makes a lower low: no divergence
     assert bullish_divergence(df, osc2, 30, 2, 2).sum() == 0
+
+
+def _random_frame(n=400, seed=3):
+    rng = np.random.default_rng(seed)
+    close = 100 * np.exp(np.cumsum(0.01 * rng.standard_normal(n)))
+    df = frame(close, spread=0.5, volume=rng.lognormal(3, 0.5, n))
+    df["high"] = np.maximum(df["high"], df["open"])
+    df["low"] = np.minimum(df["low"], df["open"])
+    return df
+
+
+@pytest.mark.parametrize("fn", [
+    lambda d: supertrend(d)[["supertrend", "direction"]], lambda d: obv(d), lambda d: mfi(d),
+    lambda d: cmf(d), lambda d: keltner(d), lambda d: williams_r(d),
+])
+def test_new_indicators_have_no_lookahead(fn):
+    df = _random_frame()
+    full, part = fn(df), fn(df.iloc[:250])
+    pd.testing.assert_frame_equal(pd.DataFrame(full).iloc[:250], pd.DataFrame(part))
+
+
+def test_supertrend_warmup_direction_and_flip():
+    up = frame(np.linspace(100, 200, 60))
+    st = supertrend(up, 10, 3)
+    assert st["supertrend"].iloc[:9].isna().all() and (st["direction"].iloc[:9] == 0).all()
+    assert st["direction"].iloc[-1] == 1 and st["supertrend"].iloc[-1] < up["close"].iloc[-1]
+    assert st["lower"].iloc[9:].is_monotonic_increasing  # the stop only rises in an uptrend
+    crash = frame(np.r_[np.linspace(100, 200, 60), np.linspace(195, 120, 20)])
+    st = supertrend(crash, 10, 3)
+    assert st["direction"].iloc[-1] == -1 and st["supertrend"].iloc[-1] > crash["close"].iloc[-1]
+
+
+def test_obv_adds_up_and_down_volume():
+    df = frame([10, 11, 11, 10, 12], volume=np.array([5.0, 2, 3, 4, 1]))
+    assert obv(df).tolist() == [0, 2, 2, -2, -1]
+
+
+def test_mfi_range_extremes_and_warmup():
+    up = frame(np.arange(1.0, 40), volume=np.full(39, 10.0))
+    m = mfi(up, 14)
+    assert m.iloc[:14].isna().all() and m.iloc[14] == 100
+    assert mfi(frame(np.arange(40.0, 1, -1)), 14).iloc[-1] == pytest.approx(0)
+    assert mfi(frame(np.full(30, 5.0)), 14).iloc[-1] == 50  # no money flow at all
+    r = mfi(_random_frame()).dropna()
+    assert r.between(0, 100).all()
+
+
+def test_cmf_sign_and_bounds():
+    df = frame(np.full(30, 100.0), spread=1.0)
+    df["close"] = df["high"] - 0.1  # every bar closes near its high: buying pressure
+    c = cmf(df, 20)
+    assert c.iloc[:19].isna().all() and c.iloc[-1] == pytest.approx(0.9)
+    df["close"] = df["low"]
+    assert cmf(df, 20).iloc[-1] == pytest.approx(-1)
+    assert cmf(_random_frame()).dropna().between(-1, 1).all()
+
+
+def test_keltner_bands_around_ema():
+    df = frame(np.full(50, 100.0), spread=2.0)
+    kc = keltner(df, 20, 2, 10)
+    assert kc["mid"].iloc[-1] == pytest.approx(100) and kc["upper"].iloc[-1] == pytest.approx(108)
+    assert kc["lower"].iloc[-1] == pytest.approx(92) and np.isnan(kc["upper"].iloc[8])
+
+
+def test_williams_r_range():
+    w = williams_r(frame(np.arange(1.0, 40)), 14)
+    assert np.isnan(w.iloc[12]) and -100 <= w.iloc[-1] <= 0 and w.iloc[-1] > -10
+    assert williams_r(frame(np.arange(40.0, 1, -1)), 14).iloc[-1] < -90
+    assert np.isnan(williams_r(frame(np.full(20, 5.0), spread=0.0), 14).iloc[-1])
+
+
+def test_missing_candles_and_validity():
+    df = frame(np.linspace(100, 110, 30))
+    assert (missing_candles(df) == 0).all()
+    assert indicator_valid(df, 14).tolist() == [False] * 13 + [True] * 17
+    gapped = df.drop(df.index[[10, 11]])  # two hourly candles missing before the bar at 12:00
+    gaps = missing_candles(gapped, 3_600_000)
+    assert gaps.iloc[10] == 2 and gaps.drop(gaps.index[10]).eq(0).all()
+    ok = indicator_valid(gapped, 5, 3_600_000)
+    # windows of 5 bars that span the gap are invalid until the gap leaves the window
+    assert not ok.iloc[10:14].any() and ok.iloc[14] and ok.iloc[9]
+    vals = pd.Series(1.0, index=gapped.index)
+    vals.iloc[-1] = np.nan
+    assert not indicator_valid(gapped, 5, 3_600_000, vals).iloc[-1]
+

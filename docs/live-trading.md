@@ -30,16 +30,21 @@ Every executor order is sized and checked here. Strategies can't switch it off. 
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `AITRADER_RISK_PER_TRADE` | 0.005 | risk per trade (0.5% of equity); never above 1%, whatever you set |
-| `AITRADER_DAILY_LOSS_PCT` | 0.02 | realised loss today (UTC) that pauses trading |
+| `AITRADER_RISK_PER_TRADE` | 0.0025 | risk per trade (0.25% of equity); never above 1%, whatever you set |
+| `AITRADER_DAILY_LOSS_PCT` | 0.01 | realised loss today (UTC) that pauses trading |
 | `AITRADER_WEEKLY_LOSS_PCT` | 0.05 | realised loss this week that pauses trading |
 | `AITRADER_MAX_OPEN_POSITIONS` | 3 | most positions at once |
 | `AITRADER_MAX_COIN_EXPOSURE_PCT` | 0.25 | most of equity in one coin |
 | `AITRADER_MAX_TOTAL_EXPOSURE_PCT` | 0.9 | most of equity invested (spot, no leverage) |
 | `AITRADER_MIN_ORDER_USDT` | 10 | smaller orders are skipped, never rounded up |
+| `AITRADER_CORRELATION_GROUPS` | `BTC,ETH,SOL` | coins that move together; groups separated by `;` |
+| `AITRADER_MAX_GROUP_POSITIONS` | 2 | most positions at once inside one group |
+| `AITRADER_MAX_GROUP_EXPOSURE_PCT` | 0.4 | most of equity in one group |
 
 Size comes from the stop distance: `units = equity × risk × filter size ÷ (entry − stop)`, then
 cut to the exposure limits and to the cash available. A loss-cap pause stays on until you resume.
+The installer moves the old defaults (0.005 and 0.02) in your `.env` to the new ones; a value you
+set yourself is left alone.
 
 ## Pause and kill switch
 
@@ -75,6 +80,14 @@ The service runs with `AITRADER_MODE=testnet`, so it can only reach Bybit Demo T
 the demo account within about 15 seconds, sized by the risk engine. It sells when the paper trade
 closes, or at once if the price is at or below the stop. Each fill is compared with its paper twin, so slippage is
 measured.
+
+Every open position also gets a **stop-loss order that rests on Bybit** (a spot conditional
+order, `orderFilter=StopOrder`) at the strategy's stop. It sells at market if the price falls to
+the stop, even while the server or the executor is down. The executor cancels it before it sells
+for any other reason (paper exit, kill switch), so a leftover stop can never sell coins that
+belong to another position. A stop that fired is booked as the exit (`stop on bybit`), including
+one that fired while the server was down. If Bybit refuses the stop, you get a warning, the
+executor keeps watching the stop itself and tries again after 5 minutes.
 
 How failures are handled:
 

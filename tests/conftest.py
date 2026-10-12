@@ -26,7 +26,8 @@ class FakeCcxt:
                 "price": price, "status": "closed", "filled": amount, "average": 101.0,
                 "fee": {"cost": 0.1, "currency": "USDT"}, "timestamp": 5}
 
-    async def cancel_order(self, order_id, symbol):
+    async def cancel_order(self, order_id, symbol, params=None):
+        self.cancelled = (order_id, symbol, params or {})
         return {"id": order_id, "symbol": symbol, "side": "buy", "type": "limit",
                 "amount": 1, "status": "canceled"}
 
