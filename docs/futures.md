@@ -50,8 +50,20 @@ tracks spot closely and the small gap is not modelled.
 | Backtests, reports, replay | short twins included |
 | Paper trading | shorts paper-traded with perp costs, isolated margin and the liquidation check |
 | AI trade filter | learned from long trades, so it doesn't judge shorts |
-| Live executor | **spot only for now**: it skips short signals. Real perpetual orders come in the next update, behind the same live lock and go-live approval |
+| Live executor | sells the coin's USDT perpetual short (one-way mode, `AITRADER_LEVERAGE`), puts a reduce-only stop on Bybit above the entry, and buys back with reduce-only orders. Same live lock, go-live approval and kill switch as spot |
 | API key | Contracts / Derivatives / Options permissions are now accepted; withdrawal and transfer rights are still refused, and the key must be bound to the server's IP |
+
+## Before the first real short
+
+1. Bybit app: **Derivatives → margin mode → Isolated Margin**. On a Unified Trading Account this
+   setting covers the whole account, so the agent only *checks* it and never changes it; until it
+   is Isolated, every short signal is skipped with "switch the Bybit account to Isolated Margin".
+2. The API key needs Contracts / USDT Perpetual trade permission (still no withdraw or transfer).
+3. Optional: `AITRADER_LEVERAGE=2` (or 3) in `.env`. The agent sets that leverage on each
+   perpetual before its first order.
+
+The kill switch buys back every short as well as selling every spot coin. Funding is settled by
+Bybit on the open position and is not in the executor's per-trade P&L.
 
 Bybit offers derivatives only in some countries; check that your account can trade USDT
 perpetuals before relying on the live part.

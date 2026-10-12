@@ -6,7 +6,9 @@ sized and checked here; strategies cannot switch it off.
 - Daily and weekly loss caps (default 1% and 5%). Hitting either pauses trading until a person
   resumes it.
 - A maximum number of open positions, a maximum exposure per coin, and total exposure capped
-  at the account's cash (spot, no leverage).
+  at the account's equity. A spot buy is paid in full from free cash; a perpetual short needs
+  only its margin (notional / leverage) from free cash, but its full notional counts as exposure,
+  so leverage never makes the book bigger.
 - Coins that move together (default BTC, ETH and SOL) form a correlation group: the group as a
   whole has a position limit and an exposure cap, so three of them don't count as three
   independent bets.
@@ -76,12 +78,19 @@ class RiskEngine:
         self.limits = limits or RiskLimits()
 
     def size(self, symbol: str, equity: float, free_cash: float, entry: float, stop: float,
-             signal_risk: float, size_mult: float, open_positions: list[dict]) -> Sizing:
-        """Units to buy. ``open_positions`` are dicts with ``symbol`` and ``notional``."""
+             signal_risk: float, size_mult: float, open_positions: list[dict], short: bool = False,
+             leverage: float = 1.0) -> Sizing:
+        """Units to buy (or, ``short``, to sell on a perpetual at ``leverage``). ``open_positions``
+        are dicts with ``symbol`` and ``notional``."""
         lim = self.limits
         why = []
-        if entry <= stop or entry <= 0:
+        if entry <= 0:
+            return Sizing(0, 0, 0, ["no price"])
+        if short and stop <= entry:
+            return Sizing(0, 0, 0, ["stop is not above the entry"])
+        if not short and entry <= stop:
             return Sizing(0, 0, 0, ["stop is not below the entry"])
+        lev = max(1.0, leverage) if short else 1.0
         if len(open_positions) >= lim.max_open_positions:
             return Sizing(0, 0, 0, [f"{len(open_positions)} positions open (max {lim.max_open_positions})"])
         group = self.group(symbol)
@@ -90,13 +99,13 @@ class RiskEngine:
             return Sizing(0, 0, 0, [f"{len(in_group)} positions open in the correlated group "
                                     f"{'/'.join(group)} (max {lim.max_group_positions})"])
         risk_pct = min(signal_risk, lim.risk_per_trade, HARD_MAX_RISK) * max(0.0, min(size_mult, 1.0))
-        units = equity * risk_pct / (entry - stop)
+        units = equity * risk_pct / abs(entry - stop)
         caps = {
             "coin exposure": self.coin_room(equity, symbol, open_positions),
             "correlated group exposure": (lim.max_group_exposure_pct * equity - sum(p["notional"] for p in in_group)
                                           if group else float("inf")),
             "total exposure": lim.max_total_exposure_pct * equity - sum(p["notional"] for p in open_positions),
-            "free cash": free_cash * 0.995,  # leave room for the fee
+            "free cash": free_cash * 0.995 * lev,  # leave room for the fee; a short needs only margin
         }
         for name, room in caps.items():
             if units * entry > room:
@@ -106,7 +115,7 @@ class RiskEngine:
         if notional < lim.min_order_usdt:
             return Sizing(0, notional, 0, why + [f"order of {notional:.2f} USDT is below the "
                                                   f"{lim.min_order_usdt:g} USDT minimum"])
-        return Sizing(units, notional, units * (entry - stop), why)
+        return Sizing(units, notional, units * abs(entry - stop), why)
 
     def group(self, symbol: str) -> tuple[str, ...] | None:
         base = symbol.split("/")[0]

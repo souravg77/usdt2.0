@@ -195,9 +195,19 @@ class CcxtAdapter(ExchangeAdapter):
         )
 
 
+class PerpNotReady(RuntimeError):
+    """The account isn't set up for the agent's futures trades (the message says what to change)."""
+
+
 class BybitAdapter(CcxtAdapter):
-    """Bybit spot (V5 API) on the real exchange. Market data needs no key; orders need the
-    real-account key and the live lock."""
+    """Bybit spot and USDT perpetuals (V5 API) on the real exchange. Market data needs no key;
+    orders need the real-account key and the live lock.
+
+    A symbol with a settle currency (``BTC/USDT:USDT``) is the USDT perpetual; the agent only
+    sells those short (``trade.futures``), one-way mode, closing with reduce-only orders. The
+    account must be in Isolated Margin mode: the agent checks it and never changes it itself,
+    because on a Unified Trading Account that setting covers the whole account.
+    """
 
     name = "bybit"
     ccxt_id = "bybit"
@@ -206,19 +216,31 @@ class BybitAdapter(CcxtAdapter):
     # which needs key permissions a trade-only key doesn't have
     ccxt_options = {"enableUnifiedAccount": True, "enableUnifiedMargin": False}
 
+    supports_perps = True
+
+    @staticmethod
+    def is_perp(symbol: str) -> bool:
+        return ":" in symbol
+
     async def place_order(self, symbol, side, amount, type=OrderType.MARKET, price=None, reason="",
-                          client_id=None):
-        """Spot only, never borrowed (isLeverage 0). A market order's amount is in coins
-        (marketUnit baseCoin), not USDT. Bybit answers a new order with its id only, so the order
-        is read back once to learn the fill."""
+                          client_id=None, reduce_only=False):
+        """Spot: never borrowed (isLeverage 0), a market order's amount in coins (marketUnit
+        baseCoin). Perpetual: one-way mode (positionIdx 0), ``reduce_only`` for closing orders.
+        Bybit answers a new order with its id only, so the order is read back once to learn the
+        fill."""
         self._check_order_allowed()
         await self.throttle.acquire()
         amount = await self._precise(symbol, amount)
         log.info("ORDER %s %s %s %s @ %s id=%s reason=%s", self.name, side.value, amount, symbol,
                  price, client_id, reason)
-        params = {"isLeverage": 0}
-        if type is OrderType.MARKET:
-            params["marketUnit"] = "baseCoin"
+        if self.is_perp(symbol):
+            params = {"positionIdx": 0}
+            if reduce_only:
+                params["reduceOnly"] = True
+        else:
+            params = {"isLeverage": 0}
+            if type is OrderType.MARKET:
+                params["marketUnit"] = "baseCoin"
         if client_id:
             params[self.client_id_param] = client_id
         raw = await self.client.create_order(symbol, type.value, side.value, amount,
@@ -234,20 +256,28 @@ class BybitAdapter(CcxtAdapter):
         order.reason = reason
         return order
 
-    async def place_stop(self, symbol, amount, trigger_price, client_id, reason=""):
-        """A resting stop-loss on Bybit: a spot conditional order (orderFilter StopOrder) that sells
-        ``amount`` at market once the last price falls to ``trigger_price``. It waits on the
-        exchange, so the position is protected even while this server is down."""
+    async def place_stop(self, symbol, amount, trigger_price, client_id, reason="", side=Side.SELL):
+        """A resting stop-loss on Bybit that waits on the exchange, so the position is protected
+        even while this server is down. Spot: a conditional order (orderFilter StopOrder) selling
+        ``amount`` at market once the last price falls to ``trigger_price``. Perpetual short
+        (``side`` BUY): a reduce-only conditional buy once the price rises to it."""
         self._check_order_allowed()
         await self.throttle.acquire()
         amount = await self._precise(symbol, amount)
         if hasattr(self.client, "price_to_precision"):
             trigger_price = float(self.client.price_to_precision(symbol, trigger_price))
-        log.info("STOP %s sell %s %s at %s id=%s reason=%s", self.name, amount, symbol, trigger_price,
+        log.info("STOP %s %s %s %s at %s id=%s reason=%s", self.name, side.value, amount, symbol, trigger_price,
                  client_id, reason)
-        params = {"isLeverage": 0, "marketUnit": "baseCoin", "triggerPrice": trigger_price,
-                  self.client_id_param: client_id}
-        raw = await self.client.create_order(symbol, "market", "sell", amount, None, params)
+        if self.is_perp(symbol):
+            params = {"positionIdx": 0, "reduceOnly": True, "triggerPrice": trigger_price,
+                      "triggerDirection": "ascending" if side is Side.BUY else "descending",
+                      self.client_id_param: client_id}
+        else:
+            if side is not Side.SELL:
+                raise ValueError("a spot stop can only sell")
+            params = {"isLeverage": 0, "marketUnit": "baseCoin", "triggerPrice": trigger_price,
+                      self.client_id_param: client_id}
+        raw = await self.client.create_order(symbol, "market", side.value, amount, None, params)
         order = self._to_order(raw, symbol)
         order.reason = reason
         return order
@@ -283,13 +313,46 @@ class BybitAdapter(CcxtAdapter):
         if not getattr(self.client, "markets", None):
             await self.client.load_markets()
         market = self.client.market(symbol)
-        req = {"category": "spot", "symbol": market["id"], "orderLinkId": client_id}
+        req = {"category": "linear" if self.is_perp(symbol) else "spot", "symbol": market["id"],
+               "orderLinkId": client_id}
         for fetch in (self.client.private_get_v5_order_realtime, self.client.private_get_v5_order_history):
             await self.throttle.acquire()
             rows = ((await fetch(dict(req))).get("result") or {}).get("list") or []
             if rows:
                 return self._to_order(self.client.parse_order(rows[0], market), symbol)
         return None
+
+
+    # ---- perpetuals --------------------------------------------------------------------------
+
+    async def prepare_perp(self, symbol: str, leverage: float) -> None:
+        """Before the first order on a perpetual: the account must be in Isolated Margin mode
+        (checked, never changed here), and the symbol's leverage is set (once per process)."""
+        self._check_order_allowed()
+        if not hasattr(self, "_perp_ready"):
+            self._perp_ready: dict[str, float] = {}
+        ready = self._perp_ready
+        if ready.get(symbol) == leverage:
+            return
+        await self.throttle.acquire()
+        info = (await self.client.private_get_v5_account_info()).get("result") or {}
+        if info.get("marginMode") != "ISOLATED_MARGIN":
+            raise PerpNotReady("switch the Bybit account to Isolated Margin (Bybit app: Derivatives, "
+                               f"margin mode) before futures trades; it is {info.get('marginMode') or 'unknown'}")
+        await self.throttle.acquire()
+        try:
+            await self.client.set_leverage(int(leverage) if leverage == int(leverage) else leverage, symbol)
+        except Exception as exc:
+            if "110043" not in str(exc) and "not modified" not in str(exc).lower():
+                raise
+        ready[symbol] = leverage
+
+    async def perp_position(self, symbol: str) -> float:
+        """Size of the open short on ``symbol`` in coins (0 when there is none)."""
+        await self.throttle.acquire()
+        rows = await self.client.fetch_positions([symbol])
+        return sum(float(r.get("contracts") or 0) for r in rows
+                   if r.get("symbol") == symbol and r.get("side") == "short")
 
 
 ADAPTERS = {"bybit": BybitAdapter}
