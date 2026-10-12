@@ -487,6 +487,7 @@ class RuleStrategy(Strategy):
             size=f"{self.rule['risk_pct']:.2%} of equity at risk",
             decisions=tuple(self.rule["decisions"]),
         )
+        self._exit_rule_key()  # register the exit rule now: open trades need it after a restart
         super().__init__(**params)
 
     @classmethod

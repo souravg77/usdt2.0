@@ -217,8 +217,6 @@ class PaperTrader:
     def _manage_open(self, reg: Registry, now_ms: int, events: dict) -> None:
         for key, pos in list(self.state["open"].items()):
             entry_id, ex, sym, tf = key.split("|")
-            if entry_id in reg.entries:
-                make_strategy(reg.entries[entry_id])  # registers its custom exit rules
             sig = _sig_from(pos["signal"])
             step = TIMEFRAME_MS[tf]
             df = self._frame(ex, sym, tf, sig.ts - WINDOW_BARS * step, now_ms)
@@ -227,7 +225,13 @@ class PaperTrader:
             idx = {int(t): i for i, t in enumerate(df["ts"].to_numpy())}
             if sig.ts not in idx:
                 continue  # the entry bar hasn't closed yet
-            t = simulate_signal(sig, df, idx[sig.ts], self.cfg.backtest, {})
+            try:
+                if entry_id in reg.entries:
+                    make_strategy(reg.entries[entry_id])  # registers its custom exit rules
+                t = simulate_signal(sig, df, idx[sig.ts], self.cfg.backtest, {})
+            except Exception:  # never close a trade on the wrong rule: keep it open and say so
+                log.exception("paper %s: can't evaluate its exits; kept open", key)
+                continue
             if t is None:
                 del self.state["open"][key]
                 log.info("paper %s skipped: price opened below the stop", key)
@@ -237,6 +241,14 @@ class PaperTrader:
                 risk_usdt = equity * sig.risk_pct * pos.get("size_mult", 1.0)
                 units = risk_usdt / (sig.entry - sig.stop)
                 units = min(units, equity * self.cfg.max_position_frac / t.entry)
+                # all of a strategy's open positions together may not use more than its equity
+                in_use = sum(o.get("units", 0) * o.get("entry", 0) for k, o in self.state["open"].items()
+                             if k != key and o.get("entry_id") == entry_id and o.get("filled"))
+                units = min(units, max(0.0, equity - in_use) / t.entry)
+                if units <= 0:
+                    del self.state["open"][key]
+                    log.info("paper %s skipped: the strategy's equity is all in open positions", key)
+                    continue
                 pos.update(filled=True, entry=t.entry, units=units, entry_ts=t.entry_ts)
             if t.exit_reason == "end" and t.exit_ts == int(df["ts"].iloc[-1]):
                 pos["mark_r"] = round(t.r, 3)  # still open

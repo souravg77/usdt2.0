@@ -20,12 +20,15 @@ MIN_BARS = 300
 
 @dataclass(frozen=True)
 class Gate:
-    min_trades_in: int = 20
-    min_trades_oos: int = 10
+    min_trades_in: int = 50
+    min_trades_oos: int = 30
     min_expectancy_in: float = 0.0  # R per trade after costs
     min_expectancy_oos: float = 0.05
     min_profit_factor_oos: float = 1.1
     max_drawdown_oos: float = 15.0  # R
+    # Dozens of strategies are tested, so some look good by luck. The out-of-sample average must
+    # also be clearly above zero: t = mean R / its standard error.
+    min_t_oos: float = 2.0
 
     def check(self, m_in: dict, m_oos: dict) -> list[str]:
         why = []
@@ -42,6 +45,9 @@ class Gate:
             if m_oos["profit_factor"] < self.min_profit_factor_oos:
                 why.append(f"out-of-sample profit factor {m_oos['profit_factor']:.2f} "
                            f"(need {self.min_profit_factor_oos:.2f})")
+            if m_oos.get("t_stat", self.min_t_oos) < self.min_t_oos:
+                why.append(f"out-of-sample result could be luck (t={m_oos['t_stat']:.1f}, "
+                           f"need {self.min_t_oos:g})")
             if m_oos["max_drawdown_r"] > self.max_drawdown_oos:
                 why.append(f"out-of-sample drawdown {m_oos['max_drawdown_r']:.1f}R "
                            f"(max {self.max_drawdown_oos:.0f}R)")

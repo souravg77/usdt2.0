@@ -16,9 +16,14 @@ book (PDF) ──read──> draft strategies ──backtest gate──> paper t
    trade, and anything else is rejected. Broken specs get one repair round, then are dropped.
 3. **Backtest.** `aitrader learn test` runs each new strategy on every stored market for its
    timeframes, with fees and slippage, on the in-sample (first 60%) and out-of-sample (next 20%)
-   periods. The last 20% stays untouched. To pass, a strategy needs at least 20 in-sample and
-   10 out-of-sample trades, a positive in-sample result, at least +0.05R per trade out of sample,
-   a profit factor of at least 1.1 and a drawdown under 15R. Failures are kept with the reasons.
+   periods. The last 20% stays untouched. To pass, a strategy needs at least 50 in-sample and
+   30 out-of-sample trades, a positive in-sample result, at least +0.05R per trade out of sample,
+   an out-of-sample average at least 2 standard errors above zero (t >= 2: dozens of strategies
+   are tested, so some look good by luck), a profit factor of at least 1.1 and a drawdown under
+   15R. Failures are kept with the reasons. "Turn paper trading on" on the dashboard (or
+   `learn paper-all`) also paper-trades the ones that failed, but only strategies that passed
+   this gate can be approved for live, and each one needs its own paper record (at least 30
+   trades, above 0R) on top of the combined go/no-go numbers.
 4. **Paper trade.** The `paper` service (`aitrader learn paper`) trades every strategy that
    passed, on paper, using the closed candles the collector stores. It uses the same fill rules
    as the backtest (next open plus slippage, stop first, fees), sizes each trade at the

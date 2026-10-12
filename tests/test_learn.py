@@ -155,7 +155,8 @@ def test_evaluate_moves_status(tmp_path):
     fill_store(store, synthetic())
     e = Entry(id="r", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR))
     res = evaluate(e, store, ["binance"], ["BTC/USDT"], gate=Gate(min_expectancy_oos=-99,
-                   min_profit_factor_oos=0, max_drawdown_oos=1e9, min_expectancy_in=-99))
+                   min_profit_factor_oos=0, max_drawdown_oos=1e9, min_expectancy_in=-99,
+                   min_trades_in=10, min_trades_oos=10, min_t_oos=-99))
     assert e.status == "paper" and res["out_of_sample"]["trades"] >= 10
     e2 = Entry(id="r2", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR))
     evaluate(e2, store, ["binance"], ["BTC/USDT"], gate=Gate(min_expectancy_oos=5))
@@ -388,3 +389,18 @@ def test_learn_test_paper_records_without_moving(tmp_path, monkeypatch):
                  "--exchange", "binance", "test", "--paper"]) == 0
     e = Registry(reg_path).get("p")
     assert e.status == "paper" and e.backtest["markets"]
+
+
+def test_open_paper_trade_keeps_its_exit_rule_after_a_restart():
+    from aitrader.backtest.engine import CUSTOM_EXITS
+
+    spec = validate_spec({**EVERY_UP_BAR, "name": "exit_rule",
+                          "exit": {"when": [{"left": "close", "op": "<", "right": "sma(5)"}]}})
+    CUSTOM_EXITS.clear()  # a fresh process: nothing generated yet
+    s = RuleStrategy(spec)
+    assert s._exit_rule_key() in CUSTOM_EXITS
+
+
+def test_lab_gate_rejects_results_that_could_be_luck():
+    noisy = {"trades": 40, "expectancy_r": 0.1, "profit_factor": 1.2, "max_drawdown_r": 5, "t_stat": 0.6}
+    assert any("luck" in w for w in Gate().check({**noisy, "trades": 60}, noisy))

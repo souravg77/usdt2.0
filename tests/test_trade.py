@@ -597,3 +597,39 @@ def test_gate_leaves_out_strategies_that_only_paper_trade(tmp_path):
     assert gl.evaluate()["strategies"] == ["s1"]  # paper-all strategies are not live candidates
     rep = gl.evaluate(["failed"])  # named on purpose: the backtest line still fails it
     assert not next(c for c in rep["criteria"] if c["name"].startswith("Expectancy after costs (backtest"))["passed"]
+
+
+def test_executor_leaves_dust_and_still_finishes_the_kill_switch(ex):
+    make, adapter, *_ = ex
+    e = make()
+    run(e.tick())
+    p = e.state["positions"][KEY]
+    adapter.cash["BTC"] = p["amount"] = 0.00001  # what is left after fees and rounding
+
+    async def sellable(symbol, amount, price):
+        return 0.0 if amount * price < 5 else amount
+
+    adapter.sellable = sellable
+    e.control.kill(by="test")
+    run(e.tick())
+    assert e.state["flattened"] and e.state["positions"][KEY]["status"] == "dust"
+    assert not [o for o in adapter.sent if o.side is Side.SELL]
+
+
+def test_executor_values_a_bnb_fee_at_the_bnb_price(ex):
+    make, adapter, *_ = ex
+    e = make()
+    order = Order("x", "binance", "BTC/USDT", Side.SELL, OrderType.MARKET, 1, None, OrderStatus.FILLED,
+                  filled=1, average=60_000, fee=0.01, fee_currency="BNB")
+    adapter.bid = 600.0  # the book answers every symbol, BNB/USDT included
+    assert run(e._fee_in_quote(order, 60_000)) == pytest.approx(6.0)  # not 0.01 * 60,000
+
+
+def test_gate_needs_every_strategy_to_stand_on_its_own(tmp_path):
+    gl, events, reg = _gate_world(tmp_path)
+    reg.add(Entry(id="s2", kind="rule", name="s2", status="paper", spec={"a": 9},
+                  backtest={"out_of_sample": {"trades": 80, "expectancy_r": 0.3}}))
+    reg.save()
+    rep = gl.evaluate(["s1", "s2"])  # s2 has no paper trades: s1's good results can't carry it
+    row = next(c for c in rep["criteria"] if c["name"].startswith("Every strategy profitable"))
+    assert not row["passed"] and "s2" in row["value"]
