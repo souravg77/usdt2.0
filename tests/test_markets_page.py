@@ -1,4 +1,7 @@
-"""The Markets page: prices and 24h change per pair from the candle database, and a chart."""
+"""The Markets page: live prices and candles from Binance's public API (cached ~1s), saved
+candles as the fallback, and the page that draws them."""
+
+import asyncio
 
 import pytest
 from fastapi.testclient import TestClient
@@ -7,54 +10,117 @@ from aitrader.config import Settings
 from aitrader.data.store import CandleStore
 from aitrader.models import Candle
 from aitrader.web import Auth, JobRunner, create_app
+from aitrader.web.live import LiveMarket
 
 PW = "correct horse battery"
 NOW = 1_760_000_000_000  # ms
+HOUR = 3_600_000
+
+
+class FakeBinance:
+    def __init__(self):
+        self.calls = []
+        self.down = False
+
+    async def fetch_ohlcv(self, symbol, timeframe, limit=200):
+        self.calls.append(("ohlcv", symbol, timeframe))
+        if self.down:
+            raise ConnectionError("no route")
+        return [[NOW - (3 - i) * 60_000, 100 + i, 101 + i, 99 + i, 100.5 + i, 7] for i in range(3)]
+
+    async def fetch_tickers(self, symbols):
+        self.calls.append(("tickers", tuple(symbols)))
+        if self.down:
+            raise ConnectionError("no route")
+        return {"BTC/USDT": {"last": 62000.5, "percentage": 1.25, "high": 63000, "low": 61000,
+                             "quoteVolume": 1.5e9}}
+
+    async def close(self):
+        pass
 
 
 @pytest.fixture
-def client(tmp_path, monkeypatch):
+def world(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     db = str(tmp_path / "aitrader.db")
     store = CandleStore(db)
     store.migrate()
-    hour = 3_600_000
-    # BTC: 30 hourly candles rising from 100 to 129, the last one closed an hour ago
-    store.upsert([Candle("binance", "BTC/USDT", "1h", NOW - (30 - i) * hour - hour, 100 + i, 101 + i,
+    store.upsert([Candle("binance", "BTC/USDT", "1h", NOW - (30 - i) * HOUR - HOUR, 100 + i, 101 + i,
                          99 + i, 100.5 + i, 1) for i in range(30)])
     store.close()
     settings = Settings(db_path=db, symbols=["BTC/USDT", "ETH/USDT"], timeframes=["1m", "1h", "1d"])
-    app = create_app(settings, Auth("admin", PW, "k"), JobRunner(str(tmp_path / "j"), env_file="none"))
+    clock = [0.0]
+    fake = FakeBinance()
+    live = LiveMarket(db, client=fake, clock=lambda: clock[0])
+    app = create_app(settings, Auth("admin", PW, "k"), JobRunner(str(tmp_path / "j"), env_file="none"), live=live)
     import aitrader.web.market_pages as mp
     monkeypatch.setattr(mp.time, "time", lambda: NOW / 1000)
-    c = TestClient(app)
-    return c
+    return TestClient(app), fake, clock
 
 
-def test_markets_needs_login(client):
-    r = client.get("/markets", follow_redirects=False)
-    assert r.status_code == 303 and r.headers["location"] == "/login"
-
-
-def test_markets_shows_prices_and_a_chart(client):
+def login(client):
     client.post("/login", data={"user": "admin", "password": PW})
-    r = client.get("/markets")
-    assert r.status_code == 200 and '<a href="/markets">Markets</a>' in r.text
-    assert "129.50" in r.text  # last close
-    assert "+" in r.text and "%" in r.text  # 24h change
-    assert "ETH/USDT" in r.text and "no data yet" in r.text
-    assert "<svg" in r.text and r.text.count("<rect") == 30  # one candle body per bar
-    assert 'http-equiv="refresh" content="30"' in r.text
-    r = client.get("/markets?symbol=ETH/USDT&tf=1d")
-    assert "No 1d candles yet for ETH/USDT" in r.text
+
+
+def test_market_api_needs_login(world):
+    client, fake, _ = world
+    assert client.get("/markets", follow_redirects=False).status_code == 303
+    assert client.get("/api/market/tickers").status_code == 401
+    assert client.get("/api/market/candles?symbol=BTC/USDT").status_code == 401
+    assert fake.calls == []
+
+
+def test_markets_page_loads_the_live_chart(world):
+    client, _, _ = world
+    login(client)
+    r = client.get("/markets?symbol=BTC/USDT&tf=1h")
+    assert r.status_code == 200 and '<a href="/markets" class=active aria-current=page>Markets</a>' in r.text
+    assert '<script src="/static/market.js" defer></script>' in r.text and '<canvas id="chart"' in r.text
+    assert 'data-symbol="BTC/USDT" data-tf="1h"' in r.text and "129.50" in r.text  # saved price first
+    assert "<noscript>" in r.text and r.text.count("<rect") == 30  # chart without JavaScript
+    assert "http-equiv" not in r.text  # no full-page reloads: the script polls instead
+    js = client.get("/static/market.js")
+    assert js.status_code == 200 and js.headers["content-type"].startswith("text/javascript")
+    assert "POLL_MS = 1500" in js.text
     r = client.get("/markets?symbol=<script>&tf=9y")  # unknown values fall back, never echoed
-    assert "<script>" not in r.text and "BTC/USDT · 1h" in r.text
+    assert "<script>" not in r.text.replace('<script src="/static/market.js" defer></script>', "")
 
 
-def test_markets_without_any_prices_points_to_the_collector(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    app = create_app(Settings(db_path=str(tmp_path / "x.db")), Auth("admin", PW, "k"),
-                     JobRunner(str(tmp_path / "j"), env_file="none"))
-    c = TestClient(app)
-    c.post("/login", data={"user": "admin", "password": PW})
-    assert "No prices yet" in c.get("/markets").text
+def test_market_api_reads_binance_once_per_second(world):
+    client, fake, clock = world
+    login(client)
+    r = client.get("/api/market/candles?symbol=BTC/USDT&tf=1m").json()
+    assert r["source"] == "binance" and len(r["candles"]) == 3 and r["candles"][-1][4] == 102.5
+    t = client.get("/api/market/tickers").json()
+    assert t["tickers"][0] == {"symbol": "BTC/USDT", "price": 62000.5, "change": 1.25, "high": 63000,
+                               "low": 61000, "volume": 1.5e9}
+    for _ in range(5):  # many viewers within a second: one request to Binance
+        client.get("/api/market/candles?symbol=BTC/USDT&tf=1m")
+        client.get("/api/market/tickers")
+    assert fake.calls.count(("ohlcv", "BTC/USDT", "1m")) == 1 and len(fake.calls) == 2
+    clock[0] += 1.1
+    client.get("/api/market/candles?symbol=BTC/USDT&tf=1m")
+    assert fake.calls.count(("ohlcv", "BTC/USDT", "1m")) == 2
+    client.get("/api/market/candles?symbol=DOGE/USDT&tf=1w")  # unknown pair/timeframe: defaults
+    assert fake.calls[-1] == ("ohlcv", "BTC/USDT", "15m")
+
+
+def test_market_api_falls_back_to_saved_candles(world):
+    client, fake, clock = world
+    login(client)
+    fake.down = True
+    r = client.get("/api/market/candles?symbol=BTC/USDT&tf=1h").json()
+    assert r["source"] == "database" and "not reachable" in r["note"] and r["candles"][-1][4] == 129.5
+    t = client.get("/api/market/tickers").json()
+    assert t["source"] == "database" and t["tickers"][0]["price"] == 129.5
+
+
+def test_live_market_shares_one_request(tmp_path):
+    fake = FakeBinance()
+    live = LiveMarket(str(tmp_path / "x.db"), client=fake, clock=lambda: 0.0)
+
+    async def many():
+        return await asyncio.gather(*[live.candles("BTC/USDT", "1m") for _ in range(10)])
+
+    out = asyncio.run(many())
+    assert len(fake.calls) == 1 and all(o is out[0] for o in out)

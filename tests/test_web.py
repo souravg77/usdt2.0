@@ -167,3 +167,20 @@ def test_trading_page_and_controls(web):
     assert "does not pass yet" in client.get("/trading").text
     kinds = [json.loads(line)["kind"] for line in open("data/ops/events.jsonl")]
     assert kinds[:3] == ["risk_pause", "kill", "resume"]
+
+
+def test_trading_page_status_tiles_and_grouped_events(web):
+    from aitrader.ops import EventLog
+
+    client, _auth, _runner, paths = web
+    log = EventLog("data/ops/events.jsonl", service="executor-testnet")
+    for _ in range(12):
+        log.emit("error", "testnet executor: AuthenticationError: binance requires apiKey", level="error")
+    log.emit("waiting", "testnet executor: waiting for the Binance testnet API key and secret", level="warning")
+    login(client)
+    r = client.get("/trading")
+    assert 'class="stat"' in r.text and "Testnet trader" in r.text
+    assert '<span class="v warn">waiting for keys</span>' in r.text  # the latest event decides
+    assert r.text.count("binance requires apiKey") == 1 and "×12" in r.text  # repeats shown once
+    assert "first-time setup" in r.text  # nothing paper trading yet
+    assert '<a href="/trading" class=active aria-current=page>Trading</a>' in r.text

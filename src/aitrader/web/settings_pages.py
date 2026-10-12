@@ -342,8 +342,10 @@ def _health(settings) -> str:
         f'<td>{_e(name)}</td><td>{_e(text)}</td></tr>' for lvl, name, text in checks)
     fails = sum(1 for c in checks if c[0] == FAIL)
     warns = sum(1 for c in checks if c[0] not in (PASS, FAIL))
-    head = (f'<p class="{"bad" if fails else "good"}">{fails} problem(s), {warns} warning(s)</p>')
-    return f'<h2>Health check</h2>{head}<table>{rows}</table>'
+    head = f'<span class="{"bad" if fails else "good"}">{fails} problem(s), {warns} warning(s)</span>'
+    return (f'<h2>Health check</h2><details class="card health"{" open" if fails else ""}>'
+            f'<summary>{head} <span class="muted small">· details</span>'
+            f'</summary><table>{rows}</table></details>')
 
 
 def _setup_card(token, auth, jobs) -> str:

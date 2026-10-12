@@ -140,6 +140,15 @@ say "Building and starting (the first build takes a few minutes)"
 $DOCKER compose build
 $DOCKER compose run --rm -T collector migrate
 $DOCKER compose up -d collector context paper web
+# The testnet trader (fake money) runs too: it waits until testnet keys are saved on the Settings
+# page. Telegram and user accounts are restarted on the new code only if they were running.
+# The live pilot (real money) is never started or restarted from here.
+$DOCKER compose --profile testnet up -d executor-testnet
+for svc in telegram users; do
+  if [ -n "$($DOCKER compose --profile "$svc" ps -q --status running "$svc" 2>/dev/null)" ]; then
+    $DOCKER compose --profile "$svc" up -d "$svc"
+  fi
+done
 $DOCKER compose --profile https up -d --force-recreate caddy  # picks up Caddyfile changes
 
 say "Health check"
