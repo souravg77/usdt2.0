@@ -37,6 +37,24 @@ def test_risk_sizing_and_caps():
     assert not tiny.ok and "minimum" in tiny.reasons[-1]
 
 
+def test_risk_defaults_follow_the_agreed_guardrails():
+    lim = RiskLimits()
+    assert lim.risk_per_trade == 0.0025 and lim.daily_loss_pct == 0.01
+
+
+def test_correlated_coins_count_as_one_group(monkeypatch):
+    eng = RiskEngine(RiskLimits(max_open_positions=5))
+    two = [{"symbol": "BTC/USDT", "notional": 100}, {"symbol": "ETH/USDT", "notional": 100}]
+    s = eng.size("SOL/USDT", 10_000, 10_000, 100, 90, 0.01, 1, two)
+    assert not s.ok and "correlated group BTC/ETH/SOL" in s.reasons[0]
+    assert eng.size("DOGE/USDT", 10_000, 10_000, 100, 90, 0.01, 1, two).ok  # not in the group
+    big = [{"symbol": "BTC/USDT", "notional": 3_900}]
+    s = eng.size("ETH/USDT", 10_000, 10_000, 100, 99.9, 0.01, 1, big)
+    assert s.ok and s.notional == pytest.approx(100) and "correlated group exposure" in s.reasons[-1]
+    monkeypatch.setenv("AITRADER_CORRELATION_GROUPS", "doge, shib; BTC,ETH")
+    assert RiskLimits.from_env().correlation_groups == (("DOGE", "SHIB"), ("BTC", "ETH"))
+
+
 def test_risk_limits_env_never_above_hard_cap(monkeypatch):
     monkeypatch.setenv("AITRADER_RISK_PER_TRADE", "0.05")
     assert RiskLimits.from_env().risk_per_trade == HARD_MAX_RISK
