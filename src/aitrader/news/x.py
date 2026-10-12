@@ -6,7 +6,8 @@ them to the watch list, which the agent reads.
 
 - Watch list: Elon Musk and Donald Trump to start, plus anyone you add on the News page. Only
   posts newer than the last one seen are fetched (``since_id``), so each post is paid once.
-- Pair search: the most relevant recent posts about each pair (no retweets).
+- Pair search: the most relevant recent posts about each pair (no retweets), five pairs per
+  brief, taking turns.
 - Suggestions: the authors of those posts with the most followers and engagement, as people you
   might add to the watch list.
 
@@ -215,10 +216,14 @@ class XReader:
         self.save()
         return new
 
-    def search_pairs(self, symbols: list[str], per_pair: int = 10) -> dict:
+    def search_pairs(self, symbols: list[str], per_pair: int = 10, max_pairs: int = 5) -> dict:
+        """Search up to ``max_pairs`` pairs per call, taking turns, so 20 pairs fit the daily cap."""
         errors = list(self.state.get("errors", []))
         authors: dict[str, dict] = {}
-        for s in symbols:
+        start = self.state.get("rotate", 0) % max(len(symbols), 1)
+        turn = (symbols[start:] + symbols[:start])[:max_pairs]
+        self.state["rotate"] = start + len(turn)
+        for s in turn:
             if not self._room(per_pair):
                 errors.append(f"daily X read cap of {self.daily_reads} posts reached")
                 break

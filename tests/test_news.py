@@ -298,3 +298,13 @@ def test_settings_check_x():
         check_x("t", opener=opener(401))
     with pytest.raises(KeyUnverified):
         check_x("t", opener=opener(402))
+
+
+def test_x_search_takes_turns_over_many_pairs(tmp_path):
+    fake = FakeX()
+    r = XReader(str(tmp_path / "x.json"), XClient("tok", get=fake), daily_reads=10_000)
+    pairs = [f"C{i}/USDT" for i in range(7)]
+    r.search_pairs(pairs, max_pairs=5)
+    r.search_pairs(pairs, max_pairs=5)
+    searched = [u.split("query=")[1].split("%29")[0] for u in fake.urls if "search/recent" in u]
+    assert len(searched) == 10 and "C5" in searched[5] and "C0" in searched[7]

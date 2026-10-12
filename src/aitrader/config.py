@@ -28,6 +28,10 @@ def _bool(value: str | None) -> bool:
     return (value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+# The 20 most traded coins against USDT on Binance spot (stablecoins left out), Oct 2026.
+TOP_PAIRS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT', 'XRP/USDT', 'DOGE/USDT', 'ADA/USDT', 'TRX/USDT', 'LINK/USDT', 'AVAX/USDT', 'SUI/USDT', 'LTC/USDT', 'BCH/USDT', 'DOT/USDT', 'TON/USDT', 'NEAR/USDT', 'APT/USDT', 'UNI/USDT', 'AAVE/USDT', 'PEPE/USDT']
+
+
 @dataclass
 class ExchangeKeys:
     api_key: str = ""
@@ -76,7 +80,7 @@ class Settings:
             paper_taker_fee=float(e("AITRADER_PAPER_TAKER_FEE", "0.001")),
             paper_maker_fee=float(e("AITRADER_PAPER_MAKER_FEE", "0.001")),
             paper_slippage_bps=float(e("AITRADER_PAPER_SLIPPAGE_BPS", "5")),
-            symbols=_csv(e("AITRADER_SYMBOLS", "BTC/USDT,ETH/USDT,SOL/USDT,BNB/USDT,XRP/USDT")),
+            symbols=_csv(e("AITRADER_SYMBOLS", ",".join(TOP_PAIRS))),
             timeframes=_csv(e("AITRADER_TIMEFRAMES", "1m,5m,15m,30m,1h,4h,1d")),
             keys=keys,
         )
