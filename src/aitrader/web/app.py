@@ -914,13 +914,15 @@ def _paper_switch_card(c: dict, paths: Paths, events: list[dict], jobs: list[dic
 def _live_card(settings, paths: Paths, events: list[dict]) -> str:
     """Live (real money) readiness. It is switched on only on the server, never from the website."""
     rep = _load_json(os.path.join(paths.golive_dir, "report.json"))
+    from ..trade.golive import approval_intact
+
     approval = _load_json(os.path.join(paths.golive_dir, "approval.json"))
     svc, svc_cls, _detail = _service_state(events, "executor-live", int(time.time() * 1000))
     checks = [
         ("Real Bybit keys saved (spot trade only, no withdrawals, IP-bound)",
          bool(os.environ.get("BYBIT_API_KEY") and os.environ.get("BYBIT_API_SECRET"))),
         ("Go/no-go gate passed", bool(rep.get("passed"))),
-        ("Strategies approved (aitrader golive approve)", bool(approval.get("by"))),
+        ("Strategies approved (aitrader golive approve)", approval_intact(approval)),
         ("Pilot budget set (AITRADER_PILOT_MAX_USDT in .env)", bool(os.environ.get("AITRADER_PILOT_MAX_USDT"))),
         ("Live lock opened in .env on the server", not live_gate_problems(settings)),
         ("Live trader running", svc_cls == "good"),
@@ -981,6 +983,8 @@ def _equity_svg(paper: dict, execs: dict) -> str:
 
 def _gate_card(paths: Paths, csrf: str) -> str:
     rep = _load_json(os.path.join(paths.golive_dir, "report.json"))
+    from ..trade.golive import approval_intact
+
     approval = _load_json(os.path.join(paths.golive_dir, "approval.json"))
     if rep:
         rows = "".join(f'<li class="{"good" if c["passed"] else "bad"}">{"✓" if c["passed"] else "✗"} '
@@ -990,7 +994,9 @@ def _gate_card(paths: Paths, csrf: str) -> str:
     else:
         rows, head = "", "not checked yet"
     appr = (f'<br>Approved by {_e(approval["by"])} for {_e(", ".join(approval.get("strategies", {})))}'
-            if approval.get("by") else "<br>No live approval (approve on the server: <code>aitrader golive approve</code>)")
+            if approval_intact(approval) else
+            ('<br><b class="bad">The approval file was edited or not made by <code>golive approve</code>: '
+             'it counts for nothing</b>' if approval else '') + "<br>No live approval (approve on the server: <code>aitrader golive approve</code>)")
     return (f'<div class="card"><h3>Go/no-go gate (Phase 6)</h3><p>{head}{appr}</p><ul class="small gate">{rows}</ul>'
             f'<form method="post" action="/trading/gate">{csrf}<button class="ghost">Check the gate now</button></form></div>')
 

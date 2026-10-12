@@ -5,8 +5,10 @@ Going live takes four separate things, and the code checks all of them:
 1. The gate passes (``evaluate``): enough paper trades, positive expectancy in paper and in the
    backtest, paper drawdown under your live loss limit, paper close to the backtest, two weeks
    without a crash, and the security items confirmed (trade-only keys, kill switch tested).
-2. You approve it (``approve``) for named strategies. The approval is tied to those strategies'
-   rules and to the active AI model, so changing either sends trading back to paper.
+2. You approve it (``approve``) for named strategies, typing ``confirmation_phrase`` at a terminal
+   (``aitrader golive approve`` refuses to run without one and has no flag that skips the
+   question). The approval is sealed and tied to those strategies' rules and to the active AI
+   model, so changing either, or editing the file, sends trading back to paper.
 3. The live lock in ``.env`` is opened by you (``safety.assert_live_allowed``), which this module
    never touches.
 4. The pilot limits are set (``AITRADER_PILOT_MAX_USDT``, at most two strategies, one exchange).
@@ -17,6 +19,7 @@ results leave the expected range.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import time
@@ -201,16 +204,22 @@ class GoLive:
         return {"strategies": {e.id: json.dumps(e.spec, sort_keys=True) if e.spec else e.name for e in entries},
                 "ai_model": ModelRegistry(self.models_dir).active}
 
-    def approve(self, strategy_ids: list[str], by: str, max_strategies: int = 2) -> dict:
+    def approve(self, strategy_ids: list[str], by: str, confirmation: str, max_strategies: int = 2) -> dict:
+        """LIVE ENABLED for named strategies. ``confirmation`` is what the person typed at the
+        terminal; it must be exactly ``confirmation_phrase(strategy_ids)``."""
         if not by:
             raise ValueError("say who approves (--by)")
         if not strategy_ids or len(strategy_ids) > max_strategies:
             raise ValueError(f"the pilot runs 1 to {max_strategies} named strategies")
+        if confirmation != confirmation_phrase(strategy_ids):
+            raise ValueError("not confirmed: type the phrase exactly as shown")
         report = self.evaluate(strategy_ids)
         if not report["passed"]:
             failed = [c["name"] for c in report["criteria"] if not c["passed"]]
             raise ValueError("the go/no-go gate does not pass: " + ", ".join(failed))
-        approval = {"by": by, "at": self.clock(), "report": report, **self._fingerprint(strategy_ids)}
+        approval = {"by": by, "at": self.clock(), "report": report, **self._fingerprint(strategy_ids),
+                    "confirmation": confirmation}
+        approval["seal"] = _seal(approval)
         self._save("approval.json", approval)
         self.events.emit("gate", f"go-live approved by {by} for {', '.join(strategy_ids)}", level="warning")
         return approval
@@ -225,6 +234,8 @@ class GoLive:
         a = self._load("approval.json")
         if not a:
             return ["no go-live approval (aitrader golive approve)"]
+        if not approval_intact(a):
+            return ["the approval file was edited or not made by `golive approve`: back to paper"]
         if entry_id not in a["strategies"]:
             return [f"{entry_id} is not one of the approved strategies"]
         now = self._fingerprint(list(a["strategies"]))
@@ -250,6 +261,32 @@ class GoLive:
             return (f"live expectancy {m['expectancy_r']:+.3f}R over {m['trades']} trades is below the "
                     f"paper {expected:+.3f}R by more than {self.cfg.live_max_shortfall_r:g}R")
         return None
+
+
+def confirmation_phrase(strategy_ids: list[str]) -> str:
+    """What the person types to approve: it names the strategies, so a phrase typed for one set
+    doesn't approve another."""
+    return f"I approve {', '.join(sorted(strategy_ids))} for real-money trading"
+
+
+def _seal(approval: dict) -> str:
+    body = {k: v for k, v in approval.items() if k != "seal"}
+    return hashlib.sha256(json.dumps(body, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def approval_intact(a: dict) -> bool:
+    """True for an approval ``approve`` wrote and nobody changed since: it carries the typed
+    confirmation for exactly its strategies, a passed gate report, and an unbroken seal.
+
+    The seal catches hand edits, copied files and approvals written by other code. It is not a
+    secret: someone with a shell on the server can do anything, which is why the live lock in
+    ``.env`` is a separate step."""
+    try:
+        return (a.get("seal") == _seal(a)
+                and a.get("confirmation") == confirmation_phrase(list(a["strategies"]))
+                and bool((a.get("report") or {}).get("passed")) and bool(a.get("by")))
+    except (KeyError, TypeError, AttributeError):
+        return False
 
 
 def _att_text(a: dict | None) -> str:

@@ -178,8 +178,17 @@ It can't approve anything.
 When the gate passes, approve one or two strategies by id (`aitrader learn list` shows them):
 
 ```bash
-docker compose run --rm collector golive approve --strategy <id> --by Shawn
+docker compose run --rm -it collector golive approve --strategy <id> --by Shawn
 ```
+
+It re-runs the gate, then shows what you are approving and asks you to type a phrase that names
+the strategies, for example `I approve <id> for real-money trading`. Only that exact phrase,
+typed at a terminal, approves. There is no `--yes` flag, piped input is refused (so the `-it`
+matters), and the website has no way to approve.
+
+The approval file is sealed. If it is edited by hand, copied, or written by anything other than
+`golive approve`, the live executor refuses to start, the guard blocks every entry, and the
+dashboard and `aitrader doctor` say so.
 
 The approval is tied to those strategies' rules and to the active AI model. If either changes,
 the live executor stops opening trades for it until you check the gate and approve again.
