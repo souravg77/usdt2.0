@@ -54,11 +54,13 @@ class Paths:
     news: str = "data/news"
     pairs: str = "data/pairs/ranking.json"
     changes: str = "data/changes"
+    feed: str = "data/ops/feed.json"
 
 
 def create_app(settings: Settings, auth: Auth, jobs: JobRunner, paths: Paths | None = None,
                secure_cookie: bool = False, users=None, keys_secret: str = "", signup: bool = False,
-               verifier=None, checkers: dict | None = None, live=None, account=None) -> FastAPI:
+               verifier=None, checkers: dict | None = None, live=None, account=None,
+               monitor: dict | None = None) -> FastAPI:
     """``users`` (an ``accounts.UserStore``) turns on user accounts: sign-up when ``signup`` is
     true, each user's own page, and the admin's Users page. Without it only the admin can log in."""
     paths = paths or Paths()
@@ -306,6 +308,11 @@ paper trading. Nothing trades real money.</p>
 
         return Control(os.path.join(paths.trade_dir, "control.json"))
 
+    from .monitor_pages import add_monitor_routes
+
+    add_monitor_routes(app, settings=settings, page=page, guard=guard, auth=auth, paths=paths,
+                       csrf=lambda token: _csrf(auth, token), control=_control, **(monitor or {}))
+
     @app.get("/trading")
     async def trading(request: Request, msg: str = ""):
         user, token, redirect = guard(request)
@@ -319,6 +326,9 @@ paper trading. Nothing trades real money.</p>
         acct = await account.snapshot()
         if c["killed"]:
             state = f'<b class="bad">KILL SWITCH ON</b> since {_when(c.get("since"))}'
+        elif c.get("halted"):
+            state = (f'<b class="bad">SAFETY HALT</b> since {_when(c.get("since"))}: {_e(c.get("reason", ""))}. '
+                     'Check the account on Bybit, then press Resume')
         elif c["paused"]:
             state = f'<b class="bad">PAUSED</b> since {_when(c.get("since"))}: {_e(c.get("reason", ""))}'
         else:
@@ -492,7 +502,8 @@ paper trading. Nothing trades real money.</p>
     return app
 
 
-NAV = [("/", "Overview"), ("/markets", "Markets"), ("/pairs", "Pairs"), ("/trading", "Trading"), ("/replay", "Replay"),
+NAV = [("/", "Overview"), ("/markets", "Markets"), ("/pairs", "Pairs"), ("/trading", "Trading"), ("/monitor", "Monitor"),
+       ("/replay", "Replay"),
        ("/news", "News"), ("/research", "Research"), ("/reports", "Reports"), ("/books", "Submit a book"), ("/changes", "Change requests"), ("/admin/users", "Users"),
        ("/settings", "Settings")]
 
@@ -805,6 +816,8 @@ def _trading_stats(c: dict, settings, paths: Paths, paper: dict, events: list[di
 
     if c["killed"]:
         trading = ("Kill switch on", "bad")
+    elif c.get("halted"):
+        trading = ("Safety halt", "bad")
     elif c["paused"]:
         trading = ("Paused", "warn")
     else:
@@ -877,6 +890,8 @@ def _paper_switch_card(c: dict, paths: Paths, events: list[dict], jobs: list[dic
                      and j["status"] in ("queued", "running")), None)
     if c["killed"]:
         state, cls, why = "OFF", "bad", "the kill switch is on"
+    elif c.get("halted"):
+        state, cls, why = "OFF", "bad", "the safety halt stopped new entries (see Controls)"
     elif c["paused"]:
         state, cls, why = "OFF", "bad", "new entries are paused"
     elif starting:
@@ -1066,6 +1081,7 @@ code{background:var(--card2);border:1px solid var(--line);border-radius:5px;padd
 .chips{display:flex;flex-wrap:wrap;gap:8px}.tick-chip{display:inline-flex;align-items:center;gap:6px;padding:4px 6px 4px 12px;
 border:1px solid var(--line);border-radius:99px;font-size:.9em}button.small{padding:2px 8px;font-size:.8em}
 .posts{list-style:none;padding:0}.posts li{padding:10px 0;border-bottom:1px solid var(--line)}.row>label{margin:0}
+.bar{height:8px;background:var(--line);border-radius:4px;overflow:hidden;margin-top:8px}.bar span{display:block;height:100%;background:#d9534f}
 form.kill{margin-top:14px;border-top:1px solid var(--line);padding-top:10px}ul.gate{padding-left:0;list-style:none;margin:8px 0}
 .chart svg{width:100%;height:180px;display:block}.chart svg.candles{height:auto}
 .switch{font-size:1.1em}.switch.on b{color:var(--bad)}

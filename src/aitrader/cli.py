@@ -181,6 +181,42 @@ def cmd_signals(s: Settings, args) -> int:
     return 0
 
 
+def cmd_indicators(s: Settings, args) -> int:
+    """The 20 standard indicators on the last closed candle of a stored series (Phase 3)."""
+    from .data.context import ContextStore, attach_context, has_context
+    from .indicators import candles_to_frame
+    from .indicators.results import closed_only, evaluate_all
+    from .models import TIMEFRAME_MS
+
+    store = CandleStore(s.db_path)
+    try:
+        candles = store.load(args.exchange, args.symbol, args.timeframe)
+        if not candles:
+            print("no candles stored for that series; run `aitrader download` first", file=sys.stderr)
+            return 1
+        df = closed_only(candles_to_frame(candles), int(time.time() * 1000), TIMEFRAME_MS[args.timeframe])
+        if has_context(store):
+            ctx = ContextStore(s.db_path)
+            try:
+                df = attach_context(df, ctx, args.exchange, args.symbol, args.timeframe)
+            finally:
+                ctx.close()
+    finally:
+        store.close()
+    res = evaluate_all(df)
+    if args.json:
+        print(json.dumps({k: r.as_dict() for k, r in res.items()}, default=str, indent=1))
+        return 0
+    print(f"{args.symbol} {args.timeframe}, last closed candle {_fmt(int(df['ts'].iloc[-1]))} UTC")
+    side = {1: "bullish", -1: "bearish", 0: "neutral"}
+    for name, r in res.items():
+        main = next(iter(r.features.items()), ("", float("nan")))
+        note = r.metadata.get("zone") or r.metadata.get("regime") or r.metadata.get("bias") or ""
+        print(f"  {name:15} {side[r.direction] if r.is_valid else 'not valid':10} conf {r.confidence:4.2f}  "
+              f"{main[0]}={main[1]:.6g}  {note}{'' if r.is_valid else f' (needs {r.warmup_period} bars)'}")
+    return 0
+
+
 def cmd_backtest(s: Settings, args) -> int:
     """Backtest one strategy on stored candles: in-sample / out-of-sample / final-test split,
     monthly results calendar and a trades CSV (Phase 3)."""
@@ -277,6 +313,8 @@ async def cmd_context(s: Settings, args) -> int:
                 if args.once:
                     return 0
                 await asyncio.sleep(args.interval)
+        if args.context_cmd == "derivs":
+            return await _print_derivs(args.symbol or s.symbols)
         now, symbol = int(time.time() * 1000), (args.symbol or ["BTC/USDT"])[0]
         for ex, sym in dict.fromkeys([(args.exchange, symbol), ("global", "*")]):
             for metric in ("funding_rate", "open_interest", "long_short_ratio", "btc_dominance",
@@ -292,6 +330,35 @@ async def cmd_context(s: Settings, args) -> int:
         return 0
     finally:
         ctx.close()
+
+
+async def _print_derivs(symbols: list[str]) -> int:
+    """Live perpetual readings from Bybit (public data, no key): last, mark and index price,
+    basis, funding and open interest."""
+    from .data.context import make_client
+    from .data.derivs import fetch_snapshot
+
+    client = make_client()
+    try:
+        print(f"{'pair':10} {'last':>12} {'mark':>12} {'index':>12} {'basis':>8} {'funding':>9} "
+              f"{'per year':>9} {'next in':>8} {'open interest':>14}")
+        for sym in symbols:
+            try:
+                d = await fetch_snapshot(client, sym)
+            except Exception as exc:
+                print(f"{sym:10} unavailable: {type(exc).__name__}: {exc}")
+                continue
+
+            def pct(v, digits=3):
+                return "-" if v is None else f"{v * 100:+.{digits}f}%"
+
+            nxt = d.funding_in_s()
+            print(f"{sym:10} {d.last or 0:>12g} {d.mark or 0:>12g} {d.index or 0:>12g} {pct(d.basis):>8} "
+                  f"{pct(d.funding_rate, 4):>9} {pct(d.funding_annualized, 1):>9} "
+                  f"{'-' if nxt is None else f'{nxt / 3600:.1f}h':>8} {d.open_interest or 0:>14g}")
+        return 0
+    finally:
+        await client.close()
 
 
 def cmd_news(s: Settings, args) -> int:
@@ -942,8 +1009,11 @@ async def _trade_run(s: Settings, args, control) -> int:
         from .data.bybit_ws import BybitSpotStream
 
         # streamed prices: stops checked every second, quiet coins get no new entries
+        from .ops import feedstats
+
         ex.prices = BybitSpotStream(s.symbols)
         stream = asyncio.create_task(ex.prices.run())
+        reporter = asyncio.create_task(feedstats.report(ex.prices))  # the Monitor page's feed health
     try:
         if args.once:
             print(json.dumps(await ex.tick(), indent=1))
@@ -953,6 +1023,7 @@ async def _trade_run(s: Settings, args, control) -> int:
         if stream is not None:
             ex.prices.stop()
             stream.cancel()
+            reporter.cancel()
         await adapter.close()
     return 0
 
@@ -1221,6 +1292,13 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--symbol", default="BTC/USDT")
     ps.add_argument("--usdt", type=float, default=100.0)
 
+    ind = sub.add_parser("indicators", help="the 20 standard indicators (direction, confidence, validity) "
+                         "on the last closed candle of a stored series")
+    ind.add_argument("--exchange", default=EXCHANGE, choices=EXCHANGES)
+    ind.add_argument("--symbol", default="BTC/USDT")
+    ind.add_argument("--timeframe", default="1h")
+    ind.add_argument("--json", action="store_true")
+
     sg = sub.add_parser("signals", help="run a strategy over stored candles and save its signal log")
     sg.add_argument("--strategy", required=True)
     sg.add_argument("--exchange", default=EXCHANGE, choices=EXCHANGES)
@@ -1269,8 +1347,9 @@ def build_parser() -> argparse.ArgumentParser:
     ca = sub.add_parser("calendar", help="show upcoming high-impact events and the current decision")
     ca.add_argument("--hours", type=float, default=72)
 
-    cx = sub.add_parser("context", help="market context: funding, open interest, total market cap")
-    cx.add_argument("context_cmd", choices=["collect", "show"])
+    cx = sub.add_parser("context", help="market context: funding, open interest, total market cap; "
+                        "derivs: live mark/index price, basis and funding of the perpetuals")
+    cx.add_argument("context_cmd", choices=["collect", "show", "derivs"])
     cx.add_argument("--symbol", action="append")
     cx.add_argument("--exchange", default=EXCHANGE, choices=EXCHANGES, help="for show")
     cx.add_argument("--once", action="store_true", help="collect: one top-up, then exit")
@@ -1453,6 +1532,9 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    from .ops.redact import install
+
+    install()  # no key, signature or signed URL is ever written to a log
     if args.env_file:
         from dotenv import load_dotenv
 
@@ -1469,6 +1551,7 @@ def main(argv: list[str] | None = None) -> int:
         "stream": cmd_stream,
         "paper-smoke": cmd_paper_smoke,
         "signals": cmd_signals,
+        "indicators": cmd_indicators,
         "strategies": cmd_strategies,
         "backtest": cmd_backtest,
         "calendar": cmd_calendar,

@@ -1,4 +1,6 @@
-"""Bybit V5 public spot WebSocket: best bid, best ask and last price per pair, with their age.
+"""Bybit V5 public WebSocket: best bid, best ask and last price per pair, with their age.
+With ``category="linear"`` it streams the USDT perpetuals instead, whose tickers also carry the
+mark price, index price, funding rate, next funding time and open interest (``derivs``).
 
 One connection to ``wss://stream.bybit.com/v5/public/spot`` subscribes to ``orderbook.1.<SYMBOL>``
 (level-1 book: best bid and ask) and ``tickers.<SYMBOL>`` (last price) for every pair. As Bybit's
@@ -23,6 +25,7 @@ Public market data only: no keys, no orders. Pairs are given as ``BTC/USDT`` or 
 from __future__ import annotations
 
 import asyncio
+import collections
 import itertools
 import json
 import logging
@@ -35,6 +38,8 @@ from typing import Protocol
 log = logging.getLogger(__name__)
 
 PUBLIC_SPOT_URL = "wss://stream.bybit.com/v5/public/spot"
+PUBLIC_LINEAR_URL = "wss://stream.bybit.com/v5/public/linear"
+URLS = {"spot": PUBLIC_SPOT_URL, "linear": PUBLIC_LINEAR_URL}
 PING_S = 20.0  # Bybit: "send the ping heartbeat packet every 20 seconds"
 ARGS_PER_SUBSCRIBE = 10  # spot accepts at most 10 topics per subscribe request
 
@@ -55,6 +60,12 @@ class Quote:
     last: float | None = None
     ts: int = 0
     received: float = -math.inf
+    # perpetuals only (linear tickers)
+    mark: float | None = None
+    index: float | None = None
+    funding_rate: float | None = None
+    next_funding_ts: int | None = None
+    open_interest: float | None = None
 
 
 class Socket(Protocol):
@@ -81,7 +92,7 @@ class BybitSpotStream:
     def __init__(
         self,
         symbols: list[str],
-        url: str = PUBLIC_SPOT_URL,
+        url: str | None = None,
         connect: Connect | None = None,
         ping_s: float = PING_S,
         read_timeout: float | None = None,
@@ -89,8 +100,12 @@ class BybitSpotStream:
         min_backoff: float = 1.0,
         clock: Callable[[], float] = time.monotonic,
         on_update: Callable[[Quote], None] | None = None,
+        category: str = "spot",
     ):
-        self.url = url
+        if category not in URLS:
+            raise ValueError(f"category must be one of {sorted(URLS)}")
+        self.category = category
+        self.url = url or URLS[category]
         self._connect = connect or aiohttp_connect
         self.ping_s = ping_s
         self.read_timeout = read_timeout or 2 * ping_s
@@ -106,6 +121,10 @@ class BybitSpotStream:
         self.connected, self._fresh = False, False
         self.connects = 0  # successful connections so far (1 + reconnects)
         self.last_error = ""
+        # feed health for the dashboard: ping round trips and the recent connection history
+        self.latency_ms: float | None = None
+        self._pings: dict[str, float] = {}
+        self.history: collections.deque = collections.deque(maxlen=20)
 
     # ---- read side -------------------------------------------------------------------------------
 
@@ -124,6 +143,24 @@ class BybitSpotStream:
         q = self.quote(symbol)
         return q.last if q else None
 
+    def mark_price(self, symbol: str) -> float | None:
+        q = self.quote(symbol)
+        return q.mark if q else None
+
+    def index_price(self, symbol: str) -> float | None:
+        q = self.quote(symbol)
+        return q.index if q else None
+
+    def derivs(self, symbol: str):
+        """The perpetual's readings as a ``data.derivs.DerivSnapshot`` (linear streams)."""
+        from .derivs import DerivSnapshot
+
+        q = self.quote(symbol)
+        if q is None:
+            return None
+        return DerivSnapshot(q.symbol, last=q.last, mark=q.mark, index=q.index, funding_rate=q.funding_rate,
+                             next_funding_ts=q.next_funding_ts, open_interest=q.open_interest, ts=q.ts)
+
     def age(self, symbol: str) -> float:
         """Seconds since the last update for ``symbol``; ``inf`` when none has arrived yet."""
         q = self.quote(symbol)
@@ -136,6 +173,19 @@ class BybitSpotStream:
     @property
     def symbols(self) -> list[str]:
         return list(self._names.values())
+
+    def status(self) -> dict:
+        """Feed health: connection, ping round trip, per-pair age of the last update and the
+        recent connection history (wall-clock times)."""
+        return {"category": self.category, "connected": self.connected, "connects": self.connects,
+                "reconnects": max(0, self.connects - 1), "latency_ms": self.latency_ms,
+                "last_error": self.last_error,
+                "ages": {name: (None if math.isinf(self.age(name)) else round(self.age(name), 1))
+                         for name in self.symbols},
+                "history": list(self.history)}
+
+    def _note(self, what: str) -> None:
+        self.history.append({"at": round(time.time(), 1), "event": what})
 
     # ---- connection ------------------------------------------------------------------------------
 
@@ -153,6 +203,7 @@ class BybitSpotStream:
             try:
                 ws = await self._connect(self.url)
                 self.connected, self.connects = True, self.connects + 1
+                self._note("connected" if self.connects == 1 else "reconnected")
                 await self._subscribe(ws)
                 if await self._session(ws):
                     backoff = self.min_backoff
@@ -162,7 +213,8 @@ class BybitSpotStream:
                 if self._fresh:  # the connection worked for a while: retry quickly
                     backoff = self.min_backoff
                 self.last_error = f"{type(exc).__name__}: {exc}"[:300]
-                log.warning("bybit spot stream: %s", self.last_error)
+                log.warning("bybit %s stream: %s", self.category, self.last_error)
+                self._note(f"dropped: {self.last_error}")
             finally:
                 self.connected = False
                 if ws is not None:
@@ -172,7 +224,7 @@ class BybitSpotStream:
                         pass
             if self._stop.is_set():
                 break
-            log.info("bybit spot stream: reconnecting in %.0fs", backoff)
+            log.info("bybit %s stream: reconnecting in %.0fs", self.category, backoff)
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=backoff)
             except asyncio.TimeoutError:
@@ -212,7 +264,9 @@ class BybitSpotStream:
     async def _pinger(self, ws: Socket) -> None:
         while True:
             await asyncio.sleep(self.ping_s)
-            await ws.send(json.dumps({"op": "ping", "req_id": str(next(self._req))}))
+            req = str(next(self._req))
+            self._pings = {req: self._clock()}  # only the newest ping is timed
+            await ws.send(json.dumps({"op": "ping", "req_id": req}))
 
     # ---- messages --------------------------------------------------------------------------------
 
@@ -224,9 +278,14 @@ class BybitSpotStream:
             return False
         if not isinstance(msg, dict):
             return False
+        if msg.get("op") in ("ping", "pong") or msg.get("ret_msg") == "pong":
+            sent = self._pings.pop(str(msg.get("req_id")), None)
+            if sent is not None:
+                self.latency_ms = round((self._clock() - sent) * 1000, 1)
+            return False
         if msg.get("op") == "subscribe" and msg.get("success") is False:
             self.last_error = f"subscribe refused: {msg.get('ret_msg', '')}"[:300]
-            log.warning("bybit spot stream: %s", self.last_error)
+            log.warning("bybit %s stream: %s", self.category, self.last_error)
             return False
         topic, data = str(msg.get("topic") or ""), msg.get("data")
         if not isinstance(data, dict):
@@ -251,10 +310,18 @@ class BybitSpotStream:
         return True
 
     def _ticker(self, sym: str, data: dict, ts: int) -> bool:
-        if sym not in self._names or data.get("lastPrice") in (None, ""):
+        """A ticker snapshot or delta: only the fields it carries change."""
+        if sym not in self._names:
+            return False
+        fields = {"lastPrice": "last", "markPrice": "mark", "indexPrice": "index",
+                  "fundingRate": "funding_rate", "openInterest": "open_interest"}
+        changes = {attr: float(data[key]) for key, attr in fields.items() if data.get(key) not in (None, "")}
+        if data.get("nextFundingTime") not in (None, "", "0"):
+            changes["next_funding_ts"] = int(float(data["nextFundingTime"]))
+        if not changes:
             return False
         q = self._quotes.get(sym) or Quote(self._names[sym])
-        self._put(sym, replace(q, last=float(data["lastPrice"]), ts=ts or q.ts))
+        self._put(sym, replace(q, ts=ts or q.ts, **changes))
         return True
 
     def _put(self, sym: str, q: Quote) -> None:
@@ -264,7 +331,7 @@ class BybitSpotStream:
             try:
                 self.on_update(q)
             except Exception:
-                log.exception("bybit spot stream: on_update failed")
+                log.exception("bybit %s stream: on_update failed", self.category)
 
 
 def _level(levels, price, size, snapshot: bool) -> tuple[float | None, float | None]:
@@ -316,3 +383,9 @@ async def aiohttp_connect(url: str) -> Socket:
         await session.close()
         raise
     return _AiohttpSocket(session, ws)
+
+
+def BybitLinearStream(symbols: list[str], **kw) -> BybitSpotStream:
+    """The USDT perpetuals of ``symbols`` (``BTC/USDT`` streams ``BTCUSDT`` linear): book, last,
+    mark and index price, funding and open interest."""
+    return BybitSpotStream(symbols, category="linear", **kw)

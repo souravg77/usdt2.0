@@ -64,6 +64,9 @@ class ShortMirror(Strategy):
             decisions=(*b.decisions, "Short twin: the long rules on the chart turned upside down (1/price); "
                        "traded as a Bybit USDT perpetual short."),
             regime=f"flipped: {b.regime}" if b.regime else "")
+        # the base judges regimes on the flipped chart, where a downtrend reads as an uptrend
+        swap = {"trend-up": "trend-down", "trend-down": "trend-up"}
+        self.eligible_regimes = tuple(swap.get(r, r) for r in base.eligible_regimes)
 
     @classmethod
     def default_params(cls) -> dict:
@@ -83,3 +86,9 @@ class ShortMirror(Strategy):
                 target=1.0 / s.target if s.target and s.target > 0 else None, trailing=trailing,
                 risk_pct=s.risk_pct, reason=f"short twin: {s.reason}", features=dict(s.features)))
         return out
+
+    def calculate_stop_loss(self, entry: float, df: pd.DataFrame, side: Side = Side.SELL) -> float:
+        """The base's long stop on the flipped chart, turned back: above the entry."""
+        if side is Side.BUY:
+            return super().calculate_stop_loss(entry, df, side)
+        return 1.0 / self.base.calculate_stop_loss(1.0 / entry, flip(df), Side.BUY)

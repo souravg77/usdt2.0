@@ -14,9 +14,9 @@ Rules shared by every strategy here:
 - No trade when ATR(14) is above the 95th percentile of its last 500 values (disorderly market).
 - Signals use closed bars only; the order goes in at the next bar's open.
 
-Left out on purpose, because they need a short leg, leverage, futures or a second venue: spot /
-perpetual basis trading, cross-exchange spread arbitrage, pairs trading and cointegration, and the
-short side of the funding-rate reversal (funding very positive). See docs/strategies.md.
+The rest of the master prompt's list is in ``strategies/master.py`` (more long rules) and
+``strategies/quant.py`` (basis and pairs trading, which need two legs and are research only);
+``strategies/catalog.py`` maps all 40. See docs/strategies.md.
 """
 
 from __future__ import annotations
@@ -101,7 +101,7 @@ class _Family(Strategy):
                 features={k: float(v.iloc[i]) for k, v in (features or {}).items()
                           if pd.notna(v.iloc[i])},
             ))
-        return out
+        return self.regime_filter(df, timeframe, out)
 
     def _fixed_r(self):
         r = self.params["target_r"]
@@ -131,6 +131,7 @@ class SupertrendTrend(_Family):
             "Long only: down flips close the trade but never open a short.",
         ),
     )
+    eligible_regimes = ("trend-up", "uncertain")
 
     @classmethod
     def default_params(cls):
@@ -175,6 +176,7 @@ class MtfTrendAlignment(_Family):
             "A higher-frame bar counts only after its last candle has closed, so there is no look-ahead.",
         ),
     )
+    eligible_regimes = ("trend-up", "uncertain")
 
     @classmethod
     def default_params(cls):
@@ -232,6 +234,7 @@ class KeltnerBreakout(_Family):
             "Downside breakouts are ignored (no shorting).",
         ),
     )
+    eligible_regimes = ("trend-up", "range", "uncertain")
 
     @classmethod
     def default_params(cls):
@@ -276,6 +279,7 @@ class AtrExpansionBreakout(_Family):
             "Close in the top 25% of the range so the bar was bought into its close.",
         ),
     )
+    eligible_regimes = ("trend-up", "range", "uncertain")
 
     @classmethod
     def default_params(cls):
@@ -323,6 +327,7 @@ class VolatilityRegimeSwitch(_Family):
             "Range trades also need close > SMA200 so a falling market is not bought.",
         ),
     )
+    eligible_regimes = ("trend-up", "trend-down", "range", "high-volatility", "low-liquidity", "uncertain")
 
     @classmethod
     def default_params(cls):
@@ -390,6 +395,7 @@ class WilliamsRReversal(_Family):
             "Only bought above SMA200 so a falling market is not bought on every bounce.",
         ),
     )
+    eligible_regimes = ("trend-up", "range", "uncertain")
 
     @classmethod
     def default_params(cls):
@@ -432,6 +438,7 @@ class MaDeviationReversion(_Family):
             "The target is the average price at the signal, not a moving target.",
         ),
     )
+    eligible_regimes = ("trend-up", "range", "uncertain")
 
     @classmethod
     def default_params(cls):
@@ -484,6 +491,7 @@ class ObvBreakout(_Family):
             "OBV's level depends on where the data starts, so only its own 20-bar high is used.",
         ),
     )
+    eligible_regimes = ("trend-up", "range", "uncertain")
 
     @classmethod
     def default_params(cls):
@@ -522,6 +530,7 @@ class MfiMomentum(_Family):
             "50 is MFI's midline; 'weak first' = below 40 within 10 bars, so a flat MFI near 50 doesn't count.",
         ),
     )
+    eligible_regimes = ("trend-up", "range", "uncertain")
 
     @classmethod
     def default_params(cls):
@@ -562,6 +571,7 @@ class CmfPressure(_Family):
             "Selling pressure only closes a trade; it never opens a short.",
         ),
     )
+    eligible_regimes = ("trend-up", "range", "uncertain")
 
     @classmethod
     def default_params(cls):
@@ -608,6 +618,7 @@ class FundingExtremeLong(_Family):
             "makes no trades, so the backtest gate rejects it for lack of trades.",
         ),
     )
+    eligible_regimes = ("trend-up", "trend-down", "range", "uncertain")
     needs_context = True
 
     @classmethod
@@ -660,6 +671,7 @@ class EnsembleVote(_Family):
             "Only strategies already in this code vote; book rule specs do not.",
         ),
     )
+    eligible_regimes = ("trend-up", "range", "uncertain")
 
     FAMILIES = {
         "trend": ("supertrend_trend", "trend_pullback", "mtf_trend_alignment"),

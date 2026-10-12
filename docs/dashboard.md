@@ -53,6 +53,21 @@ order it can cause is the kill switch selling what the executors bought.
 
 Uploaded books are saved in `data/books/` under a generated name and are never committed.
 
+## Monitor page
+
+**Monitor** (`/monitor`, refreshes every 30 s) has four panels, each also served as JSON for other
+tools (signed in):
+
+| Panel | JSON | What it shows |
+|---|---|---|
+| Feed health | `/api/monitor/feed` | the live executor's Bybit price stream (connected or not, ping round trip, reconnects, the connection log, pairs quiet for over 15 s) from `data/ops/feed.json`, which `trade run --mode live` writes every 5 s; and missing candles per pair and timeframe in the last 7 days of the collector's database |
+| Derivatives | `/api/monitor/derivatives` | each pair's USDT perpetual: last, mark and index price, basis, funding per 8 h and per year, time to the next payment (Bybit public API, cached 5 s) |
+| Signals and abstentions | `/api/monitor/signals` | agents A–G on the newest closed 1h candle of the first 6 pairs: the regime, the candidate signals with entry, stop, target and confidence, and why every other strategy abstained (bad data, regime, missing candles, no setup) |
+| Risk and exposure | `/api/monitor/risk` | open live positions and whether each has its stop resting on Bybit, exposure, margin used by shorts, today's realised loss against the 1% daily cap, a one-day 95% historical value at risk of the open positions (last 90 days of hourly candles), and the emergency kill switch (type KILL) |
+
+The feed panel says "not running" until the live executor runs, which only happens after you
+open the live lock. Confidence is a description of how many views agree, not a chance of winning.
+
 ## Turning it on (VPS)
 
 1. Add a login to `.env`:

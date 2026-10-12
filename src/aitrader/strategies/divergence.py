@@ -46,6 +46,7 @@ class CciDivergence(Strategy):
             "Long side only; the bearish divergence short is off in the pilot.",
         ),
     )
+    eligible_regimes = ("trend-up", "range", "uncertain")
 
     @classmethod
     def default_params(cls):
@@ -98,7 +99,7 @@ class CciDivergence(Strategy):
                           "fib": float(setup["fib"])},
             ))
             setup = None
-        return out
+        return self.regime_filter(df, timeframe, out)
 
     def _divergence(self, cidx, confirmed, swing_lows, hi, lo, c):
         p = self.params
