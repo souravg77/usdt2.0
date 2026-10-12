@@ -10,8 +10,11 @@ from __future__ import annotations
 from fastapi import Form, Request
 from fastapi.responses import PlainTextResponse, RedirectResponse
 
+import os
+
 from ..news.filter import NewsFilter
 from ..news.service import DEFAULT_DIR, load_latest
+from ..news.x import XReader
 from .app import _csrf, _e, _ms, _q
 
 RISK_CLS = {"low": "good", "normal": "", "elevated": "warn", "high": "bad"}
@@ -40,8 +43,29 @@ def add_news_routes(app, *, settings, auth, jobs, page, guard, news_dir: str = D
                      f'<a href="/jobs/{_e(job["id"])}">Follow the job</a></p>')
         body += _top(auth, token, latest, job, NewsFilter(news_dir, cache_s=0), list(settings.symbols))
         if latest:
-            body += _brief(latest.get("brief")) + _feeds(latest.get("feeds") or {})
+            body += _brief(latest.get("brief"))
+        body += _x_section(auth, token, XReader(os.path.join(news_dir, "x.json")))
+        if latest:
+            body += _feeds(latest.get("feeds") or {})
         return page("News", body, user, token, refresh=20 if job else 300)
+
+    @app.post("/news/x/watch")
+    def x_watch(request: Request, csrf: str = Form(""), username: str = Form(""), remove: str = Form("")):
+        user, token, redirect = guard(request)
+        if redirect:
+            return redirect
+        if not auth.check_csrf(token, csrf):
+            return PlainTextResponse("bad form token; reload the page", status_code=403)
+        reader = XReader(os.path.join(news_dir, "x.json"))
+        try:
+            if remove:
+                reader.remove(username)
+                msg = f"Stopped watching @{username.lstrip('@')}."
+            else:
+                msg = f"Watching @{reader.add(username)} on X from the next check."
+        except ValueError as exc:
+            return RedirectResponse("/news?error=" + _q(str(exc)) + "#x", status_code=303)
+        return RedirectResponse("/news?msg=" + _q(msg) + "#x", status_code=303)
 
     @app.post("/news/refresh")
     def refresh(request: Request, csrf: str = Form("")):
@@ -139,4 +163,51 @@ def _feeds(f: dict) -> str:
                               for i in items[:40]) + "</ul></details>")
     if f.get("errors"):
         out += f'<p class="muted small">Not reachable this time: {_e(", ".join(f["errors"]))}</p>'
+    return out
+
+
+def _x_section(auth, token, reader: XReader) -> str:
+    st = reader.state
+    connected = bool(os.environ.get("X_BEARER_TOKEN"))
+    out = '<h2 id="x">X (Twitter)</h2>'
+    if not connected:
+        out += ('<p class="warn">X isn\'t connected yet: add your app\'s Bearer token on '
+                '<a href="/settings">Settings</a>. The watch list below is used as soon as it is.</p>')
+    out += (f'<p class="muted small">Read-only: the agent reads these accounts and posts about your coins; '
+            f'it never posts, likes or follows from your account. Posts read today: {reader.reads_today()} of '
+            f'{reader.daily_reads} (X charges about 0.005 USD each).</p>')
+
+    def form(username: str, label: str, remove: bool = False, cls: str = "ghost") -> str:
+        return (f'<form method="post" action="/news/x/watch" class="inline">{_csrf(auth, token)}'
+                f'<input type="hidden" name="username" value="{_e(username)}">'
+                + ('<input type="hidden" name="remove" value="1">' if remove else "")
+                + f'<button class="{cls} small">{_e(label)}</button></form>')
+
+    chips = "".join(f'<span class="tick-chip">@{_e(w["username"])}'
+                    f'{" · " + format(w["followers"], ",") + " followers" if w.get("followers") else ""}'
+                    f' {form(w["username"], "×", remove=True)}</span>' for w in st["watch"])
+    out += (f'<div class="card"><h3>Watching</h3><div class="chips">{chips or "<span class=muted>nobody</span>"}</div>'
+            f'<form method="post" action="/news/x/watch" class="row">{_csrf(auth, token)}'
+            '<input name="username" placeholder="@username" aria-label="X username">'
+            '<button>Watch</button></form></div>')
+    if st["suggested"]:
+        rows = "".join(
+            f'<tr><td><a href="https://x.com/{_e(x["username"])}" rel="noopener noreferrer" target="_blank">'
+            f'@{_e(x["username"])}</a><div class="muted small">{_e(x.get("name", ""))}</div></td>'
+            f'<td>{(x.get("followers") or 0):,}</td><td>{_e(", ".join(x.get("pairs", [])))}</td>'
+            f'<td>{x.get("likes", 0):,}</td><td>{form(x["username"], "Watch", cls="")}</td></tr>'
+            for x in st["suggested"][:10])
+        out += ('<h3>People to consider watching</h3><p class="muted small">Popular authors of the most '
+                'relevant posts about your coins, found by the agent\'s X searches.</p><table><tr><th>Account'
+                '</th><th>Followers</th><th>Posts about</th><th>Engagement</th><th></th></tr>' + rows + "</table>")
+    posts = st["posts"][:15]
+    if posts:
+        out += '<h3>Latest posts from watched accounts</h3><ul class="posts">' + "".join(
+            f'<li><b>@{_e(p["username"])}</b> <span class="muted small">{_e(p["created_at"][:16].replace("T", " "))}'
+            f' · {p["likes"]:,} likes</span>'
+            + (f' <span class="badge warn">{_e(", ".join(p["pairs"]))}</span>' if p.get("pairs") else "")
+            + f'<div>{_e(p["text"])}</div><a class="small" href="{_e(p["url"])}" rel="noopener noreferrer" '
+            'target="_blank">open on X</a></li>' for p in posts) + "</ul>"
+    if st.get("errors"):
+        out += f'<p class="muted small">X problems last time: {_e("; ".join(st["errors"][:5]))}</p>'
     return out

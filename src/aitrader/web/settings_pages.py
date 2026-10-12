@@ -33,6 +33,10 @@ GROUPS = [
      "locked in .env until you open it on the server."),
     ("telegram", "Telegram alerts", "Trade alerts and /status, /pause, /kill from your phone. Create a "
      "bot with @BotFather for the token; send it a message, then get your chat ID from @userinfobot."),
+    ("x", "X (Twitter)", "Lets the agent read X: the accounts on its watch list and posts about each "
+     "coin. Read-only: it never posts, likes or follows. At console.x.com create an app, add credits, "
+     "then copy the app's Bearer token. X charges per post read; the daily cap is "
+     "AITRADER_X_DAILY_READS (800 posts, about 4 USD)."),
 ]
 
 
@@ -85,9 +89,24 @@ def check_telegram(token: str, chat_id: str, opener=urllib.request.urlopen) -> N
         raise KeyUnverified(f"couldn't reach Telegram to check it ({type(exc).__name__})") from None
 
 
+def check_x(token: str, opener=urllib.request.urlopen) -> None:
+    req = urllib.request.Request("https://api.x.com/2/usage/tweets",
+                                 headers={"authorization": f"Bearer {token}", "user-agent": "aitrader"})
+    try:
+        with opener(req, timeout=15) as resp:
+            json.loads(resp.read())
+    except Exception as exc:
+        code = getattr(exc, "code", None)
+        if code == 401:
+            raise KeyRejected("X says this Bearer token is invalid; copy it again from your app at "
+                              "console.x.com (Keys and tokens)") from None
+        what = f"HTTP {code}" if code else type(exc).__name__
+        raise KeyUnverified(f"X didn't confirm the token ({what})") from None
+
+
 def add_settings_routes(app, *, settings, auth, paths, jobs, keys_secret: str, page, guard,
                         checkers: dict | None = None) -> None:
-    checkers = {"anthropic": check_anthropic, "telegram": check_telegram, "binance": verify_keys,
+    checkers = {"anthropic": check_anthropic, "telegram": check_telegram, "binance": verify_keys, "x": check_x,
                 **(checkers or {})}
     store_path = getattr(paths, "keys_store", secrets.DEFAULT_PATH)
 
@@ -133,6 +152,10 @@ def add_settings_routes(app, *, settings, auth, paths, jobs, keys_secret: str, p
                     raise ValueError("Telegram needs both the bot token and the chat ID")
                 await asyncio.to_thread(checkers["telegram"], values["TELEGRAM_BOT_TOKEN"],
                                         values["TELEGRAM_CHAT_ID"])
+            elif group == "x":
+                if not values["X_BEARER_TOKEN"]:
+                    raise ValueError("paste the X Bearer token")
+                await asyncio.to_thread(checkers["x"], values["X_BEARER_TOKEN"])
             else:
                 testnet = group == "binance_testnet"
                 prefix = "BINANCE_TESTNET_API" if testnet else "BINANCE_API"

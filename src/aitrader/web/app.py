@@ -778,7 +778,10 @@ pre{background:var(--card);border:1px solid var(--line);padding:14px;border-radi
 white-space:pre-wrap;word-break:break-word}
 code{background:var(--card2);border:1px solid var(--line);border-radius:5px;padding:1px 5px;font-size:.9em}
 .row{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}form.row{align-items:center}
-.row select{width:auto;margin-top:0}.row>label{margin:0}
+.row select{width:auto;margin-top:0}form.inline{display:inline;margin:0}
+.chips{display:flex;flex-wrap:wrap;gap:8px}.tick-chip{display:inline-flex;align-items:center;gap:6px;padding:4px 6px 4px 12px;
+border:1px solid var(--line);border-radius:99px;font-size:.9em}button.small{padding:2px 8px;font-size:.8em}
+.posts{list-style:none;padding:0}.posts li{padding:10px 0;border-bottom:1px solid var(--line)}.row>label{margin:0}
 form.kill{margin-top:14px;border-top:1px solid var(--line);padding-top:10px}ul.gate{padding-left:0;list-style:none;margin:8px 0}
 .chart svg{width:100%;height:180px;display:block}.chart svg.candles{height:auto}
 .switch{font-size:1.1em}.switch.on b{color:var(--bad)}

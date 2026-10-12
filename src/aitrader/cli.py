@@ -293,17 +293,34 @@ def cmd_news(s: Settings, args) -> int:
 
     symbols = args.symbol or s.symbols
     if args.news_cmd in ("update", "run"):
+        from .news.service import x_reader
+
         events = EventLog(service="news")
         hours = args.every_hours or float(os.environ.get("AITRADER_NEWS_EVERY_HOURS", "4") or 4)
+        x_every = 60 * float(os.environ.get("AITRADER_X_EVERY_MIN", "15") or 15)
+        last_brief = 0.0
         while True:
             apply_to_env()  # a key saved on the Settings page is used from the next run on
-            out = update(symbols, events=events, max_searches=args.max_searches)
-            b = out["brief"]
-            print(f"news: market risk {b['market_risk']}, {b['searches']} web searches" if b
-                  else f"news: feeds saved, no AI brief ({out['brief_error']})", flush=True)
-            if args.news_cmd == "update":
-                return 0 if b else 1
-            time.sleep(max(0.5, hours) * 3600)
+            due = time.time() - last_brief >= max(0.5, hours) * 3600
+            if not due and args.news_cmd == "run":
+                # between briefs: check the watched X accounts; a new post about one of our coins
+                # brings the next brief forward (at most one extra brief an hour)
+                x = x_reader()
+                new = x.check_watch(symbols) if x else []
+                hot = [p for p in new if p["pairs"]]
+                if hot:
+                    events.emit("news", f"X: @{hot[0]['username']} posted about {', '.join(hot[0]['pairs'])}: "
+                                        f"{hot[0]['text'][:200]}", url=hot[0]["url"])
+                    due = time.time() - last_brief >= 3600
+            if due:
+                out = update(symbols, events=events, max_searches=args.max_searches)
+                last_brief = time.time()
+                b = out["brief"]
+                print(f"news: market risk {b['market_risk']}, {b['searches']} web searches" if b
+                      else f"news: feeds saved, no AI brief ({out['brief_error']})", flush=True)
+                if args.news_cmd == "update":
+                    return 0 if b else 1
+            time.sleep(x_every)
     latest = load_latest()
     if not latest:
         print("no news yet: run `aitrader news update`")

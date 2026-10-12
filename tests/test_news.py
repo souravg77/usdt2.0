@@ -179,3 +179,122 @@ def test_news_page(client):
     assert len(jobs) == 1 and jobs[0]["steps"] == [["news", "update"]]
     again = c.post("/news/refresh", data={"csrf": csrf}, follow_redirects=False)
     assert "already%20running" in again.headers["location"]
+
+
+# ---- X (Twitter) ------------------------------------------------------------------------------
+
+from aitrader.news.x import XReader, XClient, XError, mentions  # noqa: E402
+
+
+class FakeX:
+    def __init__(self):
+        self.urls = []
+        self.next_id = 100
+
+    def __call__(self, url, token):
+        assert token == "tok"
+        self.urls.append(url)
+        if "/users/by?" in url:
+            return {"data": [{"id": "1", "username": "elonmusk", "name": "Elon Musk",
+                              "public_metrics": {"followers_count": 200_000_000}},
+                             {"id": "2", "username": "realDonaldTrump", "name": "Donald J. Trump"}]}
+        if "/users/1/tweets" in url:
+            self.next_id += 1
+            return {"data": [{"id": str(self.next_id), "text": "Dogecoin to the moon! $BTC too",
+                              "created_at": "2026-10-12T01:00:00Z", "public_metrics": {"like_count": 50000}}]}
+        if "/users/2/tweets" in url:
+            return {}
+        if "/tweets/search/recent" in url:
+            return {"data": [{"id": "9", "text": "Big ETH upgrade soon", "author_id": "7",
+                              "public_metrics": {"like_count": 900, "retweet_count": 100}},
+                             {"id": "8", "text": "eth", "author_id": "6", "public_metrics": {"like_count": 1}}],
+                    "includes": {"users": [{"id": "7", "username": "cryptoguru", "name": "Guru",
+                                            "public_metrics": {"followers_count": 500_000}},
+                                           {"id": "6", "username": "tiny", "public_metrics": {"followers_count": 50}}]}}
+        raise AssertionError(url)
+
+
+def test_mentions():
+    assert mentions("Dogecoin to the moon! $BTC too", ["BTC/USDT", "DOGE/USDT", "ETH/USDT"]) == ["BTC/USDT", "DOGE/USDT"]
+    assert mentions("ethereal vibes, SOLAR power", ["ETH/USDT", "SOL/USDT"]) == []
+    assert mentions("#SOL and ether", ["ETH/USDT", "SOL/USDT"]) == ["ETH/USDT", "SOL/USDT"]
+
+
+def test_x_reader_watch_search_suggest_and_cap(tmp_path):
+    fake = FakeX()
+    r = XReader(str(tmp_path / "x.json"), XClient("tok", get=fake), daily_reads=100, clock=lambda: NOW / 1000)
+    new = r.check_watch(SYMS)
+    assert [p["username"] for p in new] == ["elonmusk"] and new[0]["pairs"] == ["BTC/USDT"]
+    assert "max_results=5" in fake.urls[1] and "since_id" not in fake.urls[1]
+    r.check_watch(SYMS)
+    assert "since_id=101" in [u for u in fake.urls if "/users/1/" in u][-1]
+    assert sum(1 for u in fake.urls if "/users/by?" in u) == 1  # ids looked up once
+    r.search_pairs(SYMS)
+    q = [u for u in fake.urls if "search/recent" in u][0]
+    assert "%24BTC" in q and "bitcoin" in q and "-is%3Aretweet" in q
+    assert [s["username"] for s in r.state["suggested"]] == ["cryptoguru"]  # tiny account left out
+    assert r.reads_today() == 2 + 1 + 1 + 4  # 2 user lookups, 2 new posts, 2 searches x 2
+    r.add("@cryptoguru")
+    assert r.state["suggested"] == [] and r.state["watch"][-1] == {"username": "cryptoguru"}
+    with pytest.raises(ValueError):
+        r.add("not a handle!")
+    r.remove("cryptoguru")
+    assert [w["username"] for w in r.state["watch"]] == ["elonmusk", "realDonaldTrump"]
+    capped = XReader(str(tmp_path / "x.json"), XClient("tok", get=fake), daily_reads=11, clock=lambda: NOW / 1000)
+    capped.search_pairs(SYMS)
+    assert any("cap" in e for e in capped.state["errors"])
+    tomorrow = XReader(str(tmp_path / "x.json"), XClient("tok", get=fake), clock=lambda: NOW / 1000 + 86400)
+    assert tomorrow.reads_today() == 0
+
+
+def test_x_client_needs_token(monkeypatch):
+    monkeypatch.delenv("X_BEARER_TOKEN", raising=False)
+    with pytest.raises(XError, match="Settings"):
+        XClient()
+
+
+def test_brief_gets_x_posts(tmp_path):
+    fake = FakeX()
+    r = XReader(str(tmp_path / "news" / "x.json"), XClient("tok", get=fake))
+    api = FakeAPI([{"stop_reason": "tool_use", "content": [{"type": "tool_use", "id": "t",
+                                                            "name": "report_market_news", "input": REPORT}]}])
+    update(SYMS, str(tmp_path / "news"), fetch=fake_fetch, post=api, x=r)
+    prompt = api.bodies[0]["messages"][0]["content"]
+    assert "@elonmusk" in prompt and "Dogecoin to the moon" in prompt and "Big ETH upgrade" in prompt
+
+
+def test_news_page_x_section(client, monkeypatch):
+    c, _runner, paths = client
+    c.post("/login", data={"user": "admin", "password": PW})
+    monkeypatch.delenv("X_BEARER_TOKEN", raising=False)
+    page = c.get("/news").text
+    assert "isn't connected yet" in page and "@elonmusk" in page and "@realDonaldTrump" in page
+    csrf = Auth("admin", PW, "k").csrf(c.cookies.get(COOKIE))
+    r = c.post("/news/x/watch", data={"csrf": csrf, "username": "@saylor"}, follow_redirects=False)
+    assert "Watching" in r.headers["location"] or "Watching%20%40saylor" in r.headers["location"]
+    assert "@saylor" in c.get("/news").text
+    bad = c.post("/news/x/watch", data={"csrf": csrf, "username": "<script>"}, follow_redirects=False)
+    assert "error=" in bad.headers["location"]
+    c.post("/news/x/watch", data={"csrf": csrf, "username": "saylor", "remove": "1"})
+    assert "@saylor" not in c.get("/news").text
+    assert c.post("/news/x/watch", data={"csrf": "x", "username": "a"}).status_code == 403
+
+
+def test_settings_check_x():
+    from aitrader.accounts import KeyRejected, KeyUnverified
+    from aitrader.web.settings_pages import check_x
+
+    class E(Exception):
+        def __init__(self, code):
+            self.code = code
+
+    def opener(code):
+        def o(req, timeout):
+            assert req.headers["Authorization"] == "Bearer t"
+            raise E(code)
+        return o
+
+    with pytest.raises(KeyRejected):
+        check_x("t", opener=opener(401))
+    with pytest.raises(KeyUnverified):
+        check_x("t", opener=opener(402))

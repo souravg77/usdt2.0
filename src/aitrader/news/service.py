@@ -33,10 +33,25 @@ def load_latest(news_dir: str = DEFAULT_DIR) -> dict:
         return {}
 
 
+def x_reader(news_dir: str = DEFAULT_DIR):
+    """The X reader when an X token is set, else None."""
+    from .x import XReader
+
+    return XReader(os.path.join(news_dir, "x.json")) if os.environ.get("X_BEARER_TOKEN") else None
+
+
 def update(symbols: list[str], news_dir: str = DEFAULT_DIR, fetch=None, post=None,
-           now_ms: int | None = None, events=None, max_searches: int | None = None) -> dict:
+           now_ms: int | None = None, events=None, max_searches: int | None = None, x="auto") -> dict:
     now_ms = now_ms or int(time.time() * 1000)
     data = feeds_mod.gather(fetch or feeds_mod.fetch_url, now_ms)
+    x = x_reader(news_dir) if x == "auto" else x
+    if x is not None:
+        try:
+            x.check_watch(symbols)
+            x.search_pairs(symbols)
+            data["x"] = x.for_brief()
+        except Exception as exc:  # X is extra information: never let it stop the brief
+            data["errors"].append(f"X: {_why(exc)}")
     out = {"generated": now_ms, "symbols": symbols, "feeds": data, "brief": None, "brief_error": ""}
     try:
         post = post or poster()
