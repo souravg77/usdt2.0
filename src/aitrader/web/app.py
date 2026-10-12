@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
 
-from ..config import Settings
+from ..config import EXCHANGE, Settings
 from ..safety import live_gate_problems
 from .auth import COOKIE, Auth
 from .jobs import JobRunner
@@ -384,7 +384,7 @@ paper trading. Nothing trades real money.</p>
             since = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 365 * 86400))
             jobs.submit("Turn paper trading on: every strategy, then a year of price history",
                         [["learn", "add-library"], ["learn", "add-builtin"], ["learn", "paper-all"],
-                         ["download", "--since", since, "--exchange", "binance"],
+                         ["download", "--since", since, "--exchange", EXCHANGE],
                          ["learn", "test", "--paper"]], meta={"kind": "paper-start"})
             _event("paper_on", f"paper trading turned on from the dashboard by {user}")
             return ("Paper trading is on: every strategy is being loaded into paper trading, then a year of "
@@ -736,8 +736,8 @@ def _live_card(settings, paths: Paths, events: list[dict]) -> str:
     approval = _load_json(os.path.join(paths.golive_dir, "approval.json"))
     svc, svc_cls, _detail = _service_state(events, "executor-live", int(time.time() * 1000))
     checks = [
-        ("Real Binance keys saved (trade only, withdrawals off)",
-         bool(os.environ.get("BINANCE_API_KEY") and os.environ.get("BINANCE_API_SECRET"))),
+        ("Real Bybit keys saved (spot trade only, no withdrawals, IP-bound)",
+         bool(os.environ.get("BYBIT_API_KEY") and os.environ.get("BYBIT_API_SECRET"))),
         ("Go/no-go gate passed", bool(rep.get("passed"))),
         ("Strategies approved (aitrader golive approve)", bool(approval.get("by"))),
         ("Pilot budget set (AITRADER_PILOT_MAX_USDT in .env)", bool(os.environ.get("AITRADER_PILOT_MAX_USDT"))),

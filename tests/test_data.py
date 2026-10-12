@@ -8,13 +8,13 @@ from aitrader.data.downloader import download
 from aitrader.data.feeds import LiveFeed
 from aitrader.data.quality import check_candles
 from aitrader.data.store import CandleStore
-from aitrader.exchanges import BinanceAdapter
+from aitrader.exchanges import BybitAdapter
 from aitrader.models import Candle
 from aitrader.throttle import Throttle
 
 
 def c(ts, o=1.0, h=2.0, low=0.5, cl=1.5, v=1.0):
-    return Candle("binance", "BTC/USDT", "1m", ts, o, h, low, cl, v)
+    return Candle("bybit", "BTC/USDT", "1m", ts, o, h, low, cl, v)
 
 
 def test_quality_clean_series():
@@ -36,41 +36,41 @@ def test_store_upsert_is_idempotent(tmp_path):
     store = CandleStore(str(tmp_path / "x.db"))
     store.upsert([c(0), c(60_000)])
     store.upsert([c(60_000, cl=1.9), c(120_000)])
-    rows = store.load("binance", "BTC/USDT", "1m")
+    rows = store.load("bybit", "BTC/USDT", "1m")
     assert [r.ts for r in rows] == [0, 60_000, 120_000]
     assert rows[1].close == 1.9
-    assert store.last_ts("binance", "BTC/USDT", "1m") == 120_000
+    assert store.last_ts("bybit", "BTC/USDT", "1m") == 120_000
 
 
 async def test_download_paginates_and_resumes(fake_ccxt):
     s = Settings()
     raw = [[i * 60_000, 1, 2, 0.5, 1.5, 1] for i in range(25)]
-    adapter = BinanceAdapter(s, client=fake_ccxt(raw), throttle=Throttle(1000, 1000))
+    adapter = BybitAdapter(s, client=fake_ccxt(raw), throttle=Throttle(1000, 1000))
     store = CandleStore(":memory:")
     import aitrader.data.downloader as dl
 
-    dl.PAGE_LIMIT["binance"] = 10
+    dl.PAGE_LIMIT["bybit"] = 10
     try:
         n = await download(adapter, store, "BTC/USDT", "1m", 0, 25 * 60_000)
         assert n == 25
         assert await download(adapter, store, "BTC/USDT", "1m", 0, 25 * 60_000) == 0
     finally:
-        dl.PAGE_LIMIT["binance"] = 1000
-    assert check_candles(store.load("binance", "BTC/USDT", "1m"), "1m").ok
+        dl.PAGE_LIMIT["bybit"] = 1000
+    assert check_candles(store.load("bybit", "BTC/USDT", "1m"), "1m").ok
 
 
 async def test_download_fills_in_older_history(fake_ccxt):
     """The collector stores only recent candles; asking for years back must still fetch them."""
     s = Settings()
     raw = [[i * 60_000, 1, 2, 0.5, 1.5, 1] for i in range(40)]
-    adapter = BinanceAdapter(s, client=fake_ccxt(raw), throttle=Throttle(1000, 1000))
+    adapter = BybitAdapter(s, client=fake_ccxt(raw), throttle=Throttle(1000, 1000))
     store = CandleStore(":memory:")
-    store.upsert([Candle("binance", "BTC/USDT", "1m", i * 60_000, 1, 2, 0.5, 1.5, 1) for i in range(30, 35)])
+    store.upsert([Candle("bybit", "BTC/USDT", "1m", i * 60_000, 1, 2, 0.5, 1.5, 1) for i in range(30, 35)])
     n = await download(adapter, store, "BTC/USDT", "1m", 0, 40 * 60_000)
     assert n == 35  # 0-29 before the stored ones, 35-39 after
-    rows = store.load("binance", "BTC/USDT", "1m")
+    rows = store.load("bybit", "BTC/USDT", "1m")
     assert [r.ts for r in rows] == [i * 60_000 for i in range(40)]
-    assert store.first_ts("binance", "BTC/USDT", "1m") == 0
+    assert store.first_ts("bybit", "BTC/USDT", "1m") == 0
 
 
 async def test_throttle_limits_rate():
@@ -106,7 +106,7 @@ class FlakyClient:
 async def test_feed_reconnects_after_error():
     FlakyClient.instances = 0
     ticks = []
-    feed = LiveFeed("binance", ["BTC/USDT"], lambda *a: ticks.append(a),
+    feed = LiveFeed("bybit", ["BTC/USDT"], lambda *a: ticks.append(a),
                     client_factory=FlakyClient, max_backoff=0.01)
     feed_task = asyncio.create_task(feed.run())
     import aitrader.data.feeds as feeds
@@ -130,7 +130,7 @@ def test_migrate_and_backup(tmp_path, monkeypatch):
     s = store_mod.CandleStore(str(db))
     released = [v for v, _ in store_mod.MIGRATIONS]
     assert s.schema_version() == 0 and s.migrate() == released and s.migrate() == []
-    s.upsert([Candle("binance", "BTC/USDT", "1h", 0, 1, 2, 0.5, 1.5, 10)])
+    s.upsert([Candle("bybit", "BTC/USDT", "1h", 0, 1, 2, 0.5, 1.5, 10)])
     nxt = store_mod.SCHEMA_VERSION + 1
     monkeypatch.setattr(store_mod, "MIGRATIONS", store_mod.MIGRATIONS + [
         (nxt, "CREATE TABLE IF NOT EXISTS extra (x INTEGER);")])
@@ -139,7 +139,7 @@ def test_migrate_and_backup(tmp_path, monkeypatch):
     s.backup(str(tmp_path / "bk" / "a.db"))
     s.close()
     copy = store_mod.CandleStore(str(tmp_path / "bk" / "a.db"))
-    assert len(copy.load("binance", "BTC/USDT", "1h")) == 1 and copy.schema_version() == nxt
+    assert len(copy.load("bybit", "BTC/USDT", "1h")) == 1 and copy.schema_version() == nxt
     copy.close()
     monkeypatch.setattr(store_mod, "SCHEMA_VERSION", nxt - 1)
     with pytest.raises(RuntimeError, match="newer"):

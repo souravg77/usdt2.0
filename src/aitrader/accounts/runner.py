@@ -20,7 +20,7 @@ import logging
 import os
 import time
 
-from ..config import ExchangeKeys, Mode, Settings
+from ..config import EXCHANGE, ExchangeKeys, Mode, Settings
 from ..ops import EventLog
 from ..safety import live_gate_problems
 from ..trade import Control, Executor, RiskEngine, RiskLimits
@@ -28,7 +28,6 @@ from .live import live_stop_control
 from .store import UserStore, Vault
 
 log = logging.getLogger(__name__)
-EXCHANGE = "binance"
 
 
 class CombinedControl:

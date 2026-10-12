@@ -9,11 +9,13 @@ service (dashboard, database, alerts) in one file.
 
 ## 0. Before you start
 
-- **Location matters.** Binance blocks API access from some countries (for example the US returns
-  HTTP 451). Pick a VPS region where both Binance and HTX allow API access, and confirm they are
-  legally available to you.
+- **Location matters.** Bybit restricts some countries (for example the USA, the UK,
+  Canada/Ontario and Singapore) and blocks API calls from restricted regions. Check Bybit's terms
+  for your own country and the VPS's country, and pick a VPS region Bybit serves.
 - Phase 1 only needs public market data, so **no API keys are required yet**. When you do add keys:
-  read-only first; later trade-only; **never enable withdrawals**; whitelist the VPS IP on both exchanges. Keep only the money the bot trades with on each exchange (an exchange can fail or freeze withdrawals).
+  Bybit Demo Trading keys first; later a real key with spot trading only; **never give it Wallet
+  permissions** (withdraw or transfer); bind it to the VPS IP. Use a dedicated sub-account. Keep
+  only the money the bot trades with on Bybit (an exchange can fail or freeze withdrawals).
 
 ## 1. Harden the server (once)
 
@@ -53,9 +55,8 @@ echo "AITRADER_UID=$(id -u)" >> .env   # the containers run with your uid, so bo
 ```bash
 docker compose build
 docker compose run --rm collector status
-docker compose run --rm collector paper-smoke --exchange binance --symbol BTC/USDT --usdt 100
-docker compose run --rm collector paper-smoke --exchange htx --symbol BTC/USDT --usdt 100
-docker compose run --rm collector stream --exchange binance --seconds 20
+docker compose run --rm collector paper-smoke --exchange bybit --symbol BTC/USDT --usdt 100
+docker compose run --rm collector stream --exchange bybit --seconds 20
 ```
 
 `paper-smoke` is the Phase 1 exit check: it opens and closes a test position on the paper
@@ -64,9 +65,8 @@ exchange using live prices and prints the fills, fees and final equity.
 ## 5. Download history and start the collector
 
 ```bash
-# one-off backfill (adjust dates; HTX only serves its most recent ~2000 bars per timeframe)
-docker compose run --rm collector download --since 2023-01-01 --exchange binance
-docker compose run --rm collector download --since 2023-01-01 --exchange htx
+# one-off backfill (adjust dates). The collector backfills 30 days by itself; this goes further.
+docker compose run --rm collector download --since 2023-01-01 --exchange bybit
 docker compose run --rm collector check-data
 
 # keep candles up to date in the background (restarts on reboot)
@@ -178,8 +178,9 @@ Start the market-context service once (later updates keep it running):
 `docker compose up -d context`. Then, step by step, as described in
 [live-trading.md](live-trading.md):
 
-1. Testnet keys in `.env`, then `docker compose --profile testnet up -d executor-testnet`.
-2. Test the kill switch on the testnet: `docker compose run --rm collector trade kill --confirm`,
+1. Bybit Demo Trading keys (`BYBIT_DEMO_API_KEY`, `BYBIT_DEMO_API_SECRET`) in `.env` or on the
+   Settings page, then `docker compose --profile testnet up -d executor-testnet`.
+2. Test the kill switch on demo trading: `docker compose run --rm collector trade kill --confirm`,
    then `trade resume`.
 3. Telegram: `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env`, then
    `docker compose --profile telegram up -d telegram`.

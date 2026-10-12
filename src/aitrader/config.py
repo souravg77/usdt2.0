@@ -28,7 +28,10 @@ def _bool(value: str | None) -> bool:
     return (value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-# The 20 most traded coins against USDT on Binance spot (stablecoins left out), Oct 2026.
+# The only exchange the agent uses: Bybit spot (demo trading for fake money, the real account for live).
+EXCHANGE = "bybit"
+
+# The 20 most traded coins against USDT (stablecoins left out), Oct 2026; all listed on Bybit spot.
 TOP_PAIRS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT', 'XRP/USDT', 'DOGE/USDT', 'ADA/USDT', 'TRX/USDT', 'LINK/USDT', 'AVAX/USDT', 'SUI/USDT', 'LTC/USDT', 'BCH/USDT', 'DOT/USDT', 'TON/USDT', 'NEAR/USDT', 'APT/USDT', 'UNI/USDT', 'AAVE/USDT', 'PEPE/USDT']
 
 
@@ -65,11 +68,8 @@ class Settings:
             load_dotenv(env_file, override=False)
         e = os.environ.get
         keys = {
-            "binance": ExchangeKeys(e("BINANCE_API_KEY", ""), e("BINANCE_API_SECRET", "")),
-            "binance_testnet": ExchangeKeys(
-                e("BINANCE_TESTNET_API_KEY", ""), e("BINANCE_TESTNET_API_SECRET", "")
-            ),
-            "htx": ExchangeKeys(e("HTX_API_KEY", ""), e("HTX_API_SECRET", "")),
+            "bybit": ExchangeKeys(e("BYBIT_API_KEY", ""), e("BYBIT_API_SECRET", "")),
+            "bybit_demo": ExchangeKeys(e("BYBIT_DEMO_API_KEY", ""), e("BYBIT_DEMO_API_SECRET", "")),
         }
         return cls(
             mode=Mode(e("AITRADER_MODE", "paper").strip().lower()),

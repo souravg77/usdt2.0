@@ -23,11 +23,14 @@ Takes about 30 minutes, plus a few hours for the first data download.
 You also need:
 
 - **A fixed LAN IP for the server.** In your router, under DHCP reservation (or static lease),
-  give it a fixed address such as `192.168.1.50`. The dashboard address and the Binance key's
-  IP whitelist depend on it.
-- **Your public IP should not change** when you use real Binance keys later. Binance locks each
-  key to one IP. Many home connections get a new public IP now and then; ask your provider for a
-  static IP, or be ready to update the key's IP whitelist. Testnet and paper trading don't care.
+  give it a fixed address such as `192.168.1.50`. The dashboard address and the Bybit key's
+  IP binding depend on it.
+- **Your public IP should not change** when you use a real Bybit key later. The key must be bound
+  to your IP. Many home connections get a new public IP now and then; ask your provider for a
+  static IP, or be ready to update the key's IP list. Demo trading and paper trading don't care.
+- **Bybit must be available to you.** Bybit restricts some countries (for example the USA, the
+  UK, Canada/Ontario and Singapore) and blocks API calls from restricted regions. Check Bybit's
+  terms for your own country and the server's country.
 - A computer on the same network to open the dashboard.
 
 ## 2. Install Ubuntu Server
@@ -144,7 +147,7 @@ Delete `caddy-root.crt` from the server afterwards: `rm ~/AI_crypto_trader/caddy
 
 ## 5. Fill in the rest of the settings
 
-**Easiest: the dashboard's Settings page.** Paste your Anthropic key, Binance testnet keys and
+**Easiest: the dashboard's Settings page.** Paste your Anthropic key, Bybit demo trading keys and
 Telegram bot there. Each key is checked before it is saved, stored encrypted, and the services
 that use it restart by themselves. The same page shows the health check and has a **Start
 setup** button that does step 6 for you.
@@ -159,11 +162,11 @@ nano .env        # save with Ctrl+O, Enter; exit with Ctrl+X
 | Setting | When | What |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | to let the agent read books | from console.anthropic.com |
-| `BINANCE_TESTNET_API_KEY` / `_SECRET` | Phase 5 testing | see the "connect Binance" guide, stage 1 |
+| `BYBIT_DEMO_API_KEY` / `_SECRET` | Phase 5 testing | bybit.com, switch to Demo Trading, avatar → API → create key (docs/live-trading.md, step 1) |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | alerts on your phone | docs/live-trading.md, step 2 |
 | `AITRADER_SYMBOLS` | which coins | default: the 20 most traded coins against USDT (see `TOP_PAIRS` in src/aitrader/config.py) |
 
-**Never** put real Binance keys in `.env` until the go/no-go gate passes (Phase 6). Leave
+**Never** put real Bybit keys (`BYBIT_API_KEY`) in `.env` until the go/no-go gate passes (Phase 6). Leave
 `AITRADER_LIVE_UNLOCKED=false`.
 
 After editing `.env`, restart so the services read it: `docker compose up -d`.
@@ -252,7 +255,7 @@ services come back by themselves.
 
 | What | How | Guide |
 |---|---|---|
-| Testnet executor (fake money, real orders) | `docker compose --profile testnet up -d executor-testnet` | docs/live-trading.md |
+| Testnet executor (Bybit Demo Trading: demo funds, real orders) | `docker compose --profile testnet up -d executor-testnet` | docs/live-trading.md |
 | Telegram alerts and commands | `docker compose --profile telegram up -d telegram` | docs/live-trading.md |
 | User accounts and sign-up | set `AITRADER_WEB_SIGNUP=open`, then `docker compose --profile users up -d users` | docs/user-accounts.md |
 | Live pilot (real money) | only after the go/no-go gate and your approval | docs/live-trading.md |
@@ -294,7 +297,7 @@ Caddy gets a free Let's Encrypt certificate (no browser warning), and the firewa
 - [ ] The dashboard password is in a password manager
 - [ ] `doctor` shows no FAIL, and live trading is locked
 - [ ] Daily backups run and are copied off the machine
-- [ ] Binance keys (Phase 6 only): trade-only, withdrawals off, IP-whitelisted to your public IP
+- [ ] Bybit keys (Phase 6 only): spot trade only, no Wallet permissions (withdraw/transfer), bound to your public IP
 - [ ] The router has no port forwarding to the server (unless you set up a domain)
 
 ## 14. Troubleshooting
@@ -310,6 +313,6 @@ Caddy gets a free Let's Encrypt certificate (no browser warning), and the firewa
 | doctor: a service stopped | `docker compose logs --tail 100 <service>`, then `docker compose up -d <service>` |
 | Disk full | `docker system prune` removes old images; old backups are pruned automatically |
 | An update failed | it rolled back by itself; `tail -50 data/update.log` says why |
-| Binance refuses the key | wrong key type (testnet vs real), or your public IP changed: update the key's IP whitelist on Binance |
+| Bybit refuses the key | wrong key type (demo vs real), your public IP changed (update the key's IPs on Bybit), or the server is in a region Bybit blocks |
 
 The detailed manual reference for every command is docs/ubuntu-setup.md.

@@ -142,12 +142,12 @@ def test_paper_trader_applies_news(tmp_path):
         def decide(self, *a):
             return self.d
 
-    t = PaperTrader(CandleStore(str(tmp_path / "c.db")), str(tmp_path / "r.json"), ["binance"], SYMS,
+    t = PaperTrader(CandleStore(str(tmp_path / "c.db")), str(tmp_path / "r.json"), ["bybit"], SYMS,
                     state_path=str(tmp_path / "s.json"), news=Fixed(NewsDecision(True, 0.5)),
                     context=Fixed(NewsDecision(True, 0.5)))
-    assert t._context("binance", "BTC/USDT", NOW) == 0.25
+    assert t._context("bybit", "BTC/USDT", NOW) == 0.25
     t.news = Fixed(NewsDecision(False, 0.0))
-    assert t._context("binance", "BTC/USDT", NOW) == 0.0
+    assert t._context("bybit", "BTC/USDT", NOW) == 0.0
 
 
 @pytest.fixture

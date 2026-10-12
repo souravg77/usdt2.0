@@ -132,7 +132,7 @@ def test_trading_page_and_controls(web):
     assert client.get("/trading", follow_redirects=False).status_code == 303
     os.makedirs("data/learn", exist_ok=True)
     os.makedirs("data/trade", exist_ok=True)
-    key = "s1|binance|BTC/USDT|1h"
+    key = "s1|bybit|BTC/USDT|1h"
     with open(paths.paper_state, "w") as fh:
         json.dump({"open": {key: {"entry_id": "s1", "filled": True, "entry": 100.0, "mark_r": 0.4, "ai_prob": 0.66,
                                   "signal": {"ts": 1, "entry": 100.0, "stop": 95.0}}},
@@ -175,20 +175,20 @@ def test_trading_page_status_tiles_and_grouped_events(web):
     client, _auth, _runner, paths = web
     log = EventLog("data/ops/events.jsonl", service="executor-testnet")
     for _ in range(12):
-        log.emit("error", "testnet executor: AuthenticationError: binance requires apiKey", level="error")
-    log.emit("waiting", "testnet executor: waiting for the Binance testnet API key and secret", level="warning")
+        log.emit("error", "testnet executor: AuthenticationError: bybit requires apiKey", level="error")
+    log.emit("waiting", "testnet executor: waiting for the Bybit testnet API key and secret", level="warning")
     login(client)
     r = client.get("/trading")
     assert 'class="stat"' in r.text and "Testnet trader" in r.text
     assert '<span class="v warn">waiting for keys</span>' in r.text  # the latest event decides
-    assert r.text.count("binance requires apiKey") == 1 and "×12" in r.text  # repeats shown once
+    assert r.text.count("bybit requires apiKey") == 1 and "×12" in r.text  # repeats shown once
     assert "no strategy is paper trading yet" in r.text  # nothing paper trading yet
     assert '<a href="/trading" class=active aria-current=page>Trading</a>' in r.text
 
 
 def test_paper_switch_and_live_card(web, monkeypatch):
     client, auth, runner, paths = web
-    monkeypatch.delenv("BINANCE_API_KEY", raising=False)
+    monkeypatch.delenv("BYBIT_API_KEY", raising=False)
     submitted = []
     monkeypatch.setattr(runner, "submit", lambda title, steps, meta=None: submitted.append((steps, meta)) or "j1")
     csrf = auth.csrf(login(client))

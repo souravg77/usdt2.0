@@ -1,7 +1,8 @@
-"""Binance and HTX adapters built on ccxt. Orders go through the live gate unless on a testnet."""
+"""The Bybit spot adapter, built on ccxt. Orders go through the live gate unless on demo trading."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import ccxt.async_support as ccxt_async
@@ -40,6 +41,7 @@ class CcxtAdapter(ExchangeAdapter):
     supports_testnet: bool = False
     client_id_param: str = "clientOrderId"  # ccxt's unified name; exchanges may override
     find_id_param: str = "clientOrderId"  # the name fetch_order reads to look an order up by it
+    ccxt_options: dict = {}
 
     def __init__(
         self,
@@ -61,12 +63,16 @@ class CcxtAdapter(ExchangeAdapter):
                     "apiKey": keys.api_key or None,
                     "secret": keys.secret or None,
                     "enableRateLimit": True,
-                    "options": {"defaultType": "spot"},
+                    "options": {"defaultType": "spot", **self.ccxt_options},
                 }
             )
             if testnet:
-                client.set_sandbox_mode(True)
+                self._practice(client)
         self.client = client
+
+    def _practice(self, client) -> None:
+        """Point the client at the exchange's fake-money environment."""
+        client.set_sandbox_mode(True)
 
     # ---- market data -------------------------------------------------------------------------
 
@@ -204,24 +210,80 @@ class CcxtAdapter(ExchangeAdapter):
         )
 
 
-class BinanceAdapter(CcxtAdapter):
-    name = "binance"
-    ccxt_id = "binance"
+class BybitAdapter(CcxtAdapter):
+    """Bybit spot (V5 API). Fake-money orders go to Bybit Demo Trading (api-demo.bybit.com): real
+    market prices with demo funds, keys made in the Demo Trading section of a bybit.com account."""
+
+    name = "bybit"
+    ccxt_id = "bybit"
     supports_testnet = True
-    client_id_param = "newClientOrderId"
-    find_id_param = "origClientOrderId"
+    client_id_param = "orderLinkId"  # up to 36 letters, digits, - and _; ours are 32
+    # Bybit accounts are Unified Trading Accounts; saying so skips ccxt's account-type lookup,
+    # which needs key permissions a trade-only key doesn't have
+    ccxt_options = {"enableUnifiedAccount": True, "enableUnifiedMargin": False}
+
+    def _practice(self, client) -> None:
+        client.enable_demo_trading(True)
+
+    async def place_order(self, symbol, side, amount, type=OrderType.MARKET, price=None, reason="",
+                          client_id=None):
+        """Spot only, never borrowed (isLeverage 0). A market order's amount is in coins
+        (marketUnit baseCoin), not USDT. Bybit answers a new order with its id only, so the order
+        is read back once to learn the fill."""
+        self._check_order_allowed()
+        await self.throttle.acquire()
+        amount = await self._precise(symbol, amount)
+        log.info("ORDER %s %s %s %s @ %s id=%s reason=%s", self.name, side.value, amount, symbol,
+                 price, client_id, reason)
+        params = {"isLeverage": 0}
+        if type is OrderType.MARKET:
+            params["marketUnit"] = "baseCoin"
+        if client_id:
+            params[self.client_id_param] = client_id
+        raw = await self.client.create_order(symbol, type.value, side.value, amount,
+                                             price if type is OrderType.LIMIT else None, params)
+        order = self._to_order(raw, symbol)
+        if client_id and order.filled <= 0 and order.status is OrderStatus.OPEN:
+            for wait in (0.3, 0.7, 1.5):
+                await asyncio.sleep(wait)
+                found = await self.find_order(client_id, symbol)
+                if found is not None and (found.filled > 0 or found.status is not OrderStatus.OPEN):
+                    order = found
+                    break
+        order.reason = reason
+        return order
+
+    def _to_order(self, raw: dict, symbol: str) -> Order:
+        """ccxt reads the fee from ``cumFeeDetail``; older answers only have ``cumExecFee`` and
+        ``feeCurrency`` (a buy pays its fee in the coin bought, a sell in USDT)."""
+        if not (raw.get("fee") or {}).get("currency"):
+            info = raw.get("info") or {}
+            cost = float(info.get("cumExecFee") or 0)
+            if cost:
+                cur = info.get("feeCurrency") or (symbol.split("/")[0] if raw.get("side") == "buy"
+                                                  else symbol.split("/")[1])
+                raw = {**raw, "fee": {"cost": cost, "currency": cur}}
+        return super()._to_order(raw, symbol)
+
+    async def find_order(self, client_id, symbol):
+        """The order sent with ``client_id`` (open ones first, then the order history), or None
+        when Bybit has no such order. Any error is raised: it never means "not placed"."""
+        if not getattr(self.client, "markets", None):
+            await self.client.load_markets()
+        market = self.client.market(symbol)
+        req = {"category": "spot", "symbol": market["id"], "orderLinkId": client_id}
+        for fetch in (self.client.private_get_v5_order_realtime, self.client.private_get_v5_order_history):
+            await self.throttle.acquire()
+            rows = ((await fetch(dict(req))).get("result") or {}).get("list") or []
+            if rows:
+                return self._to_order(self.client.parse_order(rows[0], market), symbol)
+        return None
 
 
-class HtxAdapter(CcxtAdapter):
-    name = "htx"
-    ccxt_id = "htx"
-    supports_testnet = False  # HTX has no reliable spot testnet; it stays on PaperExchange
-
-
-ADAPTERS = {"binance": BinanceAdapter, "htx": HtxAdapter}
+ADAPTERS = {"bybit": BybitAdapter}
 
 
 def make_adapter(name: str, settings: Settings, testnet: bool = False) -> CcxtAdapter:
     cls = ADAPTERS[name]
-    key_name = f"{name}_testnet" if testnet else name
+    key_name = f"{name}_demo" if testnet else name
     return cls(settings, keys=settings.keys.get(key_name), testnet=testnet)

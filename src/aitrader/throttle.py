@@ -33,5 +33,5 @@ class Throttle:
 
 
 # Conservative defaults, well under each exchange's published REST limits.
-# Binance spot: 6000 request weight/min per IP. HTX spot: ~100 requests/10s per key for market data.
-DEFAULT_RATES = {"binance": 10.0, "htx": 8.0}
+# Bybit: 600 requests per 5 s per IP for market data, 20/s per key for spot orders.
+DEFAULT_RATES = {"bybit": 8.0}

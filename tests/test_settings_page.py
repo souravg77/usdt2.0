@@ -36,10 +36,10 @@ def web(tmp_path, monkeypatch):
     def telegram(token, chat):
         calls.append(("telegram", token, chat))
 
-    async def binance(exchange, testnet, key, secret, settings):
-        calls.append(("binance", testnet, key))
-        if "binance" in down:
-            raise down["binance"]
+    async def bybit(exchange, testnet, key, secret, settings):
+        calls.append(("bybit", testnet, key))
+        if "bybit" in down:
+            raise down["bybit"]
         if not testnet:
             raise KeyRejected("this key can WITHDRAW funds")
 
@@ -47,7 +47,7 @@ def web(tmp_path, monkeypatch):
     runner = JobRunner(str(tmp_path / "jobs"), env_file=str(tmp_path / "none.env"))
     paths = Paths(keys_store=str(tmp_path / "data/settings/keys.enc"))
     app = create_app(Settings(db_path=str(tmp_path / "x.db")), auth, runner, paths, keys_secret=SECRET,
-                     checkers={"anthropic": anthropic, "telegram": telegram, "binance": binance})
+                     checkers={"anthropic": anthropic, "telegram": telegram, "bybit": bybit})
     client = TestClient(app)
     r = client.post("/login", data={"user": "admin", "password": PW}, follow_redirects=False)
     assert r.status_code == 303
@@ -90,19 +90,19 @@ def test_save_anthropic_key_encrypted_and_masked(web):
     assert secrets.SecretStore(SECRET, paths.keys_store).load() == {}
 
 
-def test_binance_keys_are_checked_with_the_exchange(web):
+def test_bybit_keys_are_checked_with_the_exchange(web):
     client, csrf, calls, paths, _ = web
-    r = client.post("/settings/keys/binance_testnet",
-                    data={"csrf": csrf, "BINANCE_TESTNET_API_KEY": "a" * 64})
+    r = client.post("/settings/keys/bybit_demo",
+                    data={"csrf": csrf, "BYBIT_DEMO_API_KEY": "a" * 64})
     assert "needs both" in r.text
-    r = client.post("/settings/keys/binance_testnet", data={
-        "csrf": csrf, "BINANCE_TESTNET_API_KEY": "a" * 64, "BINANCE_TESTNET_API_SECRET": "b" * 64})
-    assert "checked and saved" in r.text and ("binance", True, "a" * 64) in calls
-    r = client.post("/settings/keys/binance", data={
-        "csrf": csrf, "BINANCE_API_KEY": "c" * 64, "BINANCE_API_SECRET": "d" * 64})
+    r = client.post("/settings/keys/bybit_demo", data={
+        "csrf": csrf, "BYBIT_DEMO_API_KEY": "a" * 64, "BYBIT_DEMO_API_SECRET": "b" * 64})
+    assert "checked and saved" in r.text and ("bybit", True, "a" * 64) in calls
+    r = client.post("/settings/keys/bybit", data={
+        "csrf": csrf, "BYBIT_API_KEY": "c" * 64, "BYBIT_API_SECRET": "d" * 64})
     assert "WITHDRAW" in r.text  # a real key with withdrawal rights is refused
     saved = secrets.SecretStore(SECRET, paths.keys_store).load()
-    assert set(saved) == {"BINANCE_TESTNET_API_KEY", "BINANCE_TESTNET_API_SECRET"}
+    assert set(saved) == {"BYBIT_DEMO_API_KEY", "BYBIT_DEMO_API_SECRET"}
 
 
 def test_telegram_sends_a_test_message(web):
@@ -129,7 +129,7 @@ def test_setup_starts_one_job(web, monkeypatch):
     assert "Setup started" in r.text
     jobs = [j for j in runner.list() if j["meta"].get("kind") == "setup"]
     assert len(jobs) == 1
-    assert jobs[0]["steps"][0] == ["download", "--since", "2024-01-01", "--exchange", "binance"]
+    assert jobs[0]["steps"][0] == ["download", "--since", "2024-01-01", "--exchange", "bybit"]
     assert jobs[0]["steps"][1] == ["learn", "add-library", "--test"]
     r = client.post("/settings/setup", data={"csrf": csrf})
     assert "already running" in r.text
@@ -215,18 +215,18 @@ def test_keys_are_saved_when_the_check_cannot_run(web):
 
     client, csrf, calls, paths, _ = web
     client.down["anthropic"] = KeyUnverified("Anthropic didn't confirm the key (HTTP 529)")
-    client.down["binance"] = KeyUnverified("couldn't reach Binance to check the key (ExchangeNotAvailable)")
+    client.down["bybit"] = KeyUnverified("couldn't reach Bybit to check the key (ExchangeNotAvailable)")
 
     r = client.post("/settings/keys/anthropic", data={"csrf": csrf, "ANTHROPIC_API_KEY": KEY})
     assert "saved" in r.text and "HTTP 529" in r.text
     assert secrets.SecretStore(SECRET, paths.keys_store).load()["ANTHROPIC_API_KEY"] == KEY
-    r = client.post("/settings/keys/binance_testnet", data={
-        "csrf": csrf, "BINANCE_TESTNET_API_KEY": "a" * 64, "BINANCE_TESTNET_API_SECRET": "b" * 64})
-    assert "saved" in r.text and "BINANCE_TESTNET_API_KEY" in secrets.SecretStore(SECRET, paths.keys_store).load()
-    r = client.post("/settings/keys/binance", data={
-        "csrf": csrf, "BINANCE_API_KEY": "c" * 64, "BINANCE_API_SECRET": "d" * 64})
+    r = client.post("/settings/keys/bybit_demo", data={
+        "csrf": csrf, "BYBIT_DEMO_API_KEY": "a" * 64, "BYBIT_DEMO_API_SECRET": "b" * 64})
+    assert "saved" in r.text and "BYBIT_DEMO_API_KEY" in secrets.SecretStore(SECRET, paths.keys_store).load()
+    r = client.post("/settings/keys/bybit", data={
+        "csrf": csrf, "BYBIT_API_KEY": "c" * 64, "BYBIT_API_SECRET": "d" * 64})
     assert "Not saved" in r.text  # a real-money key needs its permissions confirmed
-    assert "BINANCE_API_KEY" not in secrets.SecretStore(SECRET, paths.keys_store).load()
+    assert "BYBIT_API_KEY" not in secrets.SecretStore(SECRET, paths.keys_store).load()
 
 
 def test_saved_keys_show_as_dots_and_can_be_tested_again(web):
@@ -259,12 +259,12 @@ def test_saved_keys_show_as_dots_and_can_be_tested_again(web):
 
 def test_check_and_save_with_empty_boxes_checks_the_saved_key(web):
     client, csrf, calls, paths, _ = web
-    r = client.post("/settings/keys/binance_testnet", data={"csrf": csrf})
+    r = client.post("/settings/keys/bybit_demo", data={"csrf": csrf})
     assert "paste the key first" in r.text  # nothing saved yet
-    client.post("/settings/keys/binance_testnet", data={
-        "csrf": csrf, "BINANCE_TESTNET_API_KEY": "a" * 64, "BINANCE_TESTNET_API_SECRET": "b" * 64})
+    client.post("/settings/keys/bybit_demo", data={
+        "csrf": csrf, "BYBIT_DEMO_API_KEY": "a" * 64, "BYBIT_DEMO_API_SECRET": "b" * 64})
     calls.clear()
-    r = client.post("/settings/keys/binance_testnet", data={
-        "csrf": csrf, "BINANCE_TESTNET_API_KEY": "", "BINANCE_TESTNET_API_SECRET": ""})
-    assert "Binance testnet: working." in r.text and calls == [("binance", True, "a" * 64)]
+    r = client.post("/settings/keys/bybit_demo", data={
+        "csrf": csrf, "BYBIT_DEMO_API_KEY": "", "BYBIT_DEMO_API_SECRET": ""})
+    assert "Bybit demo trading: working." in r.text and calls == [("bybit", True, "a" * 64)]
     assert "Last check: Working" in r.text

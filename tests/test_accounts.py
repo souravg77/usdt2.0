@@ -54,13 +54,13 @@ def test_keys_are_encrypted_and_live_needs_everything(tmp_path):
     st = UserStore(str(tmp_path / "a.db"))
     v = Vault(SECRET)
     u = st.create("ann@example.com", "a long enough password", status="active")
-    st.save_keys(v, u.id, "binance", True, API_KEY, API_SECRET, {"ok": 1})
-    assert st.load_keys(v, u.id, "binance", True) == (API_KEY, API_SECRET)
+    st.save_keys(v, u.id, "bybit", True, API_KEY, API_SECRET, {"ok": 1})
+    assert st.load_keys(v, u.id, "bybit", True) == (API_KEY, API_SECRET)
     raw = open(tmp_path / "a.db", "rb").read()
     assert API_KEY.encode() not in raw and API_SECRET.encode() not in raw
     assert st.key_info(u.id)[0]["hint"] == "…" + API_KEY[-4:]
     with pytest.raises(Exception):
-        st.load_keys(Vault("x" * 40), u.id, "binance", True)  # another secret can't read them
+        st.load_keys(Vault("x" * 40), u.id, "bybit", True)  # another secret can't read them
     with pytest.raises(AccountError):
         Vault("short")
     with pytest.raises(AccountError, match="admin"):
@@ -68,7 +68,7 @@ def test_keys_are_encrypted_and_live_needs_everything(tmp_path):
     st.allow_live(u.id, True)
     with pytest.raises(AccountError, match="real-account"):
         st.set_mode(u.id, "live", 100)
-    st.save_keys(v, u.id, "binance", False, API_KEY, API_SECRET, {})
+    st.save_keys(v, u.id, "bybit", False, API_KEY, API_SECRET, {})
     with pytest.raises(AccountError, match="budget"):
         st.set_mode(u.id, "live", 0)
     st.set_mode(u.id, "live", 250)
@@ -92,44 +92,51 @@ class KeyClient:
             raise type("AuthenticationError", (Exception,), {})("bad key")
         return {"free": {"USDT": 100.0}, "used": {}}
 
-    async def sapi_get_account_apirestrictions(self):
-        return self.r
+    async def private_get_v5_user_query_api(self):
+        return {"retCode": 0, "result": self.r}
 
     async def close(self):
         pass
 
 
-GOOD = {"enableWithdrawals": False, "enableSpotAndMarginTrading": True, "ipRestrict": True,
-        "enableMargin": False, "enableFutures": False, "enableInternalTransfer": False,
-        "permitsUniversalTransfer": False}
+# what Bybit's /v5/user/query-api returns for a good trade-only key
+GOOD = {"readOnly": 0, "ips": ["200.141.3.235"],
+        "permissions": {"Spot": ["SpotTrade"], "Wallet": [], "ContractTrade": [], "Derivatives": [],
+                        "Options": []}}
 
 
-@pytest.mark.parametrize("change,msg", [
-    ({"enableWithdrawals": True}, "WITHDRAW"),
-    ({"permitsUniversalTransfer": True}, "transfer"),
-    ({"enableFutures": True}, "futures"),
-    ({"enableSpotAndMarginTrading": False}, "Spot"),
-    ({"ipRestrict": False}, "IP"),
+def _perm(**p):
+    return {**GOOD, "permissions": {**GOOD["permissions"], **p}}
+
+
+@pytest.mark.parametrize("raw,msg", [
+    (_perm(Wallet=["AccountTransfer", "Withdraw"]), "WITHDRAW"),
+    (_perm(Wallet=["AccountTransfer"]), "transfer"),
+    (_perm(ContractTrade=["Order", "Position"]), "Derivatives"),
+    (_perm(Spot=[]), "SPOT Trade"),
+    ({**GOOD, "readOnly": 1}, "Read-Write"),
+    ({**GOOD, "ips": ["*"]}, "IP"),
+    ({**GOOD, "ips": []}, "IP"),
 ])
-def test_real_keys_with_risky_permissions_are_refused(change, msg):
+def test_real_keys_with_risky_permissions_are_refused(raw, msg):
     with pytest.raises(KeyRejected, match=msg):
-        run(verify_keys("binance", False, API_KEY, API_SECRET, Settings(), client=KeyClient({**GOOD, **change})))
+        run(verify_keys("bybit", False, API_KEY, API_SECRET, Settings(), client=KeyClient(raw)))
 
 
 def test_key_checks_pass_and_fail():
-    perms = run(verify_keys("binance", False, API_KEY, API_SECRET, Settings(), client=KeyClient(GOOD)))
-    assert perms["enableWithdrawals"] is False
-    assert run(verify_keys("binance", True, API_KEY, API_SECRET, Settings(mode=Mode.TESTNET),
+    perms = run(verify_keys("bybit", False, API_KEY, API_SECRET, Settings(), client=KeyClient(GOOD)))
+    assert perms["wallet"] == [] and perms["ip_restricted"] and perms["spot"] == ["SpotTrade"]
+    assert run(verify_keys("bybit", True, API_KEY, API_SECRET, Settings(mode=Mode.TESTNET),
                            client=KeyClient(fail=False)))
     with pytest.raises(KeyRejected, match="refused"):
-        run(verify_keys("binance", True, API_KEY, API_SECRET, Settings(), client=KeyClient(fail=True)))
-    with pytest.raises(KeyUnverified, match="couldn't reach Binance testnet") as err:
-        run(verify_keys("binance", True, API_KEY, API_SECRET, Settings(), client=KeyClient(fail="network")))
+        run(verify_keys("bybit", True, API_KEY, API_SECRET, Settings(), client=KeyClient(fail=True)))
+    with pytest.raises(KeyUnverified, match="couldn't reach Bybit demo trading") as err:
+        run(verify_keys("bybit", True, API_KEY, API_SECRET, Settings(), client=KeyClient(fail="network")))
     assert "signature" not in str(err.value)  # the request URL is never echoed
     with pytest.raises(KeyRejected, match="supported"):
         run(verify_keys("htx", False, API_KEY, API_SECRET, Settings(), client=KeyClient(GOOD)))
     with pytest.raises(KeyRejected):
-        run(verify_keys("binance", True, "short", API_SECRET, Settings(), client=KeyClient()))
+        run(verify_keys("bybit", True, "short", API_SECRET, Settings(), client=KeyClient()))
 
 
 # ---- web --------------------------------------------------------------------------------------
@@ -240,7 +247,7 @@ def test_live_switch(site, monkeypatch):
     page = locked.get("/me").text
     assert "Live trading <b>OFF</b>" in page and "admin hasn" in page and "live lock is closed" in page
     users.allow_live(u.id, True)
-    users.save_keys(Vault(SECRET), u.id, "binance", False, API_KEY, API_SECRET, {})
+    users.save_keys(Vault(SECRET), u.id, "bybit", False, API_KEY, API_SECRET, {})
     unlocked = Settings(mode=Mode.LIVE, live_unlocked=True, live_confirm=LIVE_CONFIRM_PHRASE)
     client, _ = make(settings=unlocked)
     _login(client, "bob@example.com", "a long enough password")
@@ -300,8 +307,8 @@ def test_users_runner_trades_each_account_separately(tmp_path):
     a = st.create("a@example.com", "a long enough password", status="active")
     b = st.create("b@example.com", "a long enough password", status="active")
     c = st.create("c@example.com", "a long enough password")  # pending: has no keys anyway
-    st.save_keys(v, a.id, "binance", True, "A" * 20, "x" * 20, {})
-    st.save_keys(v, b.id, "binance", True, "B" * 20, "y" * 20, {})
+    st.save_keys(v, a.id, "bybit", True, "A" * 20, "x" * 20, {})
+    st.save_keys(v, b.id, "bybit", True, "B" * 20, "y" * 20, {})
     st.allow_live(b.id, True)  # live allowed, but the platform lock is closed -> still testnet
     platform = Control(str(tmp_path / "platform.json"))
     runner = UsersRunner(st, v, Settings(), str(paper), root=str(tmp_path / "users"),
@@ -358,8 +365,8 @@ def test_switching_live_off_sells_live_positions(tmp_path):
         return adapters[k]
 
     u = st.create("a@example.com", "a long enough password", status="active")
-    st.save_keys(v, u.id, "binance", True, "T" * 20, "x" * 20, {})
-    st.save_keys(v, u.id, "binance", False, "R" * 20, "y" * 20, {})
+    st.save_keys(v, u.id, "bybit", True, "T" * 20, "x" * 20, {})
+    st.save_keys(v, u.id, "bybit", False, "R" * 20, "y" * 20, {})
     st.allow_live(u.id, True)
     st.set_mode(u.id, "live", 300)
     live = Settings(mode=Mode.LIVE, live_unlocked=True, live_confirm=LIVE_CONFIRM_PHRASE)

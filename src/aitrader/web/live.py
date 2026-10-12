@@ -1,8 +1,8 @@
-"""Live market data for the dashboard's charts, straight from Binance's public API.
+"""Live market data for the dashboard's charts, straight from Bybit's public API.
 
 One shared, keyless ccxt client serves every viewer. Answers are cached for about a second, so
-however many browsers poll, Binance sees at most one request per pair and timeframe per second
-(far under its public rate limits). When Binance can't be reached, the candles saved by the
+however many browsers poll, Bybit sees at most one request per pair and timeframe per second
+(far under its public rate limits). When Bybit can't be reached, the candles saved by the
 ``collector`` service are served instead, and the answer says so.
 """
 
@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import time
 
+from ..config import EXCHANGE
 from ..data.store import CandleStore
 
 CACHE_S = 1.0
@@ -18,7 +19,7 @@ LIMIT = 200
 
 
 class LiveMarket:
-    def __init__(self, db_path: str, exchange: str = "binance", client=None, clock=time.monotonic):
+    def __init__(self, db_path: str, exchange: str = EXCHANGE, client=None, clock=time.monotonic):
         self.db_path, self.exchange = db_path, exchange
         self._client, self._clock = client, clock
         self._cache: dict[tuple, tuple[float, dict]] = {}
@@ -50,7 +51,7 @@ class LiveMarket:
             try:
                 rows = await asyncio.wait_for(
                     self.client().fetch_ohlcv(symbol, timeframe, limit=limit), timeout=8)
-                return {"source": "binance", "candles": [r[:6] for r in rows]}
+                return {"source": "live", "candles": [r[:6] for r in rows]}
             except Exception as exc:
                 return {"source": "database", "note": _why(exc),
                         "candles": self._saved(symbol, timeframe, limit)}
@@ -63,7 +64,7 @@ class LiveMarket:
                 rows = [{"symbol": s, "price": t.get("last"), "change": t.get("percentage"),
                          "high": t.get("high"), "low": t.get("low"), "volume": t.get("quoteVolume")}
                         for s in symbols if (t := raw.get(s))]
-                return {"source": "binance", "tickers": rows}
+                return {"source": "live", "tickers": rows}
             except Exception as exc:
                 return {"source": "database", "note": _why(exc), "tickers": self._saved_tickers(symbols)}
         return await self._cached(("t", tuple(symbols)), fetch)
@@ -98,4 +99,4 @@ class LiveMarket:
 
 
 def _why(exc: Exception) -> str:
-    return f"Binance not reachable right now ({type(exc).__name__}); showing saved prices"
+    return f"Bybit not reachable right now ({type(exc).__name__}); showing saved prices"

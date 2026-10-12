@@ -17,7 +17,7 @@ from fastapi.responses import PlainTextResponse, RedirectResponse
 from ..accounts import AccountError, KeyRejected, UserStore, Vault, verify_keys
 from ..accounts.live import gate_problems, live_stop_control, turn_off, turn_on
 from ..accounts.runner import user_control, user_dir
-from ..config import LIVE_CONFIRM_PHRASE
+from ..config import EXCHANGE, LIVE_CONFIRM_PHRASE
 from ..safety import live_gate_problems
 from .app import _csrf, _e, _equity_svg, _load_json, _positions_table, _q, _trades_table, _when
 
@@ -79,7 +79,7 @@ def add_user_routes(app, *, settings, auth, paths, users: UserStore, keys_secret
 <label>Password (at least 12 characters) <input name="password" type="password" autocomplete="new-password" minlength="12" required></label>
 <label>Password again <input name="password2" type="password" autocomplete="new-password" required></label>
 <label class="row"><input type="checkbox" name="agree" value="1" required> I understand that crypto
-trading can lose money, that the agent trades on the testnet until live trading is allowed for
+trading can lose money, that the agent trades on Bybit demo trading until live trading is allowed for
 my account, and that I keep my exchange key without withdrawal rights.</label>
 <button>Create account</button></form>
 <p>Already have an account? <a href="/login">Log in</a></p>""")
@@ -129,7 +129,7 @@ my account, and that I keep my exchange key without withdrawal rights.</label>
         else:
             status = '<b class="good">active</b>'
         mode = ('<b class="bad">LIVE (real money)</b>' if user.mode == "live" and user.live_allowed and live_open
-                else "<b>testnet</b> (fake money)")
+                else "<b>demo trading</b> (fake money)")
         if ctl["killed"]:
             sw = '<b class="bad">KILL SWITCH ON</b>'
         elif ctl["paused"]:
@@ -147,7 +147,7 @@ my account, and that I keep my exchange key without withdrawal rights.</label>
                 'placeholder="KILL"></label><button class="danger">Pull the kill switch</button></form></div>')
 
         rows = "".join(
-            f'<tr><td>{_e(k["exchange"])} {"testnet" if k["testnet"] else "real account"}</td>'
+            f'<tr><td>{_e(k["exchange"])} {"demo trading" if k["testnet"] else "real account"}</td>'
             f'<td><code>{_e(k["hint"])}</code></td><td>{_when(k["added"])}</td><td>'
             f'<form method="post" action="/me/keys/delete" class="inline">{csrf}'
             f'<input type="hidden" name="net" value="{"testnet" if k["testnet"] else "live"}">'
@@ -160,13 +160,13 @@ my account, and that I keep my exchange key without withdrawal rights.</label>
             key_form = "<p class=bad>The platform isn't set up to store keys yet (the admin must set AITRADER_KEYS_SECRET).</p>"
         else:
             key_form = f"""<form method="post" action="/me/keys">{csrf}
-<label>Exchange <select name="exchange"><option value="binance">Binance</option></select></label>
-<label>Account <select name="net"><option value="testnet">Testnet (fake money, start here)</option>
+<label>Exchange <select name="exchange"><option value="bybit">Bybit</option></select></label>
+<label>Account <select name="net"><option value="testnet">Demo trading (fake money, start here)</option>
 <option value="live">Real account</option></select></label>
 <label>API key <input name="api_key" autocomplete="off" required></label>
 <label>Secret key <input name="secret" type="password" autocomplete="off" required></label>
-<p class="small muted">Real-account keys are refused unless withdrawals, transfers, margin and
-futures are off, spot trading is on, and the key is restricted to the server's IP. Keys are
+<p class="small muted">Real-account keys are refused unless the key is Read-Write with only SPOT
+trade ticked (no withdrawals, transfers or contracts) and bound to the server's IP. Keys are
 stored encrypted and never shown again.</p>
 <button>Check and connect</button></form>"""
         keys_card = f'<div class="card"><h3>Exchange keys</h3>{keys_table}{key_form}</div>'
@@ -178,7 +178,7 @@ stored encrypted and never shown again.</p>
             live_body = (f'<p class="switch on">Live trading <b>ON</b> · budget cap <b>{user.pilot_max_usdt or 0:,.2f} USDT</b></p>'
                          f'<form method="post" action="/me/live/off">{csrf}<button class="danger">'
                          'Turn live trading OFF now</button></form><p class="small muted">Instant: no new real-money '
-                         'trades, the agent sells what it bought on your real account and goes back to the testnet.</p>')
+                         'trades, the agent sells what it bought on your real account and goes back to demo trading.</p>')
         else:
             why = []
             if user.status != "active":
@@ -189,7 +189,7 @@ stored encrypted and never shown again.</p>
                 why.append("the platform's live lock is closed")
             gp = gate_problems(golive()) if live_open else []
             why += gp[:1]
-            if not users.key_info(user.id, "binance", testnet=False):
+            if not users.key_info(user.id, EXCHANGE, testnet=False):
                 why.append("connect a real-account key first")
             sell = '<p class="bad small">Selling the positions from your last live session.</p>' if draining else ""
             if why:
@@ -220,7 +220,7 @@ stored encrypted and never shown again.</p>
         return page("My account", "".join(body), user.email, token, refresh=None, nav_links=USER_NAV)
 
     @app.post("/me/keys")
-    async def my_keys(request: Request, csrf: str = Form(""), exchange: str = Form("binance"),
+    async def my_keys(request: Request, csrf: str = Form(""), exchange: str = Form(EXCHANGE),
                       net: str = Form("testnet"), api_key: str = Form(""), secret: str = Form("")):
         user, resp = checked(request, csrf)
         if resp:
@@ -235,7 +235,7 @@ stored encrypted and never shown again.</p>
             return back(error=f"Key not connected: {exc}")
         users.save_keys(v, user.id, exchange, testnet, api_key, secret, perms)
         users.log(user.id, user.email, "key_added", f"{exchange} {'testnet' if testnet else 'real account'}")
-        return back(msg=f"{exchange.title()} {'testnet' if testnet else 'real-account'} key connected.")
+        return back(msg=f"{exchange.title()} {'demo trading' if testnet else 'real-account'} key connected.")
 
     @app.post("/me/keys/delete")
     def my_keys_delete(request: Request, csrf: str = Form(""), net: str = Form("testnet")):
@@ -244,7 +244,7 @@ stored encrypted and never shown again.</p>
             return resp
         if net == "live":
             turn_off(users, users_dir, user.id, actor=user.email, reason="real-account key removed", events=events())
-        users.delete_keys(user.id, "binance", net != "live")
+        users.delete_keys(user.id, EXCHANGE, net != "live")
         users.log(user.id, user.email, "key_removed", "testnet" if net != "live" else "real account")
         return back(msg="Key removed. Remove it on the exchange too if you no longer use it.")
 

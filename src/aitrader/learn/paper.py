@@ -217,6 +217,10 @@ class PaperTrader:
     def _manage_open(self, reg: Registry, now_ms: int, events: dict) -> None:
         for key, pos in list(self.state["open"].items()):
             entry_id, ex, sym, tf = key.split("|")
+            if ex not in self.exchanges:  # an exchange no longer used: its prices stopped updating
+                del self.state["open"][key]
+                log.info("paper %s dropped: %s is no longer one of the exchanges", key, ex)
+                continue
             sig = _sig_from(pos["signal"])
             step = TIMEFRAME_MS[tf]
             df = self._frame(ex, sym, tf, sig.ts - WINDOW_BARS * step, now_ms)

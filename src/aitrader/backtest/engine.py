@@ -22,7 +22,7 @@ from ..strategies.base import Signal, Strategy
 
 @dataclass
 class BacktestConfig:
-    taker_fee: float = 0.001  # Binance spot base rate 0.1%
+    taker_fee: float = 0.001  # Bybit spot base rate (non-VIP) 0.1%
     maker_fee: float = 0.001
     slippage_bps: float = 5.0
     funding_rate_8h: float = 0.0  # set e.g. 0.0001 to charge perps funding on longs

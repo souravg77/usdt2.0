@@ -1,7 +1,7 @@
 # Phases 5 and 6: testnet, alerts, the go/no-go gate and the live pilot
 
 The paper service (`learn paper`) decides every trade. The **executor** copies those decisions to
-an exchange with real orders: first on the Binance Spot **testnet** (fake money), and only after
+an exchange with real orders: first on Bybit **Demo Trading** (real market prices, demo funds), and only after
 the go/no-go gate and your approval, on your real account with a small **pilot** budget.
 
 Nothing in this document happens on its own. Each step that moves closer to real money is a
@@ -15,7 +15,7 @@ command you run on the VPS.
 | `context` | funding, open interest, total market cap ([market-context.md](market-context.md)) | `docker compose up -d` |
 | `paper` | finds signals, applies the calendar, market-context and AI filters, paper-trades them | `docker compose up -d` |
 | `web` | dashboard, including the Trading page with the kill switch | `docker compose up -d` |
-| `executor-testnet` | copies paper trades to the Binance testnet | `docker compose --profile testnet up -d executor-testnet` |
+| `executor-testnet` | copies paper trades to Bybit Demo Trading | `docker compose --profile testnet up -d executor-testnet` |
 | `telegram` | alerts, daily summary, weekly report, `/status /pause /resume /kill` | `docker compose --profile telegram up -d telegram` |
 | `executor-live` | the live pilot (real money) | only after step 6 below |
 
@@ -58,26 +58,31 @@ docker compose run --rm collector trade kill --confirm
 The dashboard's **Trading** page has the same buttons (the kill switch needs you to type `KILL`),
 and so does Telegram (`/pause`, `/resume`, `/kill CONFIRM`).
 
-## Step 1: testnet keys and the testnet executor
+## Step 1: demo keys and the testnet executor
 
-Follow the Binance guide for testnet keys and put them in `.env` (`BINANCE_TESTNET_API_KEY`,
-`BINANCE_TESTNET_API_SECRET`). Then:
+Make a Bybit Demo Trading key: log in at bybit.com, switch to **Demo Trading**, then avatar →
+**API** → create a key. Save it on the dashboard's Settings page (group "Bybit demo trading") or
+put it in `.env` (`BYBIT_DEMO_API_KEY`, `BYBIT_DEMO_API_SECRET`). Demo funds can be requested in
+the demo account (up to 100,000 USDT per request). Then:
 
 ```bash
 docker compose --profile testnet up -d executor-testnet
 docker compose logs -f executor-testnet
 ```
 
-The service runs with `AITRADER_MODE=testnet`, so it can only reach the testnet. When the paper
-service opens a position on Binance, the executor buys it on the testnet within about 15
-seconds, sized by the risk engine. It sells when the paper trade closes, or at once if the testnet
-price is at or below the stop. Each fill is compared with its paper twin, so slippage is
+The service runs with `AITRADER_MODE=testnet`, so it can only reach Bybit Demo Trading
+(api-demo.bybit.com). When the paper service opens a position on Bybit, the executor buys it on
+the demo account within about 15 seconds, sized by the risk engine. It sells when the paper trade
+closes, or at once if the price is at or below the stop. Each fill is compared with its paper twin, so slippage is
 measured.
 
 How failures are handled:
 
-- Every order has a client id made from the signal and is saved before it is sent. After a
-  timeout or a restart, the executor looks the id up instead of buying twice.
+- Orders are spot market orders, sized in the coin (`marketUnit=baseCoin`) and never borrowed
+  (`isLeverage=0`).
+- Every order has a client id made from the signal (sent as Bybit's 32-character `orderLinkId`)
+  and is saved before it is sent. After a timeout or a restart, the executor looks the id up in
+  open orders, then in order history, instead of buying twice.
 - Partial fills are recorded; the position is the amount actually bought.
 - A rejected order is logged and that signal is not retried.
 - If the exchange is unreachable 3 times in a row you get a disconnect alert; new entries wait,
@@ -85,8 +90,11 @@ How failures are handled:
 - If the paper service stops writing for 5 minutes, new entries stop until it is back.
 - Signals older than 2 bars are skipped rather than chased.
 - After a restart, every open position is checked against the account balance.
+- Positions recorded on Binance before the switch to Bybit are no longer managed. The executor
+  moves them to `other_exchange` in its state file and logs a warning. Close them by hand on
+  Binance if any are left.
 
-**Test the kill switch on the testnet** once a position is open:
+**Test the kill switch on demo trading** once a position is open:
 `docker compose run --rm collector trade kill --confirm`. Check that the testnet executor sold it,
 then `trade resume`. The go/no-go gate looks for this test in the event log.
 
@@ -99,7 +107,7 @@ then `trade resume`. The go/no-go gate looks for this test in the event log.
 4. `docker compose run --rm collector telegram --test` sends a test message.
 5. `docker compose --profile telegram up -d telegram`.
 
-You get testnet and live trades, paper closes, errors, crashes, disconnects, risk pauses, the
+You get demo (testnet) and live trades, paper closes, errors, crashes, disconnects, risk pauses, the
 kill switch, a daily summary just after 00:00 UTC, and the weekly report. The bot only obeys
 commands from your chat id.
 
@@ -134,8 +142,8 @@ prints every criterion with PASS or FAIL:
 | Max drawdown in paper | ≤ 10R, your live loss limit (`AITRADER_GATE_MAX_DRAWDOWN_R`) |
 | Paper vs backtest gap | ≤ 0.15R (`AITRADER_GATE_MAX_GAP_R`) |
 | Stability | no crash and no heartbeat gap over 30 min for 14 days (`AITRADER_GATE_STABLE_DAYS`) |
-| Security: keys | you confirm trade-only keys, no withdrawal, IP whitelist, 2FA |
-| Security: kill switch tested | a testnet kill-switch run in the last 30 days |
+| Security: keys | you confirm trade-only keys, no withdrawal or transfer, bound to IPs, 2FA |
+| Security: kill switch tested | a demo-trading (testnet) kill-switch run in the last 30 days |
 
 Confirm the manual items once they are true:
 
@@ -163,7 +171,14 @@ the live executor stops opening trades for it until you check the gate and appro
 
 Real orders need all of these, and the code checks every one before each order:
 
-1. Real Binance keys in `.env` (trade only, withdrawals off, VPS IP whitelisted).
+1. A real Bybit key, on the Settings page (group "Bybit real account") or in `.env`
+   (`BYBIT_API_KEY`, `BYBIT_API_SECRET`). Use a dedicated sub-account. The key is checked with
+   Bybit's `/v5/user/query-api` and refused unless:
+   - it is Read-Write;
+   - its Spot permission includes SpotTrade;
+   - it has no Wallet permissions at all (no Withdraw, no AccountTransfer or SubMemberTransfer);
+   - it has no ContractTrade, Derivatives or Options permissions;
+   - it is bound to IPs (the VPS IP), not open to every IP.
 2. `AITRADER_PILOT_MAX_USDT` set to the most the pilot may use (the roadmap suggests 5-10% of
    what you plan to trade). The executor treats this as its whole account.
 3. The live lock, in `.env`:
@@ -193,6 +208,8 @@ To go back to paper at any time: `trade kill --confirm` (sells the pilot's posit
 
 ## Compliance
 
-Check that spot crypto trading on your exchange is legal where you live, how gains are taxed, and
-keep the trade records (`data/trade/live_state.json` has every order and fill; back it up). This
-software gives no financial advice and can lose money.
+Check that spot crypto trading on Bybit is legal where you live, and that Bybit serves both your
+country and the server's country. Bybit restricts some countries (for example the USA, the UK,
+Canada/Ontario and Singapore) and blocks API calls from restricted regions; read Bybit's terms.
+Also check how gains are taxed, and keep the trade records (`data/trade/live_state.json` has
+every order and fill; back it up). This software gives no financial advice and can lose money.

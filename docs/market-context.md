@@ -7,16 +7,16 @@ can veto a new entry or shrink its size, but they never create one.
 
 | metric | source | refresh | stored as |
 |---|---|---|---|
-| `funding_rate` | Binance USD-M perpetual, ccxt `fetch_funding_rate_history` | 8h | fraction per 8h (0.0001 = 0.01%) |
-| `open_interest` | Binance USD-M, ccxt `fetch_open_interest_history` (1h; Binance keeps 30 days) | 1h | coins |
-| `long_short_ratio` | Binance global long/short account ratio (skipped if ccxt does not expose it) | 1h | ratio |
+| `funding_rate` | Bybit USDT perpetual, ccxt `fetch_funding_rate_history` | 8h | fraction per 8h (0.0001 = 0.01%) |
+| `open_interest` | Bybit USDT perpetual, ccxt `fetch_open_interest_history` (1h; the last 29 days are fetched) | 1h | coins |
+| `long_short_ratio` | Bybit long/short account ratio (skipped if ccxt does not expose it) | 1h | ratio |
 | `btc_dominance` | CoinGecko `/api/v3/global` | 1h | percent |
 | `total_mcap` | CoinGecko `/api/v3/global` | 1h | USD |
 | `total_mcap_change_24h` | CoinGecko `/api/v3/global` | 1h | fraction (-0.08 = -8%) |
 | `stable_mcap` | CoinGecko `/api/v3/coins/markets?ids=tether,usd-coin` | 1h | USD (USDT + USDC) |
 
 Spot pairs map to the perpetual (`BTC/USDT` -> `BTC/USDT:USDT`), but rows are stored under the
-spot symbol and `exchange="binance"`. Global metrics use `exchange="global", symbol="*"`. All of it
+spot symbol and `exchange="bybit"`. Global metrics use `exchange="global", symbol="*"`. All of it
 lives in the `context` table of the candle database (schema migration v2). Neither source needs
 an API key.
 
@@ -39,8 +39,6 @@ aitrader context show --symbol BTC/USDT   # latest values and the filter's decis
 - a series older than **twice its refresh interval** is ignored and its rule skipped. Missing or
   stale data never blocks a trade.
 
-HTX markets use the Binance perpetual's funding and open interest (they track the same coin).
-
 ### Why these are conservative
 
 The thresholds sit well outside normal conditions (typical BTC funding is +0.01% per 8h), so the
@@ -62,4 +60,4 @@ call it automatically once the context table has rows, so the Phase 4 model's `f
 
 On-chain exchange flows, active addresses, liquidation data and news sentiment need paid or keyed
 sources (Glassnode, CryptoQuant, Coinglass, news APIs), so they are left out for now. Open-interest
-history only goes back 30 days on Binance, so older backtests have no open interest.
+history is only fetched for the last 29 days, so older backtests have no open interest.

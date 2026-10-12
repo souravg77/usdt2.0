@@ -1,4 +1,4 @@
-"""The Markets page: live prices and candles from Binance's public API (cached ~1s), saved
+"""The Markets page: live prices and candles from Bybit's public API (cached ~1s), saved
 candles as the fallback, and the page that draws them."""
 
 import asyncio
@@ -17,7 +17,7 @@ NOW = 1_760_000_000_000  # ms
 HOUR = 3_600_000
 
 
-class FakeBinance:
+class FakeBybit:
     def __init__(self):
         self.calls = []
         self.down = False
@@ -45,12 +45,12 @@ def world(tmp_path, monkeypatch):
     db = str(tmp_path / "aitrader.db")
     store = CandleStore(db)
     store.migrate()
-    store.upsert([Candle("binance", "BTC/USDT", "1h", NOW - (30 - i) * HOUR - HOUR, 100 + i, 101 + i,
+    store.upsert([Candle("bybit", "BTC/USDT", "1h", NOW - (30 - i) * HOUR - HOUR, 100 + i, 101 + i,
                          99 + i, 100.5 + i, 1) for i in range(30)])
     store.close()
     settings = Settings(db_path=db, symbols=["BTC/USDT", "ETH/USDT"], timeframes=["1m", "1h", "1d"])
     clock = [0.0]
-    fake = FakeBinance()
+    fake = FakeBybit()
     live = LiveMarket(db, client=fake, clock=lambda: clock[0])
     app = create_app(settings, Auth("admin", PW, "k"), JobRunner(str(tmp_path / "j"), env_file="none"), live=live)
     import aitrader.web.market_pages as mp
@@ -86,15 +86,15 @@ def test_markets_page_loads_the_live_chart(world):
     assert "<script>" not in r.text.replace('<script src="/static/market.js" defer></script>', "")
 
 
-def test_market_api_reads_binance_once_per_second(world):
+def test_market_api_reads_bybit_once_per_second(world):
     client, fake, clock = world
     login(client)
     r = client.get("/api/market/candles?symbol=BTC/USDT&tf=1m").json()
-    assert r["source"] == "binance" and len(r["candles"]) == 3 and r["candles"][-1][4] == 102.5
+    assert r["source"] == "live" and len(r["candles"]) == 3 and r["candles"][-1][4] == 102.5
     t = client.get("/api/market/tickers").json()
     assert t["tickers"][0] == {"symbol": "BTC/USDT", "price": 62000.5, "change": 1.25, "high": 63000,
                                "low": 61000, "volume": 1.5e9}
-    for _ in range(5):  # many viewers within a second: one request to Binance
+    for _ in range(5):  # many viewers within a second: one request to Bybit
         client.get("/api/market/candles?symbol=BTC/USDT&tf=1m")
         client.get("/api/market/tickers")
     assert fake.calls.count(("ohlcv", "BTC/USDT", "1m")) == 1 and len(fake.calls) == 2
@@ -116,7 +116,7 @@ def test_market_api_falls_back_to_saved_candles(world):
 
 
 def test_live_market_shares_one_request(tmp_path):
-    fake = FakeBinance()
+    fake = FakeBybit()
     live = LiveMarket(str(tmp_path / "x.db"), client=fake, clock=lambda: 0.0)
 
     async def many():

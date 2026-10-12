@@ -1,4 +1,4 @@
-// Live Markets page: polls the dashboard's /api/market endpoints (which read Binance's public
+// Live Markets page: polls the dashboard's /api/market endpoints (which read Bybit's public
 // API, cached ~1s on the server) every 1.5 seconds and draws a candlestick chart on a canvas.
 (function () {
   "use strict";
@@ -68,10 +68,10 @@
   function status() {
     if (!state.lastOk) { statusEl.innerHTML = '<span class="dot"></span> Connecting…'; return; }
     var age = (Date.now() - state.lastOk) / 1000;
-    var live = state.source === "binance" && age < 10;
+    var live = state.source === "live" && age < 10;
     statusEl.className = "live-status " + (live ? "on" : "off");
     statusEl.innerHTML = '<span class="dot"></span> ' +
-      (live ? "Live · Binance" : state.source === "database" ? "Saved prices" : "Reconnecting") +
+      (live ? "Live · Bybit" : state.source === "database" ? "Saved prices" : "Reconnecting") +
       " · updated " + (age < 1 ? "just now" : age.toFixed(0) + "s ago") +
       (state.note ? '<span class="muted"> · ' + escapeHtml(state.note) + "</span>" : "");
   }

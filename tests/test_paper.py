@@ -1,12 +1,12 @@
 import pytest
 
-from aitrader.exchanges import BinanceAdapter, PaperExchange
+from aitrader.exchanges import BybitAdapter, PaperExchange
 from aitrader.models import OrderStatus, OrderType, Side
 
 
 @pytest.fixture
 def paper(settings, fake_ccxt):
-    market = BinanceAdapter(settings, client=fake_ccxt())  # bid 100 / ask 101
+    market = BybitAdapter(settings, client=fake_ccxt())  # bid 100 / ask 101
     return PaperExchange(market, settings)
 
 
