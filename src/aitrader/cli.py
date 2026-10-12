@@ -181,6 +181,42 @@ def cmd_signals(s: Settings, args) -> int:
     return 0
 
 
+def cmd_indicators(s: Settings, args) -> int:
+    """The 20 standard indicators on the last closed candle of a stored series (Phase 3)."""
+    from .data.context import ContextStore, attach_context, has_context
+    from .indicators import candles_to_frame
+    from .indicators.results import closed_only, evaluate_all
+    from .models import TIMEFRAME_MS
+
+    store = CandleStore(s.db_path)
+    try:
+        candles = store.load(args.exchange, args.symbol, args.timeframe)
+        if not candles:
+            print("no candles stored for that series; run `aitrader download` first", file=sys.stderr)
+            return 1
+        df = closed_only(candles_to_frame(candles), int(time.time() * 1000), TIMEFRAME_MS[args.timeframe])
+        if has_context(store):
+            ctx = ContextStore(s.db_path)
+            try:
+                df = attach_context(df, ctx, args.exchange, args.symbol, args.timeframe)
+            finally:
+                ctx.close()
+    finally:
+        store.close()
+    res = evaluate_all(df)
+    if args.json:
+        print(json.dumps({k: r.as_dict() for k, r in res.items()}, default=str, indent=1))
+        return 0
+    print(f"{args.symbol} {args.timeframe}, last closed candle {_fmt(int(df['ts'].iloc[-1]))} UTC")
+    side = {1: "bullish", -1: "bearish", 0: "neutral"}
+    for name, r in res.items():
+        main = next(iter(r.features.items()), ("", float("nan")))
+        note = r.metadata.get("zone") or r.metadata.get("regime") or r.metadata.get("bias") or ""
+        print(f"  {name:15} {side[r.direction] if r.is_valid else 'not valid':10} conf {r.confidence:4.2f}  "
+              f"{main[0]}={main[1]:.6g}  {note}{'' if r.is_valid else f' (needs {r.warmup_period} bars)'}")
+    return 0
+
+
 def cmd_backtest(s: Settings, args) -> int:
     """Backtest one strategy on stored candles: in-sample / out-of-sample / final-test split,
     monthly results calendar and a trades CSV (Phase 3)."""
@@ -1190,6 +1226,13 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--symbol", default="BTC/USDT")
     ps.add_argument("--usdt", type=float, default=100.0)
 
+    ind = sub.add_parser("indicators", help="the 20 standard indicators (direction, confidence, validity) "
+                         "on the last closed candle of a stored series")
+    ind.add_argument("--exchange", default=EXCHANGE, choices=EXCHANGES)
+    ind.add_argument("--symbol", default="BTC/USDT")
+    ind.add_argument("--timeframe", default="1h")
+    ind.add_argument("--json", action="store_true")
+
     sg = sub.add_parser("signals", help="run a strategy over stored candles and save its signal log")
     sg.add_argument("--strategy", required=True)
     sg.add_argument("--exchange", default=EXCHANGE, choices=EXCHANGES)
@@ -1438,6 +1481,7 @@ def main(argv: list[str] | None = None) -> int:
         "stream": cmd_stream,
         "paper-smoke": cmd_paper_smoke,
         "signals": cmd_signals,
+        "indicators": cmd_indicators,
         "strategies": cmd_strategies,
         "backtest": cmd_backtest,
         "calendar": cmd_calendar,
