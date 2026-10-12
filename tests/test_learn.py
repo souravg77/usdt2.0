@@ -79,13 +79,13 @@ def test_spec_id_ignores_prose():
 def test_rule_strategy_signals_and_no_lookahead():
     strat = RuleStrategy(SPEC)
     df = synthetic()
-    sigs = strat.generate(df, "binance", "BTC/USDT", "1h")
+    sigs = strat.generate(df, "bybit", "BTC/USDT", "1h")
     assert sigs and all(s.stop < s.entry < s.target for s in sigs)
     assert sigs[0].trailing == "rsi>70|time_stop=48"
-    part = strat.generate(df.iloc[:1000], "binance", "BTC/USDT", "1h")
+    part = strat.generate(df.iloc[:1000], "bybit", "BTC/USDT", "1h")
     cut = int(df.ts.iloc[1000])
     assert [s.ts for s in sigs if s.ts <= cut] == [s.ts for s in part]
-    assert run_backtest(strat, df, "binance", "BTC/USDT", "1h")
+    assert run_backtest(strat, df, "bybit", "BTC/USDT", "1h")
 
 
 def test_crosses_above_and_within():
@@ -136,7 +136,7 @@ def test_claude_caller_needs_key(monkeypatch):
 # ---- backtest gate and paper trading -------------------------------------------------------------
 
 
-def fill_store(store, df, ex="binance", sym="BTC/USDT", tf="1h"):
+def fill_store(store, df, ex="bybit", sym="BTC/USDT", tf="1h"):
     store.upsert(Candle(ex, sym, tf, int(r.ts), r.open, r.high, r.low, r.close, r.volume)
                  for r in df.itertuples())
 
@@ -154,12 +154,12 @@ def test_evaluate_moves_status(tmp_path):
     store = CandleStore(str(tmp_path / "c.db"))
     fill_store(store, synthetic())
     e = Entry(id="r", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR))
-    res = evaluate(e, store, ["binance"], ["BTC/USDT"], gate=Gate(min_expectancy_oos=-99,
+    res = evaluate(e, store, ["bybit"], ["BTC/USDT"], gate=Gate(min_expectancy_oos=-99,
                    min_profit_factor_oos=0, max_drawdown_oos=1e9, min_expectancy_in=-99,
                    min_trades_in=10, min_trades_oos=10, min_t_oos=-99))
     assert e.status == "paper" and res["out_of_sample"]["trades"] >= 10
     e2 = Entry(id="r2", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR))
-    evaluate(e2, store, ["binance"], ["BTC/USDT"], gate=Gate(min_expectancy_oos=5))
+    evaluate(e2, store, ["bybit"], ["BTC/USDT"], gate=Gate(min_expectancy_oos=5))
     assert e2.status == "rejected" and "expectancy" in e2.history[-1]["why"]
     e3 = Entry(id="r3", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR))
     evaluate(e3, store, ["htx"], ["BTC/USDT"])
@@ -178,7 +178,7 @@ def test_paper_trading_matches_backtest(tmp_path):
     reg.save()
     cfg = PaperConfig(retire=__import__("aitrader.learn", fromlist=["RetireRule"]).RetireRule(
         min_trades=10_000, max_drawdown=1e9))
-    trader = PaperTrader(store, reg_path, ["binance"], ["BTC/USDT"], cfg,
+    trader = PaperTrader(store, reg_path, ["bybit"], ["BTC/USDT"], cfg,
                          state_path=str(tmp_path / "state.json"))
     start = 600
     for i in range(start, len(df)):  # the clock moves one closed bar at a time
@@ -187,7 +187,7 @@ def test_paper_trading_matches_backtest(tmp_path):
     assert len(paper) >= 10
 
     first_signal_close = int(df.ts.iloc[start]) + H
-    bt = [t for t in run_backtest(RuleStrategy(spec), df, "binance", "BTC/USDT", "1h",
+    bt = [t for t in run_backtest(RuleStrategy(spec), df, "bybit", "BTC/USDT", "1h",
                                   BacktestConfig())
           if t.signal_ts >= first_signal_close and t.exit_ts < int(df.ts.iloc[-1])]
     assert paper[:len(bt)] == [(t.entry_ts, t.exit_ts, round(t.r, 9)) for t in bt]
@@ -208,7 +208,7 @@ def test_paper_retires_losers(tmp_path):
     reg.save()
     from aitrader.learn import RetireRule
 
-    trader = PaperTrader(store, reg_path, ["binance"], ["BTC/USDT"],
+    trader = PaperTrader(store, reg_path, ["bybit"], ["BTC/USDT"],
                          PaperConfig(retire=RetireRule(min_trades=3, min_expectancy=10.0)),
                          state_path=str(tmp_path / "s.json"))
     retired = []
@@ -242,7 +242,7 @@ def test_library_specs_are_valid_and_run():
     fired = 0
     for spec in specs:
         assert spec["source"]["book"] and spec["source"]["quote"], spec["name"]
-        sigs = RuleStrategy(spec).generate(df, "binance", "BTC/USDT", spec["timeframes"][0])
+        sigs = RuleStrategy(spec).generate(df, "bybit", "BTC/USDT", spec["timeframes"][0])
         assert all(s.stop < s.entry for s in sigs), spec["name"]
         fired += bool(sigs)
     assert fired >= len(specs) // 2  # most book rules trigger at least once on noisy data
@@ -295,7 +295,7 @@ def test_paper_honours_pause_context_and_writes_events(tmp_path):
     events = EventLog(str(tmp_path / "ev.jsonl"), service="paper")
     blocked = SimpleNamespace(decide=lambda ex, sym, now: SimpleNamespace(allow_entries=False, size_multiplier=0))
     half = SimpleNamespace(decide=lambda ex, sym, now: SimpleNamespace(allow_entries=True, size_multiplier=0.5))
-    trader = PaperTrader(store, reg_path, ["binance"], ["BTC/USDT"], state_path=str(tmp_path / "s.json"),
+    trader = PaperTrader(store, reg_path, ["bybit"], ["BTC/USDT"], state_path=str(tmp_path / "s.json"),
                          control=control, context=blocked, events=events)
     ticks = [int(df.ts.iloc[i]) + H for i in range(600, 700)]
     for t in ticks[:30]:
@@ -323,7 +323,7 @@ def test_paper_tick_keeps_registry_changes_made_meanwhile(tmp_path):
     reg.add(Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR), status="paper"))
     reg.add(Entry(id="new", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR)))
     reg.save()
-    trader = PaperTrader(store, reg_path, ["binance"], ["BTC/USDT"], state_path=str(tmp_path / "s.json"))
+    trader = PaperTrader(store, reg_path, ["bybit"], ["BTC/USDT"], state_path=str(tmp_path / "s.json"))
     real_score = trader._score
 
     def score_while_someone_edits(r, events):
@@ -349,7 +349,7 @@ def test_paper_skips_markets_without_a_new_candle(tmp_path):
     reg.add(Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR), status="paper"))
     reg.add(Entry(id="broken", kind="rule", name="x", spec={"bad": True}, status="paper"))
     reg.save()
-    trader = PaperTrader(store, reg_path, ["binance"], ["BTC/USDT"], state_path=str(tmp_path / "s.json"))
+    trader = PaperTrader(store, reg_path, ["bybit"], ["BTC/USDT"], state_path=str(tmp_path / "s.json"))
     now = int(df.ts.iloc[650]) + H
     trader.tick(now_ms=now)  # the broken strategy is skipped, not fatal
     calls = []
@@ -386,7 +386,7 @@ def test_learn_test_paper_records_without_moving(tmp_path, monkeypatch):
     reg.add(Entry(id="p", kind="rule", name="p", spec=validate_spec(EVERY_UP_BAR), status="paper"))
     reg.save()
     assert main(["--env-file", "none", "learn", "--registry", reg_path, "--symbol", "BTC/USDT",
-                 "--exchange", "binance", "test", "--paper"]) == 0
+                 "--exchange", "bybit", "test", "--paper"]) == 0
     e = Registry(reg_path).get("p")
     assert e.status == "paper" and e.backtest["markets"]
 

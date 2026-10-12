@@ -24,7 +24,7 @@ NOW = 1_760_000_400_000 // HOUR_MS * HOUR_MS  # a round hour in Oct 2025
 
 
 class FakeUsdm:
-    """ccxt binanceusdm stand-in: funding every 8h, open interest and long/short every 1h."""
+    """ccxt bybitusdm stand-in: funding every 8h, open interest and long/short every 1h."""
 
     def __init__(self, start, end, long_short=True):
         self.has = {"fetchLongShortRatioHistory": long_short}
@@ -85,9 +85,9 @@ def test_migration_v2_adds_context_table(tmp_path):
     assert s.migrate() == [1, 2] and SCHEMA_VERSION == 2
     c = ContextStore(s)  # migrating again is a no-op
     assert s.schema_version() == 2 and not has_context(s)
-    assert c.upsert([("binance", "BTC/USDT", "funding_rate", 5, 0.1), ("x", "y", "z", 1, float("nan"))]) == 1
-    c.upsert([("binance", "BTC/USDT", "funding_rate", 5, 0.2)])  # same key replaces
-    assert c.load("funding_rate", "binance", "BTC/USDT") == [(5, 0.2)] and has_context(s)
+    assert c.upsert([("bybit", "BTC/USDT", "funding_rate", 5, 0.1), ("x", "y", "z", 1, float("nan"))]) == 1
+    c.upsert([("bybit", "BTC/USDT", "funding_rate", 5, 0.2)])  # same key replaces
+    assert c.load("funding_rate", "bybit", "BTC/USDT") == [(5, 0.2)] and has_context(s)
     s.close()
 
 
@@ -99,7 +99,7 @@ async def test_collect_tops_up_and_maps_symbols(ctx):
     client = FakeUsdm(NOW - 40 * DAY_MS, NOW)
     added = await collect_context(ctx, ["BTC/USDT"], client=client, urlopen=fake_urlopen(), now_ms=NOW)
     assert added["funding_rate"] == 30 * 3 + 1
-    assert added["open_interest"] == 29 * 24 + 1  # Binance keeps 30 days of OI history
+    assert added["open_interest"] == 29 * 24 + 1  # Bybit keeps 30 days of OI history
     assert added["long_short_ratio"] == 29 * 24 + 1
     assert {c[1] for c in client.calls} == {"BTC/USDT:USDT"} and not client.closed
     assert ctx.value_at("btc_dominance", "global", "*") == (NOW, 57.5)
@@ -127,77 +127,77 @@ def test_attach_context_has_no_look_ahead(ctx):
     df = candle_frame(10)
     t0 = int(df["ts"].iloc[0])
     # a value stamped exactly at bar 2's close, and one a minute after bar 4's close
-    ctx.upsert([("binance", "BTC/USDT", "funding_rate", t0 + 3 * HOUR_MS, 0.0003),
-                ("binance", "BTC/USDT", "funding_rate", t0 + 5 * HOUR_MS + 60_000, 0.0009)])
-    out = attach_context(df, ctx, "binance", "BTC/USDT", "1h")
+    ctx.upsert([("bybit", "BTC/USDT", "funding_rate", t0 + 3 * HOUR_MS, 0.0003),
+                ("bybit", "BTC/USDT", "funding_rate", t0 + 5 * HOUR_MS + 60_000, 0.0009)])
+    out = attach_context(df, ctx, "bybit", "BTC/USDT", "1h")
     fr = out["funding_rate"].tolist()
     assert np.isnan(fr[0]) and np.isnan(fr[1])
     assert fr[2] == fr[3] == fr[4] == 0.0003  # visible from bar 2 (closes at its stamp)
     assert fr[5] == 0.0009 and len(out) == len(df) and "funding_rate" not in df
     assert out["open_interest"].isna().all()
-    # timeframe inferred from the frame gives the same answer; other venues use Binance rows
+    # timeframe inferred from the frame gives the same answer; other venues use Bybit rows
     assert attach_context(df, ctx, "htx", "BTC/USDT")["funding_rate"].tolist()[2:6] == fr[2:6]
 
 
 def test_attach_context_stops_carrying_stale_values(ctx):
     df = candle_frame(30)
     t0 = int(df["ts"].iloc[0])
-    ctx.upsert([("binance", "BTC/USDT", "open_interest", t0 + HOUR_MS, 500.0)])
-    oi = attach_context(df, ctx, "binance", "BTC/USDT", "1h")["open_interest"]
+    ctx.upsert([("bybit", "BTC/USDT", "open_interest", t0 + HOUR_MS, 500.0)])
+    oi = attach_context(df, ctx, "bybit", "BTC/USDT", "1h")["open_interest"]
     assert oi.iloc[0] == oi.iloc[2] == 500.0 and np.isnan(oi.iloc[3])  # stale after 2h
 
 
 def seed_candles(store, closes, step=HOUR_MS):
     start = NOW - len(closes) * step
-    store.upsert([Candle("binance", "BTC/USDT", "1h", start + i * step, c, c, c, c, 1.0)
+    store.upsert([Candle("bybit", "BTC/USDT", "1h", start + i * step, c, c, c, c, 1.0)
                   for i, c in enumerate(closes)])
 
 
 def test_filter_defaults_allow_with_no_data(ctx):
-    d = ContextFilter(ctx).decide("binance", "BTC/USDT", NOW)
+    d = ContextFilter(ctx).decide("bybit", "BTC/USDT", NOW)
     assert d.allow_entries and d.size_multiplier == 1.0 and len(d.reasons) == 3
     assert all("skipped" in r for r in d.reasons)
 
 
 @pytest.mark.parametrize("rate, allow, size", [(0.0001, True, 1.0), (0.0006, True, 0.5), (0.0011, False, 0.0)])
 def test_filter_funding(ctx, rate, allow, size):
-    ctx.upsert([("binance", "BTC/USDT", "funding_rate", NOW - HOUR_MS, rate)])
-    d = ContextFilter(ctx).decide("binance", "BTC/USDT", NOW)
+    ctx.upsert([("bybit", "BTC/USDT", "funding_rate", NOW - HOUR_MS, rate)])
+    d = ContextFilter(ctx).decide("bybit", "BTC/USDT", NOW)
     assert (d.allow_entries, d.size_multiplier) == (allow, size)
-    # HTX markets read Binance's perpetual data
+    # HTX markets read Bybit's perpetual data
     assert ContextFilter(ctx).decide("htx", "BTC/USDT", NOW).size_multiplier == size
 
 
 def test_filter_ignores_stale_funding(ctx):
-    ctx.upsert([("binance", "BTC/USDT", "funding_rate", NOW - 17 * HOUR_MS, 0.01)])
-    d = ContextFilter(ctx).decide("binance", "BTC/USDT", NOW)
+    ctx.upsert([("bybit", "BTC/USDT", "funding_rate", NOW - 17 * HOUR_MS, 0.01)])
+    d = ContextFilter(ctx).decide("bybit", "BTC/USDT", NOW)
     assert d.allow_entries and d.size_multiplier == 1.0 and "stale" in d.reasons[0]
 
 
 def test_filter_open_interest_up_while_price_falls(ctx):
-    ctx.upsert([("binance", "BTC/USDT", "open_interest", NOW - DAY_MS, 100.0),
-                ("binance", "BTC/USDT", "open_interest", NOW, 120.0)])
+    ctx.upsert([("bybit", "BTC/USDT", "open_interest", NOW - DAY_MS, 100.0),
+                ("bybit", "BTC/USDT", "open_interest", NOW, 120.0)])
     f = ContextFilter(ctx)
-    assert f.decide("binance", "BTC/USDT", NOW, price_change_24h=-0.03).size_multiplier == 0.5
-    assert f.decide("binance", "BTC/USDT", NOW, price_change_24h=0.03).size_multiplier == 1.0
+    assert f.decide("bybit", "BTC/USDT", NOW, price_change_24h=-0.03).size_multiplier == 0.5
+    assert f.decide("bybit", "BTC/USDT", NOW, price_change_24h=0.03).size_multiplier == 1.0
     # price change read from stored 1h candles: 100 -> 95 over the last 24 closed bars
     seed_candles(ctx.candles, list(np.linspace(100, 95, 30)))
-    d = f.decide("binance", "BTC/USDT", NOW)
+    d = f.decide("bybit", "BTC/USDT", NOW)
     assert d.size_multiplier == 0.5 and any("open interest +20.0%" in r for r in d.reasons)
     seed_candles(ctx.candles, list(np.linspace(95, 100, 30)))
-    assert f.decide("binance", "BTC/USDT", NOW).size_multiplier == 1.0
+    assert f.decide("bybit", "BTC/USDT", NOW).size_multiplier == 1.0
 
 
 def test_filter_blocks_market_wide_selloff_and_rules_combine(ctx):
     ctx.upsert([("global", "*", "total_mcap_change_24h", NOW - HOUR_MS, -0.09)])
-    d = ContextFilter(ctx).decide("binance", "BTC/USDT", NOW)
+    d = ContextFilter(ctx).decide("bybit", "BTC/USDT", NOW)
     assert not d.allow_entries and d.size_multiplier == 0.0 and "no new entries" in d.reasons[-1]
-    assert ContextFilter(ctx).decide("binance", "BTC/USDT", NOW + 3 * HOUR_MS).allow_entries  # stale
+    assert ContextFilter(ctx).decide("bybit", "BTC/USDT", NOW + 3 * HOUR_MS).allow_entries  # stale
     ctx.upsert([("global", "*", "total_mcap_change_24h", NOW, -0.02),
-                ("binance", "BTC/USDT", "funding_rate", NOW, 0.0007),
-                ("binance", "BTC/USDT", "open_interest", NOW - DAY_MS, 100.0),
-                ("binance", "BTC/USDT", "open_interest", NOW, 130.0)])
-    d = ContextFilter(ctx).decide("binance", "BTC/USDT", NOW, price_change_24h=-0.01)
+                ("bybit", "BTC/USDT", "funding_rate", NOW, 0.0007),
+                ("bybit", "BTC/USDT", "open_interest", NOW - DAY_MS, 100.0),
+                ("bybit", "BTC/USDT", "open_interest", NOW, 130.0)])
+    d = ContextFilter(ctx).decide("bybit", "BTC/USDT", NOW, price_change_24h=-0.01)
     assert d.allow_entries and d.size_multiplier == 0.25 and len(d.reasons) == 2
 
 
@@ -219,11 +219,11 @@ def test_build_dataset_attaches_context(tmp_path, monkeypatch):
         def generate(self, df, *a):
             return []
 
-    dataset.build_dataset(s, [("x", NoSignals())], ["binance"], ["BTC/USDT"])
+    dataset.build_dataset(s, [("x", NoSignals())], ["bybit"], ["BTC/USDT"])
     assert seen == []  # no context rows: frame untouched
-    ContextStore(s).upsert([("binance", "BTC/USDT", "funding_rate", NOW, 0.0001)])
-    dataset.build_dataset(s, [("x", NoSignals())], ["binance"], ["BTC/USDT"])
-    assert seen == [("binance", "BTC/USDT", "1h")]
+    ContextStore(s).upsert([("bybit", "BTC/USDT", "funding_rate", NOW, 0.0001)])
+    dataset.build_dataset(s, [("x", NoSignals())], ["bybit"], ["BTC/USDT"])
+    assert seen == [("bybit", "BTC/USDT", "1h")]
     s.close()
 
 

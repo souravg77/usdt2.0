@@ -1,7 +1,7 @@
 """The Markets page: live prices and a candlestick chart for each pair.
 
 The page's script (``static/market.js``) asks this server every 1.5 seconds for fresh candles and
-prices (``/api/market/...``), which come from Binance's public API through ``LiveMarket``
+prices (``/api/market/...``), which come from Bybit's public API through ``LiveMarket``
 (cached ~1s, no key needed). Without JavaScript the page shows the candles the ``collector``
 service saved, drawn on the server.
 """
@@ -14,6 +14,7 @@ import time
 from fastapi import Request
 from fastapi.responses import JSONResponse, Response
 
+from ..config import EXCHANGE
 from ..data.store import CandleStore
 from .app import _e, _q
 from .live import LiveMarket
@@ -26,7 +27,7 @@ DAY_MS = 86_400_000
 STATIC = os.path.join(os.path.dirname(__file__), "static")
 
 
-def add_market_routes(app, *, settings, page, guard, exchange: str = "binance", clock=None,
+def add_market_routes(app, *, settings, page, guard, exchange: str = EXCHANGE, clock=None,
                       live: LiveMarket | None = None) -> None:
     live = live or LiveMarket(settings.db_path, exchange)
     symbols = list(settings.symbols)
@@ -77,7 +78,7 @@ def add_market_routes(app, *, settings, page, guard, exchange: str = "binance", 
             finally:
                 db.close()
         except Exception:
-            pass  # the live script fills the page from Binance anyway
+            pass  # the live script fills the page from Bybit anyway
         tabs = "".join(f'<button type="button" class="seg{" active" if t == tf else ""}" data-tf="{t}">{t}</button>'
                        for t in tfs)
         body = (
@@ -88,7 +89,7 @@ def add_market_routes(app, *, settings, page, guard, exchange: str = "binance", 
             f'<div id="ohlc" class="ohlc small"></div>'
             f'<canvas id="chart" class="js-only" aria-label="live price chart"></canvas>'
             f'<noscript>{_fallback(symbol, tf, bars)}</noscript></div>'
-            '<p class="muted small">Prices and candles come from Binance\'s public market data '
+            '<p class="muted small">Prices and candles come from Bybit\'s public market data '
             '(no key needed) and refresh every 1.5 seconds while this page is open. Times are UTC. '
             'Hover or touch the chart to read a candle.</p></div>'
             '<script src="/static/market.js" defer></script>')

@@ -5,7 +5,7 @@ from aitrader.strategies import liquidity_check
 def book(bid, ask, size=1.0, levels=5, step=0.0005):
     bids = [(bid * (1 - i * step), size) for i in range(levels)]
     asks = [(ask * (1 + i * step), size) for i in range(levels)]
-    return OrderBook("binance", "BTC/USDT", 0, bids, asks)
+    return OrderBook("bybit", "BTC/USDT", 0, bids, asks)
 
 
 def test_liquid_book_passes():

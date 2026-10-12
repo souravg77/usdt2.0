@@ -1,16 +1,16 @@
 """Check a user's exchange key before it is stored.
 
-Real-account keys are accepted only when Binance itself reports that the key can trade spot,
-**cannot withdraw**, cannot do margin or futures transfers, and is restricted to trusted IPs.
-Testnet keys only have to work (testnet money can't be withdrawn). Keys that fail are never
-stored.
+Real-account keys are accepted only when Bybit itself reports (``/v5/user/query-api``) that the
+key can trade spot, is not read-only, **cannot withdraw** or transfer, has no derivatives or
+options permissions, and is bound to trusted IPs. Demo-trading keys only have to work (demo money
+can't be withdrawn). Keys that fail are never stored.
 """
 
 from __future__ import annotations
 
 from ..config import ExchangeKeys, Settings
 
-SUPPORTED = ("binance",)  # HTX gives no reliable way to read a key's withdrawal permission
+SUPPORTED = ("bybit",)
 
 
 class KeyRejected(ValueError):
@@ -34,7 +34,7 @@ async def verify_keys(exchange: str, testnet: bool, api_key: str, secret: str,
     from ..exchanges.ccxt_adapter import ADAPTERS
 
     if exchange not in SUPPORTED:
-        raise KeyRejected(f"{exchange} keys aren't supported yet; use Binance")
+        raise KeyRejected(f"{exchange} keys aren't supported; the agent uses Bybit only")
     api_key, secret = (api_key or "").strip(), (secret or "").strip()
     if len(api_key) < 16 or len(secret) < 16 or any(c.isspace() for c in api_key + secret):
         raise KeyRejected("that doesn't look like an API key and secret; copy both again")
@@ -43,39 +43,41 @@ async def verify_keys(exchange: str, testnet: bool, api_key: str, secret: str,
         try:
             bal = await adapter.balance()
         except Exception as exc:
-            if _is_auth_error(exc):  # wrong key, wrong IP, or a real key on the testnet (or back)
-                raise KeyRejected(f"Binance refused the key ({type(exc).__name__}). Check that you "
-                                  f"copied a {'testnet' if testnet else 'real-account'} key and its "
+            if _is_auth_error(exc):  # wrong key, wrong IP, or a real key used for demo (or back)
+                raise KeyRejected(f"Bybit refused the key ({type(exc).__name__}). Check that you "
+                                  f"copied a {'Demo Trading' if testnet else 'real-account'} key and its "
                                   f"secret in full") from None
             # never echo the exception text: ccxt puts the signed request URL in it
-            raise KeyUnverified(f"couldn't reach Binance{' testnet' if testnet else ''} to check the "
+            raise KeyUnverified(f"couldn't reach Bybit{' demo trading' if testnet else ''} to check the "
                                 f"key ({type(exc).__name__})") from None
         perms = {"balance_assets": len([a for a, v in bal.free.items() if v])}
         if testnet:
             return perms
         try:
-            r = await adapter.client.sapi_get_account_apirestrictions()
+            r = (await adapter.client.private_get_v5_user_query_api()).get("result") or {}
         except Exception as exc:
             raise KeyRejected(f"couldn't read the key's permissions ({type(exc).__name__})") from None
-        flags = {k: _true(r.get(k)) for k in ("enableWithdrawals", "enableSpotAndMarginTrading",
-                                              "enableMargin", "enableFutures", "ipRestrict",
-                                              "enableInternalTransfer", "permitsUniversalTransfer")}
-        perms.update(flags)
-        if flags["enableWithdrawals"]:
-            raise KeyRejected("this key can WITHDRAW funds. Turn off 'Enable Withdrawals' on Binance "
-                              "(API Management, Edit restrictions), or make a new key without it")
-        if flags["enableInternalTransfer"] or flags["permitsUniversalTransfer"]:
-            raise KeyRejected("this key can transfer funds; turn off transfers on Binance")
-        if flags["enableMargin"] or flags["enableFutures"]:
-            raise KeyRejected("turn off margin and futures for this key; the agent trades spot only")
-        if not flags["enableSpotAndMarginTrading"]:
-            raise KeyRejected("turn on 'Enable Spot & Margin Trading' for this key")
-        if not flags["ipRestrict"]:
-            raise KeyRejected("restrict this key to trusted IPs on Binance and add the server's IP")
+        p = r.get("permissions") or {}
+        wallet = [str(x) for x in p.get("Wallet") or []]
+        ips = [str(x) for x in r.get("ips") or []]
+        perms.update(read_only=str(r.get("readOnly")) == "1", spot=list(p.get("Spot") or []), wallet=wallet,
+                     derivatives=bool(p.get("ContractTrade") or p.get("Derivatives") or p.get("Options")),
+                     ip_restricted=bool(ips) and "*" not in ips)
+        if "Withdraw" in wallet:
+            raise KeyRejected("this key can WITHDRAW funds. On Bybit (API Management) make a new key "
+                              "without the Withdrawal permission")
+        if wallet:
+            raise KeyRejected("this key can transfer funds (Assets permissions); make a key with only "
+                              "SPOT trade permission")
+        if perms["derivatives"]:
+            raise KeyRejected("turn off Contracts, Derivatives and Options for this key; the agent "
+                              "trades spot only")
+        if perms["read_only"] or "SpotTrade" not in perms["spot"]:
+            raise KeyRejected("this key can't trade: choose 'Read-Write' and tick SPOT Trade")
+        if not perms["ip_restricted"]:
+            raise KeyRejected("bind this key to this server's IP on Bybit (Only IPs with permissions "
+                              "granted are allowed to access the OpenAPI)")
         return perms
     finally:
         await adapter.close()
 
-
-def _true(v) -> bool:
-    return v is True or str(v).lower() == "true"

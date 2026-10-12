@@ -6,7 +6,7 @@ plays the candles one at a time at 1x to 200x speed, marks each buy and sell as 
 appears, and keeps a live win-rate table per strategy.
 
 Prices come from the database. A month that hasn't been downloaded yet can be fetched from
-Binance with one button (a ``download`` job).
+Bybit with one button (a ``download`` job).
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import Form, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, Response
 
+from ..config import EXCHANGE
 from ..backtest import BacktestConfig
 from ..data.store import CandleStore
 from ..learn.registry import Registry
@@ -47,7 +48,7 @@ def _add_months(d: datetime, n: int) -> datetime:
 
 
 def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: str,
-                      report_path: str = "data/reports/backtest.json", exchange: str = "binance") -> None:
+                      report_path: str = "data/reports/backtest.json", exchange: str = EXCHANGE) -> None:
     symbols = list(settings.symbols)
     cache: OrderedDict = OrderedDict()
 
@@ -127,7 +128,7 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
                     meta={"kind": "download", "by": user})
         cache.clear()
         q = f"symbol={_q(symbol)}&tf={_q(tf)}&month={_q(month)}&months={months}"
-        return RedirectResponse(f"/replay?{q}&msg=" + _q("Downloading those prices from Binance. Press Load "
+        return RedirectResponse(f"/replay?{q}&msg=" + _q("Downloading those prices from Bybit. Press Load "
                                                          "again in a minute."), status_code=303)
 
     @app.get("/replay")
@@ -164,7 +165,7 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
             '<div id="replay-msg" class="muted"></div>'
             f'<form id="replay-download" method="post" action="/replay/download" class="row hidden">{_csrf(auth, token)}'
             '<input type="hidden" name="symbol"><input type="hidden" name="tf"><input type="hidden" name="month">'
-            '<input type="hidden" name="months"><button>Download these prices from Binance</button></form>'
+            '<input type="hidden" name="months"><button>Download these prices from Bybit</button></form>'
             '<div class="card chart-card"><div class="chart-head"><h2 id="chart-title">Replay</h2>'
             f'<div class="segs" id="speeds">{speeds}</div></div>'
             '<div class="row replay-controls"><button type="button" id="play" disabled>Play</button>'

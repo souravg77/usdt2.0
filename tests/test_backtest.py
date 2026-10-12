@@ -109,7 +109,7 @@ def synthetic(n=3000, seed=3):
 
 def test_real_strategy_runs_with_calendar():
     df = synthetic()
-    trades = run_backtest(STRATEGIES["trend_pullback"](), df, "binance", "BTC/USDT", "1h")
+    trades = run_backtest(STRATEGIES["trend_pullback"](), df, "bybit", "BTC/USDT", "1h")
     assert trades
     for a, b in zip(trades, trades[1:]):
         assert a.exit_ts <= b.entry_ts
@@ -126,10 +126,10 @@ def test_split_periods_are_chronological_and_disjoint():
 
 def test_walk_forward_and_sensitivity():
     df = synthetic()
-    wf = walk_forward(STRATEGIES["trend_pullback"], df, "binance", "BTC/USDT", "1h",
+    wf = walk_forward(STRATEGIES["trend_pullback"], df, "bybit", "BTC/USDT", "1h",
                       grid={"target_r": [1.5, 2.0]}, train_bars=1200, test_bars=600, min_trades=1)
     assert len(wf) == 3 and set(wf["params"].iloc[0]) == {"target_r"}
-    sens = sensitivity(STRATEGIES["momentum_breakout"], df.iloc[:1500], "binance", "BTC/USDT", "15m")
+    sens = sensitivity(STRATEGIES["momentum_breakout"], df.iloc[:1500], "bybit", "BTC/USDT", "15m")
     assert "(base)" in sens["param"].tolist() and len(sens) > 5
 
 
@@ -138,6 +138,6 @@ def test_parabolic_sar_trailing_exit():
     down = [(120 - 2 * i, 120.5 - 2 * i, 117 - 2 * i, 118 - 2 * i) for i in range(6)]
     df = bars(up + down)
     strat = Fixed(at=[3], stop=50.0, target=1000.0, trailing="close<psar")
-    (t,) = run_backtest(strat, df, "binance", "BTC/USDT", "1h", FREE)
+    (t,) = run_backtest(strat, df, "bybit", "BTC/USDT", "1h", FREE)
     assert t.exit_reason == "trail"
     assert t.exit_ts > int(df.ts.iloc[19]) and t.r > 0

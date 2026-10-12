@@ -1,8 +1,8 @@
 """The admin's Settings page: API keys, first-time setup and the health check.
 
-Keys entered here are checked first (Binance keys with the exchange, the Anthropic key and the
+Keys entered here are checked first (Bybit keys with the exchange, the Anthropic key and the
 Telegram bot with their APIs), then stored encrypted (``ops.secrets``) and never shown again,
-only their last 4 characters. A real-account Binance key is accepted only without withdrawal
+only their last 4 characters. A real-account Bybit key is accepted only without withdrawal
 rights and with an IP whitelist, the same rule as for user accounts.
 
 Live trading can't be unlocked here: that stays in ``.env`` on the server.
@@ -19,6 +19,7 @@ import urllib.request
 from fastapi import Form, Request
 from fastapi.responses import PlainTextResponse, RedirectResponse
 
+from ..config import EXCHANGE
 from ..accounts import AccountError, KeyRejected, KeyUnverified, verify_keys
 from ..ops import secrets
 from .app import _csrf, _e, _q
@@ -26,11 +27,11 @@ from .app import _csrf, _e, _q
 GROUPS = [
     ("anthropic", "Anthropic (Claude)", "Lets the agent read trading books and write strategies. "
      "Get a key at console.anthropic.com, under API keys."),
-    ("binance_testnet", "Binance testnet", "Fake-money trading on testnet.binance.vision, for Phase 5. "
-     "See the 'connect Binance' guide, stage 1."),
-    ("binance", "Binance real account", "Only for the Phase 6 live pilot. The key must have withdrawals "
-     "OFF and be restricted to this server's IP. Saving it does not start live trading: that stays "
-     "locked in .env until you open it on the server."),
+    ("bybit_demo", "Bybit demo trading", "Fake-money orders at real Bybit prices. On bybit.com switch "
+     "to Demo Trading, then API Management: create a key there (it only works for demo funds)."),
+    ("bybit", "Bybit real account", "Only for the live pilot. The key must be Read-Write with only SPOT "
+     "trade ticked (no withdrawals, no transfers, no contracts) and bound to this server's IP. Saving it "
+     "does not start live trading: that stays locked in .env until you open it on the server."),
     ("telegram", "Telegram alerts", "Trade alerts and /status, /pause, /kill from your phone. Create a "
      "bot with @BotFather for the token; send it a message, then get your chat ID from @userinfobot."),
     ("x", "X (Twitter)", "Lets the agent read X: the accounts on its watch list and posts about each "
@@ -106,7 +107,7 @@ def check_x(token: str, opener=urllib.request.urlopen) -> None:
 
 def add_settings_routes(app, *, settings, auth, paths, jobs, keys_secret: str, page, guard,
                         checkers: dict | None = None) -> None:
-    checkers = {"anthropic": check_anthropic, "telegram": check_telegram, "binance": verify_keys, "x": check_x,
+    checkers = {"anthropic": check_anthropic, "telegram": check_telegram, "bybit": verify_keys, "x": check_x,
                 **(checkers or {})}
     store_path = getattr(paths, "keys_store", secrets.DEFAULT_PATH)
 
@@ -157,14 +158,14 @@ def add_settings_routes(app, *, settings, auth, paths, jobs, keys_secret: str, p
                     raise ValueError("paste the X Bearer token")
                 await asyncio.to_thread(checkers["x"], values["X_BEARER_TOKEN"])
             else:
-                testnet = group == "binance_testnet"
-                prefix = "BINANCE_TESTNET_API" if testnet else "BINANCE_API"
+                testnet = group == "bybit_demo"
+                prefix = "BYBIT_DEMO_API" if testnet else "BYBIT_API"
                 key, secret = values[f"{prefix}_KEY"], values[f"{prefix}_SECRET"]
                 if not (key and secret):
-                    raise ValueError("Binance needs both the API key and the secret key")
-                await checkers["binance"]("binance", testnet, key, secret, settings)
+                    raise ValueError("Bybit needs both the API key and the API secret")
+                await checkers["bybit"]("bybit", testnet, key, secret, settings)
         except KeyUnverified as exc:
-            if group == "binance":  # a real-money key is saved only once its permissions are confirmed
+            if group == "bybit":  # a real-money key is saved only once its permissions are confirmed
                 raise KeyRejected(f"{exc}. Try again in a minute") from None
             record(group, None, str(exc))
             return str(exc)
@@ -350,7 +351,7 @@ def add_settings_routes(app, *, settings, auth, paths, jobs, keys_secret: str, p
             return done(error="setup is already running; see Recent jobs on the Overview page")
         since = since if len(since) == 10 and since[4] == "-" and since[7] == "-" else "2024-01-01"
         jobs.submit("Download price history and load the strategy library",
-                    [["download", "--since", since, "--exchange", "binance"],
+                    [["download", "--since", since, "--exchange", EXCHANGE],
                      ["learn", "add-library", "--test"]], meta={"kind": "setup"})
         return done(msg="Setup started: downloading price history (this takes a while), then the "
                         "strategies are backtested; the ones that pass start paper trading.")
@@ -380,7 +381,7 @@ def _setup_card(token, auth, jobs) -> str:
     status = ""
     if last:
         status = (f'<p>Last setup: <a href="/jobs/{_e(last["id"])}">{_e(last["status"])}</a></p>')
-    return (f'<h2>First-time setup</h2><div class="card"><p>Downloads price history from Binance '
+    return (f'<h2>First-time setup</h2><div class="card"><p>Downloads price history from Bybit '
             f'(public data, no key needed), then backtests the strategy library; strategies that '
             f'pass start paper trading. The download takes a few hours the first time; you can '
             f'close this page.</p>{status}<form method="post" action="/settings/setup">'

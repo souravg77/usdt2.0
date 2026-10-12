@@ -12,9 +12,8 @@ from .store import CandleStore
 
 log = logging.getLogger(__name__)
 
-# Per-request page size each exchange accepts. HTX returns at most 2000 bars and only
-# recent history (it ignores `since` beyond its window), so HTX history is shorter.
-PAGE_LIMIT = {"binance": 1000, "htx": 1000}
+# Per-request page size each exchange accepts (Bybit's kline endpoint returns up to 1000 bars).
+PAGE_LIMIT = {"bybit": 1000}
 
 
 async def download(

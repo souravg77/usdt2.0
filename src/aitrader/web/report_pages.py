@@ -1,6 +1,6 @@
 """The Reports page: run the multi-year backtest of every strategy and read the win report.
 
-"Run" queues one job: download the price history the strategies need (Binance public data, no
+"Run" queues one job: download the price history the strategies need (Bybit public data, no
 key), then ``aitrader learn report``. The report is saved as JSON and shown here, best first.
 """
 
@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import Form, Request
 from fastapi.responses import PlainTextResponse, RedirectResponse, Response
 
+from ..config import EXCHANGE
 from .app import _csrf, _e, _ms, _q
 
 REPORT_PATH = "data/reports/backtest.json"
@@ -42,7 +43,7 @@ def add_report_routes(app, *, settings, auth, jobs, page, guard, report_path: st
         body += _run_card(auth, token, rep, job)
         body += _report(rep) if rep else ('<p class=muted>No report yet. Run the backtest above: it '
                                           'tests every strategy the agent has learned on the last 5 years '
-                                          'of Binance prices.</p>')
+                                          'of Bybit prices.</p>')
         return page("Reports", body, user, token, refresh=60 if job else None)
 
     @app.post("/reports/run")
@@ -56,7 +57,7 @@ def add_report_routes(app, *, settings, auth, jobs, page, guard, report_path: st
             return RedirectResponse("/reports?error=" + _q("a backtest is already running"), status_code=303)
         years = min(max(int(years or 5), 1), 8)
         since = (datetime.now(timezone.utc) - timedelta(days=365 * years + 30)).strftime("%Y-%m-%d")
-        dl = ["download", "--since", since, "--exchange", "binance"]
+        dl = ["download", "--since", since, "--exchange", EXCHANGE]
         for tf in REPORT_TIMEFRAMES:
             dl += ["--timeframe", tf]
         jobs.submit(f"{years}-year backtest of every strategy",
@@ -89,7 +90,7 @@ def _run_card(auth, token, rep: dict, job) -> str:
     last = f"Last report: {_ms(rep.get('generated'))}." if rep else "No report yet."
     disabled = " disabled" if job else ""
     return (f'<div class="card"><h3>Backtest every strategy</h3><p class="small">Tests each strategy the '
-            f'agent learned (from the books and the built-ins) on Binance history for every pair, with '
+            f'agent learned (from the books and the built-ins) on Bybit history for every pair, with '
             f'fees and slippage. {_e(last)}</p><form method="post" action="/reports/run" class="row">'
             f'{_csrf(auth, token)}<label class="row">Years <select name="years">'
             + "".join(f'<option{" selected" if y == 5 else ""}>{y}</option>' for y in (1, 2, 3, 4, 5))
@@ -117,7 +118,7 @@ def _report(rep: dict) -> str:
         f'<div class="stat"><span class="k">{_e(k)}</span><span class="v {c}">{_e(v)}</span></div>'
         for k, v, c in tiles) + "</div>")
     out += (f'<p class="muted small">{rep.get("years")} years · prices {span} · '
-            f'{_e(", ".join(rep.get("symbols", [])))} on Binance · fees {rep["costs"]["taker_fee"] * 100:.2f}% '
+            f'{_e(", ".join(rep.get("symbols", [])))} on Bybit · fees {rep["costs"]["taker_fee"] * 100:.2f}% '
             f'+ slippage {rep["costs"]["slippage_bps"]:.0f} bps per side · USDT column: a '
             f'{rep.get("account_usdt", 10000):,.0f} USDT account risking {rep.get("risk_pct", 1):.0f}% per trade, '
             f'not compounded · <a href="/reports/backtest.json">download the full report</a></p>')

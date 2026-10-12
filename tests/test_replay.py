@@ -33,14 +33,14 @@ def test_replay_returns_month_and_trades(tmp_path):
     store = make_store(tmp_path / "c.db")
     up = Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR))
     daily = Entry(id="d", kind="rule", name="daily", spec=validate_spec(dict(EVERY_UP_BAR, name="d", timeframes=["1d"])))
-    res = replay([up, daily], store, "binance", "BTC/USDT", "1h", START, END)
+    res = replay([up, daily], store, "bybit", "BTC/USDT", "1h", START, END)
     assert res["candles"][0][0] == START and res["candles"][-1][0] < END and len(res["candles"]) == 31 * 24
     assert [s["id"] for s in res["strategies"]] == ["up"]  # the daily strategy doesn't trade 1h
     assert res["trades"] and all(START <= t["entry_ts"] < END for t in res["trades"])
     assert all(t["exit_ts"] >= t["entry_ts"] and t["strategy"] == "up" for t in res["trades"])
-    only = replay([up, daily], store, "binance", "BTC/USDT", "1h", START, END, only="d")
+    only = replay([up, daily], store, "bybit", "BTC/USDT", "1h", START, END, only="d")
     assert only["trades"] == [] and only["candles"]
-    empty = replay([up], store, "binance", "ETH/USDT", "1h", START, END)
+    empty = replay([up], store, "bybit", "ETH/USDT", "1h", START, END)
     assert empty["candles"] == [] and empty["trades"] == []
     store.close()
 
@@ -78,5 +78,5 @@ def test_replay_api_and_page(client):
                                          "months": "1"}, follow_redirects=False)
     assert d.status_code == 303 and "month=2025-03" in d.headers["location"]
     job = [j for j in runner.list() if j["meta"].get("kind") == "download"][0]
-    assert job["steps"] == [["download", "--since", "2025-02-16", "--until", "2025-04-01", "--exchange", "binance",
+    assert job["steps"] == [["download", "--since", "2025-02-16", "--until", "2025-04-01", "--exchange", "bybit",
                              "--symbol", "ETH/USDT", "--timeframe", "1h"]]

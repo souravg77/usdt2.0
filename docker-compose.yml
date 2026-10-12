@@ -106,13 +106,13 @@ services:
       driver: json-file
       options: { max-size: "10m", max-file: "5" }
 
-  # Phase 5: mirrors the paper trades with real orders on the Binance Spot testnet (fake money).
-  # Needs BINANCE_TESTNET_API_KEY/SECRET.   docker compose --profile testnet up -d executor-testnet
+  # Phase 5: mirrors the paper trades with real orders on Bybit demo trading (fake money).
+  # Needs the Bybit demo keys (Settings page).   docker compose --profile testnet up -d executor-testnet
   executor-testnet:
     <<: *app
     profiles: ["testnet"]
     depends_on: [paper]
-    command: ["trade", "run", "--mode", "testnet", "--exchange", "binance"]
+    command: ["trade", "run", "--mode", "testnet", "--exchange", "bybit"]
     environment:
       AITRADER_DB_PATH: /app/data/aitrader.db
       AITRADER_MODE: testnet
@@ -140,7 +140,7 @@ services:
     <<: *app
     profiles: ["live"]
     depends_on: [paper]
-    command: ["trade", "run", "--mode", "live", "--exchange", "binance"]
+    command: ["trade", "run", "--mode", "live", "--exchange", "bybit"]
     restart: "no"
 
 volumes:

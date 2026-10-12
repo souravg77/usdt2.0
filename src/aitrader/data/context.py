@@ -7,10 +7,10 @@ trade filter.
 
 Sources (all free, no key):
 
-- Binance USD-M perpetuals through ccxt (``binanceusdm``): funding-rate history (one value per
-  8h settlement), open-interest history (1h; Binance keeps only the last 30 days) and the global
-  long/short account ratio (1h) when ccxt exposes it. A spot pair ``BTC/USDT`` maps to the
-  perpetual ``BTC/USDT:USDT``; rows are stored under the spot symbol so they line up with candles.
+- Bybit USDT perpetuals through ccxt (``bybit``, linear contracts): funding-rate history (one
+  value per settlement, usually 8h), open-interest history (1h, the last 29 days are fetched) and
+  the long/short account ratio (1h). A spot pair ``BTC/USDT`` maps to the perpetual
+  ``BTC/USDT:USDT``; rows are stored under the spot symbol so they line up with candles.
 - CoinGecko ``/api/v3/global`` for BTC dominance (percent), total market cap (USD) and its 24h
   change (a fraction: -0.08 is -8%), and ``/api/v3/coins/markets?ids=tether,usd-coin`` for the
   stablecoin (USDT + USDC) market cap. These are snapshots, stored under
@@ -29,6 +29,7 @@ from collections.abc import Iterable
 import numpy as np
 import pandas as pd
 
+from ..config import EXCHANGE
 from ..models import TIMEFRAME_MS
 from .store import CandleStore
 
@@ -37,7 +38,7 @@ log = logging.getLogger(__name__)
 HOUR_MS = 3_600_000
 DAY_MS = 24 * HOUR_MS
 GLOBAL = ("global", "*")
-SOURCE_EXCHANGE = "binance"  # derivatives data comes from Binance USD-M for every venue
+SOURCE_EXCHANGE = EXCHANGE  # derivatives data comes from Bybit's USDT perpetuals
 
 # How often each series gets a new value. A value older than twice this is stale: the filter
 # ignores it and ``attach_context`` stops carrying it forward.
@@ -57,7 +58,7 @@ COINGECKO = "https://api.coingecko.com/api/v3"
 COINGECKO_GLOBAL = f"{COINGECKO}/global"
 COINGECKO_STABLES = f"{COINGECKO}/coins/markets?vs_currency=usd&ids=tether,usd-coin"
 
-OI_HISTORY_DAYS = 29  # Binance answers open-interest history for the last 30 days only
+OI_HISTORY_DAYS = 29  # open interest and long/short history fetched on first run
 
 
 def stale_after(metric: str) -> int:
@@ -134,7 +135,7 @@ def has_context(store) -> bool:
 
 
 def perp_symbol(symbol: str) -> str:
-    """``BTC/USDT`` -> ``BTC/USDT:USDT`` (Binance USD-M linear perpetual)."""
+    """``BTC/USDT`` -> ``BTC/USDT:USDT`` (Bybit USDT linear perpetual)."""
     if ":" in symbol:
         return symbol
     return f"{symbol}:{symbol.split('/')[1]}"
@@ -143,7 +144,7 @@ def perp_symbol(symbol: str) -> str:
 def make_client():
     import ccxt.async_support as ccxt_async
 
-    return ccxt_async.binanceusdm({"enableRateLimit": True})
+    return ccxt_async.bybit({"enableRateLimit": True, "options": {"defaultType": "swap"}})
 
 
 async def _paged(fetch, since: int, now: int, limit: int, max_pages: int = 50) -> list[dict]:
@@ -162,7 +163,7 @@ async def _paged(fetch, since: int, now: int, limit: int, max_pages: int = 50) -
 
 
 async def fetch_funding(client, symbol: str, since: int, now: int | None = None,
-                        limit: int = 1000) -> list[tuple[int, float]]:
+                        limit: int = 200) -> list[tuple[int, float]]:
     now = now or int(time.time() * 1000)
     rows = await _paged(lambda s, n: client.fetch_funding_rate_history(perp_symbol(symbol), since=s, limit=n),
                         since, now, limit)
@@ -171,7 +172,7 @@ async def fetch_funding(client, symbol: str, since: int, now: int | None = None,
 
 
 async def fetch_open_interest(client, symbol: str, since: int, now: int | None = None,
-                              timeframe: str = "1h", limit: int = 500) -> list[tuple[int, float]]:
+                              timeframe: str = "1h", limit: int = 200) -> list[tuple[int, float]]:
     """Open interest in coins (falls back to USD value when the amount is missing)."""
     now = now or int(time.time() * 1000)
     since = max(since, now - OI_HISTORY_DAYS * DAY_MS)
@@ -283,7 +284,7 @@ def attach_context(df: pd.DataFrame, store: ContextStore, exchange: str, symbol:
 
     Each bar sees the newest value stamped at or before its close (``ts + timeframe``), never a
     later one, and only while that value is fresh (``stale_after``); otherwise NaN. Rows stored
-    under ``exchange`` are used when there are any, else the Binance perpetual's.
+    under ``exchange`` are used when there are any, else the Bybit perpetual's.
     """
     out = df.copy()
     if out.empty:

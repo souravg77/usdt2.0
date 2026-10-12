@@ -79,8 +79,8 @@ def test_history_features():
 def test_taken_rows_match_the_backtest():
     df = synthetic(n=2000)
     strat = STRATEGIES["momentum_breakout"]()
-    frame = finish(signal_rows(strat, "mb", df, "binance", "BTC/USDT", "1h"))
-    bt = run_backtest(strat, df, "binance", "BTC/USDT", "1h")
+    frame = finish(signal_rows(strat, "mb", df, "bybit", "BTC/USDT", "1h"))
+    bt = run_backtest(strat, df, "bybit", "BTC/USDT", "1h")
     taken = frame[frame["taken"]]
     assert len(frame) > len(taken) > 5
     assert list(taken["entry_ts"]) == [t.entry_ts for t in bt]
@@ -158,7 +158,7 @@ def _paper(tmp_path, ai_filter):
     reg = Registry(reg_path)
     reg.add(Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR), status="paper"))
     reg.save()
-    trader = PaperTrader(store, reg_path, ["binance"], ["BTC/USDT"],
+    trader = PaperTrader(store, reg_path, ["bybit"], ["BTC/USDT"],
                          PaperConfig(retire=RetireRule(min_trades=10_000, max_drawdown=1e9)),
                          state_path=str(tmp_path / "s.json"), ai_filter=ai_filter)
     events = {"opened": 0, "filtered": 0}
@@ -224,5 +224,5 @@ def test_build_dataset_skips_short_markets(tmp_path):
     store = CandleStore(str(tmp_path / "c.db"))
     fill_store(store, synthetic(n=100))
     strat = STRATEGIES["momentum_breakout"]()
-    frame = build_dataset(store, [("mb", strat)], ["binance"], ["BTC/USDT"])
+    frame = build_dataset(store, [("mb", strat)], ["bybit"], ["BTC/USDT"])
     assert frame.empty and "hit_1r" in frame.columns

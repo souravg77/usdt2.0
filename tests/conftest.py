@@ -19,8 +19,9 @@ class FakeCcxt:
     async def fetch_order_book(self, symbol, limit=None):
         return self.book
 
-    async def create_order(self, symbol, type, side, amount, price=None):
+    async def create_order(self, symbol, type, side, amount, price=None, params=None):
         self.orders.append((symbol, type, side, amount, price))
+        self.params = params or {}
         return {"id": "1", "symbol": symbol, "side": side, "type": type, "amount": amount,
                 "price": price, "status": "closed", "filled": amount, "average": 101.0,
                 "fee": {"cost": 0.1, "currency": "USDT"}, "timestamp": 5}

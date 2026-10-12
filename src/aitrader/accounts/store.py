@@ -22,6 +22,8 @@ import sqlite3
 import time
 from dataclasses import dataclass
 
+from ..config import EXCHANGE
+
 DEFAULT_PATH = "data/accounts.db"
 MIN_PASSWORD = 12
 EMAIL_RE = re.compile(r"^[^@\s]{1,64}@[A-Za-z0-9.-]{1,190}\.[A-Za-z]{2,24}$")
@@ -217,7 +219,7 @@ class UserStore:
         if mode == "live":
             if user.status != "active" or not user.live_allowed:
                 raise AccountError("the admin hasn't allowed live trading for this account")
-            if not self.key_info(user_id, "binance", testnet=False):
+            if not self.key_info(user_id, EXCHANGE, testnet=False):
                 raise AccountError("connect and verify your real-account API key first")
             if not pilot_max_usdt or pilot_max_usdt <= 0:
                 raise AccountError("set the most USDT the agent may use (your pilot budget)")

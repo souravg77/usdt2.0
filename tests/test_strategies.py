@@ -30,7 +30,7 @@ def synthetic(n=1500, seed=7, drift=0.0004, vol=0.01, tf_ms=3_600_000):
 def test_signals_are_well_formed(name):
     strat = STRATEGIES[name]()
     tf = strat.spec.timeframes[0]
-    sigs = strat.generate(synthetic(**DATA.get(name, {})), "binance", "BTC/USDT", tf)
+    sigs = strat.generate(synthetic(**DATA.get(name, {})), "bybit", "BTC/USDT", tf)
     assert sigs, f"{name} produced no signals on synthetic data"
     for s in sigs:
         assert s.stop < s.entry < s.target
@@ -47,9 +47,9 @@ def test_no_lookahead(name):
     strat = STRATEGIES[name]()
     tf = strat.spec.timeframes[0]
     df = synthetic(**DATA.get(name, {}))
-    full = strat.generate(df, "binance", "BTC/USDT", tf)
+    full = strat.generate(df, "bybit", "BTC/USDT", tf)
     cut = 1000
-    part = strat.generate(df.iloc[:cut], "binance", "BTC/USDT", tf)
+    part = strat.generate(df.iloc[:cut], "bybit", "BTC/USDT", tf)
     assert part
     last_close = int(df["ts"].iloc[cut])  # close time of the last bar in the cut frame
     early = [s for s in full if s.ts <= last_close]
@@ -58,7 +58,7 @@ def test_no_lookahead(name):
 
 
 def test_buy_the_dip_skips_other_symbols():
-    assert BuyTheDip().generate(synthetic(), "binance", "DOGE/USDT", "1d") == []
+    assert BuyTheDip().generate(synthetic(), "bybit", "DOGE/USDT", "1d") == []
 
 
 def test_specs_have_every_field():
@@ -77,7 +77,7 @@ def test_signals_cli_writes_log(tmp_path, monkeypatch, capsys):
     db = tmp_path / "c.db"
     df = synthetic(tf_ms=14_400_000)
     store = CandleStore(str(db))
-    store.upsert(Candle("binance", "BTC/USDT", "4h", int(r.ts), r.open, r.high, r.low, r.close, r.volume)
+    store.upsert(Candle("bybit", "BTC/USDT", "4h", int(r.ts), r.open, r.high, r.low, r.close, r.volume)
                  for r in df.itertuples())
     store.close()
     monkeypatch.setenv("AITRADER_DB_PATH", str(db))
@@ -92,7 +92,7 @@ def test_cci_divergence_signals_obey_the_books_rules():
     strat = STRATEGIES["cci_divergence"]()
     sigs = []
     for seed in (0, 2, 8, 12):
-        sigs += strat.generate(synthetic(seed=seed, vol=0.02, drift=0.0), "binance", "BTC/USDT", "1d")
+        sigs += strat.generate(synthetic(seed=seed, vol=0.02, drift=0.0), "bybit", "BTC/USDT", "1d")
     assert sigs
     for s in sigs:
         assert s.features["cci_a"] < -150 and s.features["cci_c"] < -130

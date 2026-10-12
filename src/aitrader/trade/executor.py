@@ -76,6 +76,11 @@ class Executor:
         if os.path.exists(self.state_path):
             with open(self.state_path, encoding="utf-8") as fh:
                 self.state.update(json.load(fh))
+        # positions opened on an exchange the agent no longer uses can't be managed here
+        for key in [k for k in self.state["positions"] if k.split("|")[1] != exchange]:
+            self.state.setdefault("other_exchange", {})[key] = self.state["positions"].pop(key)
+            self.events.emit("error", f"{mode}: {key} was opened on another exchange; no longer managed "
+                             "here (check that account yourself)", level="warning", key=key)
 
     # ---- one pass -------------------------------------------------------------------------------
 
@@ -146,7 +151,7 @@ class Executor:
             except Exception as exc:
                 if type(exc).__name__ != "BadSymbol":
                     raise
-                # Binance's testnet lists fewer coins than the real exchange: skip, don't fail the tick
+                # a pair may not be listed on this exchange (or its demo): skip, don't fail the tick
                 self._skip(mark, key, f"{symbol} isn't listed on {self.exchange} {self.mode}", out)
                 continue
             price = book.best_ask

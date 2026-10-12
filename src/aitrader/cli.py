@@ -11,7 +11,7 @@ import sys
 import time
 from datetime import datetime, timezone
 
-from .config import Settings
+from .config import EXCHANGE, Settings
 from .data.downloader import download
 from .data.feeds import LiveFeed
 from .data.quality import check_candles
@@ -20,7 +20,7 @@ from .exchanges import PaperExchange, make_adapter
 from .models import OrderType, Side
 from .safety import live_gate_problems
 
-EXCHANGES = ["binance", "htx"]
+EXCHANGES = [EXCHANGE]  # Bybit only
 
 
 def _ms(date: str) -> int:
@@ -267,7 +267,7 @@ async def cmd_context(s: Settings, args) -> int:
                     return 0
                 await asyncio.sleep(args.interval)
         now, symbol = int(time.time() * 1000), (args.symbol or ["BTC/USDT"])[0]
-        for ex, sym in dict.fromkeys([(args.exchange, symbol), ("binance", symbol), ("global", "*")]):
+        for ex, sym in dict.fromkeys([(args.exchange, symbol), ("global", "*")]):
             for metric in ("funding_rate", "open_interest", "long_short_ratio", "btc_dominance",
                            "total_mcap", "total_mcap_change_24h", "stable_mcap"):
                 row = ctx.value_at(metric, ex, sym)
@@ -467,7 +467,7 @@ def cmd_learn(s: Settings, args) -> int:
 
         store = CandleStore(s.db_path)
         try:
-            rep = backtest_report(known_entries(reg.entries, builtins=not args.no_builtins), store, args.exchange or ["binance"], symbols,
+            rep = backtest_report(known_entries(reg.entries, builtins=not args.no_builtins), store, args.exchange or [EXCHANGE], symbols,
                                   years=args.years, cfg=cfg,
                                   progress=lambda n, total, sid, k: print(f"  [{n}/{total}] {sid}: {k} trades",
                                                                           flush=True))
@@ -849,9 +849,9 @@ async def _trade_run(s: Settings, args, control) -> int:
               file=sys.stderr)
         return 1
     if mode == "testnet":
-        keys = s.keys.get(f"{args.exchange}_testnet")
+        keys = s.keys.get(f"{args.exchange}_demo")
         if not (keys and keys.api_key and keys.secret):
-            msg = ("testnet executor: waiting for the Binance testnet API key and secret "
+            msg = ("demo executor: waiting for the Bybit Demo Trading API key and secret "
                    "(add them on the dashboard's Settings page)")
             events.emit("waiting", msg, level="warning")
             print(msg, file=sys.stderr)
@@ -1064,18 +1064,18 @@ def build_parser() -> argparse.ArgumentParser:
     co.add_argument("--backfill-days", type=int, default=30, help="history to fetch on first run")
 
     st = sub.add_parser("stream", help="print live prices from the websocket feed")
-    st.add_argument("--exchange", default="binance", choices=EXCHANGES)
+    st.add_argument("--exchange", default=EXCHANGE, choices=EXCHANGES)
     st.add_argument("--symbol", action="append")
     st.add_argument("--seconds", type=float, default=0, help="stop after N seconds (0 = forever)")
 
     ps = sub.add_parser("paper-smoke", help="open and close a test position on the paper exchange")
-    ps.add_argument("--exchange", default="binance", choices=EXCHANGES)
+    ps.add_argument("--exchange", default=EXCHANGE, choices=EXCHANGES)
     ps.add_argument("--symbol", default="BTC/USDT")
     ps.add_argument("--usdt", type=float, default=100.0)
 
     sg = sub.add_parser("signals", help="run a strategy over stored candles and save its signal log")
     sg.add_argument("--strategy", required=True)
-    sg.add_argument("--exchange", default="binance", choices=EXCHANGES)
+    sg.add_argument("--exchange", default=EXCHANGE, choices=EXCHANGES)
     sg.add_argument("--symbol", default="BTC/USDT")
     sg.add_argument("--timeframe", default="4h")
     sg.add_argument("--since", help="UTC date")
@@ -1086,7 +1086,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     bt = sub.add_parser("backtest", help="backtest a strategy on stored candles (fees + slippage)")
     bt.add_argument("--strategy", required=True)
-    bt.add_argument("--exchange", default="binance", choices=EXCHANGES)
+    bt.add_argument("--exchange", default=EXCHANGE, choices=EXCHANGES)
     bt.add_argument("--symbol", action="append")
     bt.add_argument("--timeframe", default="4h")
     bt.add_argument("--taker-fee", type=float, default=0.001)
@@ -1109,7 +1109,7 @@ def build_parser() -> argparse.ArgumentParser:
     cx = sub.add_parser("context", help="market context: funding, open interest, total market cap")
     cx.add_argument("context_cmd", choices=["collect", "show"])
     cx.add_argument("--symbol", action="append")
-    cx.add_argument("--exchange", default="binance", choices=EXCHANGES, help="for show")
+    cx.add_argument("--exchange", default=EXCHANGE, choices=EXCHANGES, help="for show")
     cx.add_argument("--once", action="store_true", help="collect: one top-up, then exit")
     cx.add_argument("--interval", type=float, default=900, help="collect: seconds between top-ups")
     cx.add_argument("--backfill-days", type=int, default=30, help="collect: history on first run")
@@ -1205,7 +1205,7 @@ def build_parser() -> argparse.ArgumentParser:
     ai_sub.add_parser("off", help="stop filtering: take every signal at full size")
     asc = ai_sub.add_parser("score", help="show the filter's probability for a strategy's recent signals")
     asc.add_argument("--strategy", required=True, help="strategy id or name from `learn list`")
-    asc.add_argument("--exchange", dest="score_exchange", default="binance", choices=EXCHANGES)
+    asc.add_argument("--exchange", dest="score_exchange", default=EXCHANGE, choices=EXCHANGES)
     asc.add_argument("--symbol", dest="score_symbol", default="BTC/USDT")
     asc.add_argument("--timeframe", default="4h")
     asc.add_argument("--last", type=int, default=20)
@@ -1224,7 +1224,7 @@ def build_parser() -> argparse.ArgumentParser:
     tr.set_defaults(by=None, reason=None, confirm=False)
     trr = tr_sub.add_parser("run", help="service: mirror the paper trades with real orders")
     trr.add_argument("--mode", choices=["testnet", "live"], default="testnet")
-    trr.add_argument("--exchange", default="binance", choices=EXCHANGES)
+    trr.add_argument("--exchange", default=EXCHANGE, choices=EXCHANGES)
     trr.add_argument("--strategy", action="append", help="only these registry ids (repeatable)")
     trr.add_argument("--interval", type=float, default=15)
     trr.add_argument("--once", action="store_true", help="one pass, then exit")

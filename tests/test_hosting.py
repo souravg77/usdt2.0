@@ -35,7 +35,7 @@ def world(tmp_path, monkeypatch):
     data = tmp_path / "data"
     store = CandleStore(str(data / "aitrader.db"))
     store.migrate()
-    store.upsert([Candle("binance", "BTC/USDT", "1h", int(NOW * 1000) - 3_600_000, 1, 1, 1, 1, 1)])
+    store.upsert([Candle("bybit", "BTC/USDT", "1h", int(NOW * 1000) - 3_600_000, 1, 1, 1, 1, 1)])
     store.close()
     (data / "learn").mkdir()
     (data / "learn" / "registry.json").write_text(json.dumps({"strategies": [{"status": "paper"}]}))
@@ -87,7 +87,7 @@ def test_doctor_flags_unsafe_and_broken_setups(world, monkeypatch):
     from aitrader.accounts.store import UserStore, Vault
     users = UserStore(str(root / "data" / "accounts.db"))
     u = users.create("a@example.com", "a-long-password-1", status="active")
-    users.save_keys(Vault("k" * 64), u.id, "binance", True, "KEY", "SECRET", {})
+    users.save_keys(Vault("k" * 64), u.id, "bybit", True, "KEY", "SECRET", {})
     users.close()
     monkeypatch.delenv("AITRADER_KEYS_SECRET")
     assert _levels(check())["key encryption secret"] == FAIL

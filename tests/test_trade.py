@@ -91,7 +91,7 @@ def test_event_log_tail_and_heartbeat(tmp_path):
 class FakeAdapter:
     """Fills market orders at the book price; can be told to reject, half-fill or time out."""
 
-    name = "binance"
+    name = "bybit"
 
     def __init__(self, usdt=10_000.0, bid=100.0, ask=100.1):
         self.cash = {"USDT": usdt}
@@ -104,12 +104,12 @@ class FakeAdapter:
     async def get_orderbook(self, symbol, depth=20):
         if self.fail:
             raise self.fail
-        return OrderBook("binance", symbol, 0, [(self.bid, 10)], [(self.ask, 10)])
+        return OrderBook("bybit", symbol, 0, [(self.bid, 10)], [(self.ask, 10)])
 
     async def balance(self):
         if self.fail:
             raise self.fail
-        return Balance("binance", free=dict(self.cash))
+        return Balance("bybit", free=dict(self.cash))
 
     async def place_order(self, symbol, side, amount, type=OrderType.MARKET, price=None, reason="",
                           client_id=None):
@@ -118,11 +118,11 @@ class FakeAdapter:
         base = symbol.split("/")[0]
         px = self.ask if side is Side.BUY else self.bid
         if self.mode == "reject":
-            o = Order(client_id, "binance", symbol, side, type, amount, None, OrderStatus.REJECTED,
+            o = Order(client_id, "bybit", symbol, side, type, amount, None, OrderStatus.REJECTED,
                       reason="insufficient balance")
         else:
             filled = amount / 2 if self.mode == "partial" else amount
-            o = Order(client_id, "binance", symbol, side, type, amount, None,
+            o = Order(client_id, "bybit", symbol, side, type, amount, None,
                       OrderStatus.FILLED if filled == amount else OrderStatus.CANCELED,
                       filled=filled, average=px, fee=filled * px * 0.001, fee_currency="USDT")
             sign = 1 if side is Side.BUY else -1
@@ -153,7 +153,7 @@ def _pos(ts, stop=95.0, ai=0.7):
                                          "risk_pct": 0.005}, "size_mult": 1.0, "ai_prob": ai}
 
 
-KEY = "s1|binance|BTC/USDT|1h"
+KEY = "s1|bybit|BTC/USDT|1h"
 SIG = int(NOW * 1000) - HOUR
 
 
@@ -165,7 +165,7 @@ def ex(tmp_path):
     events = EventLog(str(tmp_path / "ev.jsonl"), service="executor-testnet")
 
     def make(**kw):
-        return Executor(adapter, kw.pop("mode", "testnet"), "binance", str(paper),
+        return Executor(adapter, kw.pop("mode", "testnet"), "bybit", str(paper),
                         state_path=str(tmp_path / "state.json"), control=Control(str(tmp_path / "c.json")),
                         events=events, clock=lambda: NOW, **kw)
 
@@ -514,19 +514,19 @@ def test_testnet_executor_waits_for_keys_instead_of_erroring(tmp_path, monkeypat
     from aitrader.cli import main
 
     monkeypatch.chdir(tmp_path)
-    for k in ("BINANCE_TESTNET_API_KEY", "BINANCE_TESTNET_API_SECRET"):
+    for k in ("BYBIT_DEMO_API_KEY", "BYBIT_DEMO_API_SECRET"):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("AITRADER_MODE", "testnet")
     monkeypatch.setattr("aitrader.ops.secrets.restart_on_change", lambda *a, **k: None)
     assert main(["--env-file", "none", "trade", "run", "--mode", "testnet", "--once"]) == 1
-    assert "waiting for the Binance testnet API key" in capsys.readouterr().err
+    assert "waiting for the Bybit Demo Trading API key" in capsys.readouterr().err
     events = [json.loads(line) for line in open("data/ops/events.jsonl")]
     assert events[-1]["kind"] == "waiting" and events[-1]["level"] == "warning"
 
 
 def test_ccxt_adapter_client_ids_and_lock(monkeypatch):
     from aitrader.config import Mode, Settings
-    from aitrader.exchanges import BinanceAdapter
+    from aitrader.exchanges import BybitAdapter
 
     class OrderNotFound(Exception):
         pass
@@ -548,28 +548,35 @@ def test_ccxt_adapter_client_ids_and_lock(monkeypatch):
             return {"id": "1", "symbol": args[0], "side": args[2], "type": args[1], "amount": args[3],
                     "status": "closed", "filled": args[3], "average": 100.0, "timestamp": 1}
 
-        async def fetch_order(self, oid, symbol, params):
-            self.looked_up = params
-            if params.get("origClientOrderId") == "bad":
+        def market(self, symbol):
+            return {"id": symbol.replace("/", ""), "symbol": symbol}
+
+        async def private_get_v5_order_realtime(self, req):
+            self.looked_up = req
+            if req["orderLinkId"] == "bad":
                 raise BadRequest()
-            raise OrderNotFound()
+            return {"result": {"list": []}}
+
+        async def private_get_v5_order_history(self, req):
+            return {"result": {"list": []}}
 
     client = Client()
-    ad = BinanceAdapter(Settings(mode=Mode.TESTNET), testnet=True, client=client)
+    ad = BybitAdapter(Settings(mode=Mode.TESTNET), testnet=True, client=client)
     run(ad.place_order("BTC/USDT", Side.BUY, 0.1234567, client_id="ait123"))
-    assert client.calls[0][3] == pytest.approx(0.12346) and client.calls[0][5] == {"newClientOrderId": "ait123"}
+    assert client.calls[0][3] == pytest.approx(0.12346)
+    assert client.calls[0][5] == {"isLeverage": 0, "marketUnit": "baseCoin", "orderLinkId": "ait123"}
     assert run(ad.find_order("ait123", "BTC/USDT")) is None
-    assert client.looked_up == {"origClientOrderId": "ait123"}  # the name Binance's lookup reads
+    assert client.looked_up == {"category": "spot", "symbol": "BTCUSDT", "orderLinkId": "ait123"}
     with pytest.raises(BadRequest):  # an error is not "the order never arrived"
         run(ad.find_order("bad", "BTC/USDT"))
-    live = BinanceAdapter(Settings(), client=Client())  # paper mode, live lock closed
+    live = BybitAdapter(Settings(), client=Client())  # paper mode, live lock closed
     with pytest.raises(Exception):
         run(live.place_order("BTC/USDT", Side.BUY, 1, client_id="x"))
 
 
 def test_executor_skips_pairs_the_exchange_does_not_list(ex):
     make, adapter, paper, events = ex
-    pepe = "s1|binance|PEPE/USDT|1h"
+    pepe = "s1|bybit|PEPE/USDT|1h"
     _paper(paper, {pepe: _pos(SIG), KEY: _pos(SIG)})
 
     class BadSymbol(Exception):
@@ -579,7 +586,7 @@ def test_executor_skips_pairs_the_exchange_does_not_list(ex):
 
     async def book(symbol, depth=20):
         if symbol == "PEPE/USDT":
-            raise BadSymbol("binance does not have market symbol PEPE/USDT")
+            raise BadSymbol("bybit does not have market symbol PEPE/USDT")
         return await real(symbol, depth)
 
     adapter.get_orderbook = book
@@ -619,7 +626,7 @@ def test_executor_leaves_dust_and_still_finishes_the_kill_switch(ex):
 def test_executor_values_a_bnb_fee_at_the_bnb_price(ex):
     make, adapter, *_ = ex
     e = make()
-    order = Order("x", "binance", "BTC/USDT", Side.SELL, OrderType.MARKET, 1, None, OrderStatus.FILLED,
+    order = Order("x", "bybit", "BTC/USDT", Side.SELL, OrderType.MARKET, 1, None, OrderStatus.FILLED,
                   filled=1, average=60_000, fee=0.01, fee_currency="BNB")
     adapter.bid = 600.0  # the book answers every symbol, BNB/USDT included
     assert run(e._fee_in_quote(order, 60_000)) == pytest.approx(6.0)  # not 0.01 * 60,000
