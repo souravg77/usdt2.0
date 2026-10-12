@@ -56,6 +56,7 @@ class Paths:
     changes: str = "data/changes"
     feed: str = "data/ops/feed.json"
     teacher: str = "data/learn/teacher"
+    improve: str = "data/learn/improve.json"
 
 
 def create_app(settings: Settings, auth: Auth, jobs: JobRunner, paths: Paths | None = None,

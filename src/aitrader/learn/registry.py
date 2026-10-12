@@ -108,8 +108,8 @@ def make_strategy(entry: Entry):
     from ..strategies import STRATEGIES
     from .rules import RuleStrategy
 
-    if entry.kind == "builtin":
-        return STRATEGIES[entry.name]()
+    if entry.kind == "builtin":  # an improved version carries its own settings (learn.improve)
+        return STRATEGIES[entry.name](**((entry.spec or {}).get("params") or {}))
     if entry.kind == "short":
         from ..strategies.mirror import ShortMirror
 

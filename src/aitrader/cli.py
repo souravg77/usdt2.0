@@ -653,6 +653,25 @@ def cmd_learn(s: Settings, args) -> int:
         reg.save()
         print(f"{e.id} retired")
         return 0
+    if cmd == "improve":
+        from .learn.improve import improve
+
+        entries = [reg.get(i) for i in args.ids] if args.ids else reg.with_status("paper")
+        if not entries:
+            print("nothing to improve: no strategy is paper trading", file=sys.stderr)
+            return 1
+        store = CandleStore(s.db_path)
+        try:
+            rep = improve(store, reg, entries, exchanges, symbols, cfg, args.max_evals, args.report)
+        finally:
+            store.close()
+        reg.save()
+        for r in rep["results"]:
+            ch = ", ".join(f"{k} {a:g}->{b:g}" for k, (a, b) in r["changes"].items())
+            print(f"  {r['strategy']:40} tried {r['tried']:3d}  {r['outcome']}" + (f"\n      {ch}" if ch else "")
+                  + (f"\n      new: {r['new_id']}" if r.get("new_id") else ""))
+        print(f"{rep['improved']} of {len(rep['results'])} strategies improved")
+        return 0
     if cmd in ("teach", "teach-on", "teach-off"):
         return _teach(s, args, reg, exchanges, symbols, cfg)
     if cmd == "paper":
@@ -1470,6 +1489,11 @@ def build_parser() -> argparse.ArgumentParser:
     lx = le_sub.add_parser("retire", help="stop paper-trading a strategy")
     lx.add_argument("id")
     lx.add_argument("--reason")
+    lim = le_sub.add_parser("improve", help="try many settings for each paper strategy on older data, keep a change "
+                                            "only if it also wins on newer data and passes the full gate")
+    lim.add_argument("ids", nargs="*", help="strategies to improve (default: every one paper trading)")
+    lim.add_argument("--max-evals", type=int, default=30, help="most backtests per strategy in the search")
+    lim.add_argument("--report", default="data/learn/improve.json")
     lte = le_sub.add_parser("teach", help="backtest teacher: learn which market situations (trend, volatility, "
                                           "volume) each strategy wins and loses in, check it on unseen data")
     lte.add_argument("--all", action="store_true", help="every strategy in the registry, not only the ones "
