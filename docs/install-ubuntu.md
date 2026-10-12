@@ -216,7 +216,8 @@ docker compose run --rm collector trade status
 ./deploy/backup.sh      # database, strategy and model registries, trade state, user accounts
 ```
 
-Make it daily (`crontab -e`, then add):
+The installer makes one backup straight away and schedules this line in your crontab, so it runs
+every day (check with `crontab -l`):
 
 ```
 30 3 * * * cd ~/AI_crypto_trader && ./deploy/backup.sh >> data/backup.log 2>&1

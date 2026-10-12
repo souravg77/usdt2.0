@@ -313,7 +313,9 @@ paper trading. Nothing trades real money.</p>
                     '<button class="danger">Pull the kill switch</button></form></div>')
         note = f'<p class="good">{_e(msg)}</p>' if msg else ""
         events = EventLog(paths.events).read(limit=600)
-        body = [note, _trading_stats(c, settings, paths, paper, events), _setup_hint(paths),
+        body = [note, _trading_stats(c, settings, paths, paper, events),
+                '<div class="grid">', _paper_switch_card(c, paths, events, jobs.list(), csrf),
+                _live_card(settings, paths, events), "</div>",
                 '<div class="grid">', controls, _gate_card(paths, csrf), "</div>",
                 "<h2>Equity</h2>", _equity_svg(paper, execs),
                 "<h2>Open positions</h2>", _positions_table(paper, execs),
@@ -358,6 +360,37 @@ paper trading. Nothing trades real money.</p>
             _control().kill(f"kill switch from the dashboard by {user}", by=user)
             _event("kill", f"kill switch pulled from the dashboard by {user}", "warning")
             return "Kill switch on: entries stopped, executors are selling. Resume when ready."
+        return _control_post(request, csrf, act)
+
+    @app.post("/trading/paper/on")
+    def trading_paper_on(request: Request, csrf: str = Form("")):
+        def act(user):
+            ctl = _control()
+            if ctl.killed:
+                return "The kill switch is on: press Resume under Controls first, then turn paper trading on."
+            if ctl.paused:
+                ctl.resume(by=user)
+                _event("resume", f"paper trading turned on from the dashboard by {user}")
+            if any(j["status"] in ("queued", "running") and j.get("meta", {}).get("kind") == "paper-start"
+                   for j in jobs.list()):
+                return "Paper trading is already being switched on; see Recent jobs on the Overview page."
+            since = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 365 * 86400))
+            jobs.submit("Turn paper trading on: every strategy, then a year of price history",
+                        [["learn", "add-library"], ["learn", "add-builtin"], ["learn", "paper-all"],
+                         ["download", "--since", since, "--exchange", "binance"],
+                         ["learn", "test", "--paper"]], meta={"kind": "paper-start"})
+            _event("paper_on", f"paper trading turned on from the dashboard by {user}")
+            return ("Paper trading is on: every strategy is being loaded into paper trading, then a year of "
+                    "price history is downloaded and each one is backtested. Trades open when a strategy's "
+                    "signal appears on a closed candle.")
+        return _control_post(request, csrf, act)
+
+    @app.post("/trading/paper/off")
+    def trading_paper_off(request: Request, csrf: str = Form("")):
+        def act(user):
+            _control().pause(f"paper trading turned off from the dashboard by {user}", by=user)
+            _event("risk_pause", f"paper trading turned off from the dashboard by {user}", "warning")
+            return "Paper trading is off: no new entries. Open positions are still managed until they close."
         return _control_post(request, csrf, act)
 
     @app.post("/trading/gate")
@@ -654,17 +687,68 @@ def _trading_stats(c: dict, settings, paths: Paths, paper: dict, events: list[di
         f'<span class="s">{_e(sub)}</span></div>' for k, v, cls, sub in tiles) + "</div>"
 
 
-def _setup_hint(paths: Paths) -> str:
+def _paper_switch_card(c: dict, paths: Paths, events: list[dict], jobs: list[dict], csrf: str) -> str:
+    """The paper-trading switch: on loads every strategy into paper trading; off pauses entries."""
     from ..learn import Registry
 
     try:
-        if any(e.status == "paper" for e in Registry(paths.registry).entries.values()):
-            return ""
+        in_paper = sum(1 for e in Registry(paths.registry).entries.values() if e.status == "paper")
     except Exception:
-        pass
-    return ('<p class="warn">No strategy is paper trading yet, so there is nothing to trade. Run the '
-            '<b>first-time setup</b> on the <a href="/settings">Settings</a> page: it downloads price '
-            'history and tests the strategy library; the ones that pass start paper trading.</p>')
+        in_paper = 0
+    svc, svc_cls, svc_detail = _service_state(events, "paper", int(time.time() * 1000))
+    starting = next((j for j in jobs if j.get("meta", {}).get("kind") == "paper-start"
+                     and j["status"] in ("queued", "running")), None)
+    if c["killed"]:
+        state, cls, why = "OFF", "bad", "the kill switch is on"
+    elif c["paused"]:
+        state, cls, why = "OFF", "bad", "new entries are paused"
+    elif starting:
+        state, cls, why = "STARTING", "warn", f'loading strategies and price history (<a href="/jobs/{_e(starting["id"])}">progress</a>)'
+    elif not in_paper:
+        state, cls, why = "OFF", "bad", "no strategy is paper trading yet"
+    elif svc_cls != "good":
+        state, cls, why = "ON", "warn", f"but the paper service is {_e(svc)} ({_e(svc_detail)})"
+    else:
+        state, cls, why = "ON", "good", f"{in_paper} strategies trading with fake money"
+    on = "Turn paper trading on" if state != "ON" else "Reload every strategy"
+    return (f'<div class="card"><h3>Paper trading (fake money)</h3><p>Paper trading <b class="{cls}">{state}</b>: {why}</p>'
+            '<p class="small muted">On puts every strategy into paper trading, the untested and the '
+            'backtest-rejected ones too, and downloads a year of history for all pairs. Each one then trades '
+            'live prices with fake money; one that loses too much retires by itself. Each one is then backtested '
+            'too: only strategies that pass both the backtest and paper trading can ever be approved for live. '
+            'Off pauses new entries '
+            '(pause and resume apply to the testnet and live traders too).</p><div class="row">'
+            f'<form method="post" action="/trading/paper/on">{csrf}<button>{on}</button></form>'
+            f'<form method="post" action="/trading/paper/off">{csrf}<button class="ghost">Turn paper trading off</button></form>'
+            '</div></div>')
+
+
+def _live_card(settings, paths: Paths, events: list[dict]) -> str:
+    """Live (real money) readiness. It is switched on only on the server, never from the website."""
+    rep = _load_json(os.path.join(paths.golive_dir, "report.json"))
+    approval = _load_json(os.path.join(paths.golive_dir, "approval.json"))
+    svc, svc_cls, _detail = _service_state(events, "executor-live", int(time.time() * 1000))
+    checks = [
+        ("Real Binance keys saved (trade only, withdrawals off)",
+         bool(os.environ.get("BINANCE_API_KEY") and os.environ.get("BINANCE_API_SECRET"))),
+        ("Go/no-go gate passed", bool(rep.get("passed"))),
+        ("Strategies approved (aitrader golive approve)", bool(approval.get("by"))),
+        ("Pilot budget set (AITRADER_PILOT_MAX_USDT in .env)", bool(os.environ.get("AITRADER_PILOT_MAX_USDT"))),
+        ("Live lock opened in .env on the server", not live_gate_problems(settings)),
+        ("Live trader running", svc_cls == "good"),
+    ]
+    on = all(ok for _n, ok in checks)
+    rows = "".join(f'<li class="{"good" if ok else "bad"}">{"✓" if ok else "✗"} {_e(n)}</li>' for n, ok in checks)
+    return (f'<div class="card"><h3>Live trading (real money)</h3><p>Live trading <b class="{"good" if on else "bad"}">'
+            f'{"ON" if on else "OFF"}</b></p><ul class="small gate">{rows}</ul>'
+            '<p class="small">There is no switch for this on the website, on purpose: anyone who got your '
+            'dashboard password could otherwise trade your real money. When the first four lines are '
+            'ticked, turn it on from the server: in <code>~/AI_crypto_trader/.env</code> set '
+            '<code>AITRADER_MODE=live</code>, <code>AITRADER_LIVE_UNLOCKED=true</code> and '
+            '<code>AITRADER_LIVE_CONFIRM=I accept real-money risk</code>, then run '
+            '<code>docker compose up -d</code> and <code>docker compose --profile live up -d executor-live</code>. '
+            'To stop it at once, pull the kill switch below; on the server, '
+            '<code>docker compose stop executor-live</code>. See docs/live-trading.md.</p></div>')
 
 
 def _equity_svg(paper: dict, execs: dict) -> str:

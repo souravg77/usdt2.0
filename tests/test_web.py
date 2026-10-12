@@ -182,5 +182,43 @@ def test_trading_page_status_tiles_and_grouped_events(web):
     assert 'class="stat"' in r.text and "Testnet trader" in r.text
     assert '<span class="v warn">waiting for keys</span>' in r.text  # the latest event decides
     assert r.text.count("binance requires apiKey") == 1 and "×12" in r.text  # repeats shown once
-    assert "first-time setup" in r.text  # nothing paper trading yet
+    assert "no strategy is paper trading yet" in r.text  # nothing paper trading yet
     assert '<a href="/trading" class=active aria-current=page>Trading</a>' in r.text
+
+
+def test_paper_switch_and_live_card(web, monkeypatch):
+    client, auth, runner, paths = web
+    monkeypatch.delenv("BINANCE_API_KEY", raising=False)
+    submitted = []
+    monkeypatch.setattr(runner, "submit", lambda title, steps, meta=None: submitted.append((steps, meta)) or "j1")
+    csrf = auth.csrf(login(client))
+    r = client.get("/trading")
+    assert "Paper trading <b class=\"bad\">OFF</b>" in r.text and "Turn paper trading on" in r.text
+    assert "Live trading <b class=\"bad\">OFF</b>" in r.text and "no switch for this on the website" in r.text
+    assert "/trading/live" not in r.text  # live is never switched on from the website
+
+    client.post("/trading/paper/off", data={"csrf": csrf})
+    assert json.load(open("data/trade/control.json"))["paused"]
+    assert client.post("/trading/paper/on", data={}, follow_redirects=False).status_code == 403
+    r = client.post("/trading/paper/on", data={"csrf": csrf}, follow_redirects=False)
+    assert "Paper+trading+is+on" in r.headers["location"] or "Paper%20trading%20is%20on" in r.headers["location"]
+    assert not json.load(open("data/trade/control.json"))["paused"]
+    steps, meta = submitted[0]
+    assert meta == {"kind": "paper-start"}
+    assert steps[:3] == [["learn", "add-library"], ["learn", "add-builtin"], ["learn", "paper-all"]]
+    assert steps[3][0] == "download" and "--since" in steps[3]
+    assert steps[4] == ["learn", "test", "--paper"]
+
+    client.post("/trading/kill", data={"csrf": csrf, "confirm": "KILL"})
+    r = client.post("/trading/paper/on", data={"csrf": csrf}, follow_redirects=False)
+    assert "kill" in r.headers["location"].lower() and len(submitted) == 1
+    assert json.load(open("data/trade/control.json"))["killed"]  # the kill switch is not cleared by it
+
+    client.post("/trading/resume", data={"csrf": csrf})
+    reg = Registry(paths.registry)
+    reg.add(Entry(id="s1", kind="builtin", name="trend_pullback", status="paper"))
+    reg.save()
+    from aitrader.ops import EventLog
+
+    EventLog(paths.events, service="paper").emit("heartbeat", "alive")
+    assert "Paper trading <b class=\"good\">ON</b>" in client.get("/trading").text

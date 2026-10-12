@@ -11,7 +11,8 @@
 #   3. downloads the code into ~/AI_crypto_trader
 #   4. creates .env with strong random secrets (the dashboard password is printed once)
 #   5. builds the image, prepares the database, starts collector, context, paper, web and caddy
-#   6. runs `aitrader doctor`
+#   6. schedules a daily backup (cron, 03:30) and makes the first one
+#   7. runs `aitrader doctor`
 # Live trading stays locked. Running it again is safe: existing settings are kept.
 set -euo pipefail
 
@@ -30,7 +31,7 @@ while [ $# -gt 0 ]; do
     --dir) DIR="$2"; shift 2 ;;
     --branch) BRANCH="$2"; shift 2 ;;
     --no-firewall) FIREWALL=0; shift ;;
-    -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
     *) echo "unknown option $1" >&2; exit 2 ;;
   esac
 done
@@ -53,7 +54,7 @@ say "Updating Ubuntu and installing base packages"
 sudo apt-get update -y
 sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl git ufw fail2ban \
-  unattended-upgrades openssl rsync
+  unattended-upgrades openssl rsync cron
 sudo dpkg-reconfigure -f noninteractive unattended-upgrades
 sudo systemctl enable --now fail2ban
 sudo timedatectl set-ntp true || true  # trading needs a correct clock
@@ -154,6 +155,14 @@ for svc in telegram users; do
   fi
 done
 $DOCKER compose --profile https up -d --force-recreate caddy  # picks up Caddyfile changes
+
+say "Daily backups"
+# Every day at 03:30 (server time): database, strategy registry, trade state, accounts. The newest
+# 14 are kept in data/backups/. One runs now as well, so there is a backup from the start.
+CRON_LINE="30 3 * * * cd $DIR && ./deploy/backup.sh >> data/backup.log 2>&1"
+( crontab -l 2>/dev/null | grep -v 'deploy/backup.sh' || true; echo "$CRON_LINE" ) | crontab -
+sudo systemctl enable --now cron >/dev/null 2>&1 || true
+DOCKER="$DOCKER" ./deploy/backup.sh || echo "warning: the first backup failed; run ./deploy/backup.sh to see why" >&2
 
 say "Health check"
 sleep 10

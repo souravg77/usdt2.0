@@ -586,3 +586,14 @@ def test_executor_skips_pairs_the_exchange_does_not_list(ex):
     out = run(make().tick())
     assert out["skipped"] == [pepe] and out["opened"] == [KEY]
     assert any("isn't listed" in x["text"] for x in events.read(kinds={"signal_skipped"}))
+
+
+def test_gate_leaves_out_strategies_that_only_paper_trade(tmp_path):
+    gl, _events, reg = _gate_world(tmp_path)
+    reg.add(Entry(id="untested", kind="rule", name="u", status="paper", spec={"a": 2}))
+    reg.add(Entry(id="failed", kind="rule", name="f", status="paper", spec={"a": 3},
+                  backtest={"out_of_sample": {"trades": 80, "expectancy_r": -0.2}, "failed": ["expectancy"]}))
+    reg.save()
+    assert gl.evaluate()["strategies"] == ["s1"]  # paper-all strategies are not live candidates
+    rep = gl.evaluate(["failed"])  # named on purpose: the backtest line still fails it
+    assert not next(c for c in rep["criteria"] if c["name"].startswith("Expectancy after costs (backtest"))["passed"]

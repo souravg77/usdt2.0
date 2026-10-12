@@ -64,6 +64,7 @@ class PaperTrader:
         self.events = events  # ops.EventLog for alerts and the stability record, or None
         self.news = news  # news.NewsFilter (AI web-search brief): can only shrink or pause entries
         self.state = {"open": {}, "trades": [], "equity": {}, "last_signal": {}}
+        self._seen: dict = {}  # market -> newest candle close already evaluated (this process)
         if os.path.exists(state_path):
             with open(state_path, encoding="utf-8") as fh:
                 self.state.update(json.load(fh))
@@ -78,18 +79,28 @@ class PaperTrader:
         allow, size_mult = self._calendar(now_ms)
         if self.control is not None and self.control.paused:
             allow = False
+        frames: dict = {}  # (exchange, symbol, timeframe) -> (frame, newest close, new candle since last tick)
         for entry in reg.with_status("paper"):
-            strat = make_strategy(entry)
+            try:
+                strat = make_strategy(entry)
+            except Exception:  # one broken strategy must not stop the others
+                log.exception("can't build %s; skipping it", entry.id)
+                continue
             for ex in self.exchanges:
                 for sym in self.symbols:
                     for tf in strat.spec.timeframes:
                         key = f"{entry.id}|{ex}|{sym}|{tf}"
                         if key in self.state["open"] or not allow:
                             continue
-                        df = self._frame(ex, sym, tf, now_ms - WINDOW_BARS * TIMEFRAME_MS[tf], now_ms)
-                        if df is None or len(df) < MIN_BARS:
+                        market = (ex, sym, tf)
+                        if market not in frames:
+                            df = self._frame(ex, sym, tf, now_ms - WINDOW_BARS * TIMEFRAME_MS[tf], now_ms)
+                            close = int(df["ts"].iloc[-1]) + TIMEFRAME_MS[tf] if df is not None and len(df) else None
+                            frames[market] = (df, close, close is not None and self._seen.get(market) != close)
+                        df, newest_close, fresh = frames[market]
+                        # signals only appear when a candle closes: skip markets with no new candle
+                        if not fresh or df is None or len(df) < MIN_BARS:
                             continue
-                        newest_close = int(df["ts"].iloc[-1]) + TIMEFRAME_MS[tf]
                         sigs = [s for s in strat.generate(df, ex, sym, tf) if s.ts == newest_close]
                         if not sigs or sigs[-1].ts <= self.state["last_signal"].get(key, 0):
                             continue
@@ -110,8 +121,10 @@ class PaperTrader:
                         events["opened"].append(key)
                         log.info("paper signal %s entry~%.6g stop %.6g ai p=%s size x%.2f", key,
                                  sig.entry, sig.stop, ai["prob"], ai["size"])
+        for market, (_df, close, _fresh) in frames.items():
+            self._seen[market] = close
         self._score(reg, events)
-        reg.save()
+        self._save_registry(reg, events["retired"])
         self.save()
         self._emit(events)
         return events
@@ -263,6 +276,20 @@ class PaperTrader:
                 entry.set_status("retired", why)
                 events["retired"].append(entry.id)
                 log.warning("retired %s: %s", entry.id, why)
+
+    def _save_registry(self, reg: Registry, retired: list[str]) -> None:
+        """Write back only what this tick changed (paper results, retirements) onto the file as
+        it is now: a `learn` command or the dashboard may have changed it while the tick ran."""
+        fresh = Registry(self.registry_path)
+        for eid, e in reg.entries.items():
+            f = fresh.entries.get(eid)
+            if f is None:
+                continue
+            f.paper = e.paper
+            if eid in retired and f.status == "paper":
+                f.history.append(e.history[-1])
+                f.status = "retired"
+        fresh.save()
 
     def _calendar(self, now_ms: int) -> tuple[bool, float]:
         if self.calendar is None:

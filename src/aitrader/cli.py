@@ -378,12 +378,15 @@ def cmd_learn(s: Settings, args) -> int:
     cfg = BacktestConfig(taker_fee=s.paper_taker_fee, maker_fee=s.paper_maker_fee,
                          slippage_bps=s.paper_slippage_bps)
 
-    def run_tests(entries) -> None:
+    def run_tests(entries, move: bool = True) -> None:
         store = CandleStore(s.db_path)
         for e in entries:
-            res = evaluate(e, store, exchanges, symbols, cfg)
+            res = evaluate(e, store, exchanges, symbols, cfg, move=move)
             m = res["out_of_sample"]
-            verdict = {"paper": "PASSED -> paper trading", "rejected": "rejected"}.get(e.status, "untested")
+            if move:
+                verdict = {"paper": "PASSED -> paper trading", "rejected": "rejected"}.get(e.status, "untested")
+            else:
+                verdict = "no data" if not res["markets"] else "failed" if res["failed"] else "passed"
             print(f"  {e.id:40} {verdict:24} oos trades={m['trades']:4d} exp={m['expectancy_r']:+.3f}R"
                   + (f"\n      why: {'; '.join(res['failed'])}" if res["failed"] else ""))
         store.close()
@@ -437,15 +440,27 @@ def cmd_learn(s: Settings, args) -> int:
             print(("  + " if reg.add(e) else "  = ") + e.id)
         reg.save()
         return 0
+    if cmd == "paper-all":
+        moved = 0
+        for e in reg.with_status("candidate", "rejected"):
+            e.set_status("paper", "paper-test every strategy (turned on from the dashboard or `learn paper-all`)")
+            moved += 1
+        reg.save()
+        n = len(reg.with_status("paper"))
+        print(f"{moved} strategies moved to paper trading; {n} paper trading now "
+              f"({len(reg.with_status('retired'))} retired after poor paper results stay retired)")
+        return 0
     if cmd == "test":
         if args.ids:
             entries = [reg.get(i) for i in args.ids]
+        elif args.paper:
+            entries = reg.with_status("paper")
         else:
             entries = reg.with_status("candidate", *(("rejected",) if args.retest else ()))
         if not entries:
             print("nothing to test (add strategies with `learn read` or `learn add-builtin`)")
             return 0
-        run_tests(entries)
+        run_tests(entries, move=not args.paper)
         return 0
     if cmd == "report":
         from .learn.report import backtest_report, known_entries, report_text, save_report
@@ -1126,9 +1141,13 @@ def build_parser() -> argparse.ArgumentParser:
     ll.add_argument("--test", action="store_true", help="backtest them straight away")
     lb = le_sub.add_parser("add-builtin", help="register the hand-coded strategies too")
     lb.add_argument("names", nargs="*")
+    le_sub.add_parser("paper-all", help="paper-trade every strategy, including untested and rejected "
+                                        "ones (fake money; poor ones retire on their paper results)")
     lt = le_sub.add_parser("test", help="backtest candidates; passes go to paper trading")
     lt.add_argument("ids", nargs="*")
     lt.add_argument("--retest", action="store_true", help="also re-test rejected strategies")
+    lt.add_argument("--paper", action="store_true", help="backtest the strategies already paper trading and "
+                                                        "record the result, without moving them")
     lrp = le_sub.add_parser("report", help="backtest every strategy over the last N years: win report "
                                            "per strategy and per year")
     lrp.add_argument("--years", type=int, default=5)

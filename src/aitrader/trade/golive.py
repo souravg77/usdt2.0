@@ -55,6 +55,12 @@ class _R:
         self.r, self.cost_r = float(r), 0.0
 
 
+def passed_backtest(entry) -> bool:
+    """The strategy's latest backtest ran on data and passed the backtest gate."""
+    bt = entry.backtest or {}
+    return not bt.get("failed") and (bt.get("out_of_sample") or {}).get("trades", 0) > 0
+
+
 class GoLive:
     def __init__(self, root: str = DEFAULT_DIR, registry_path: str = "data/learn/registry.json",
                  paper_state: str = "data/learn/paper_state.json", models_dir: str = "data/ai/models",
@@ -96,7 +102,10 @@ class GoLive:
         from ..learn import Registry
 
         reg = Registry(self.registry_path)
-        entries = [reg.get(i) for i in ids] if ids else reg.with_status("paper")
+        if ids:
+            entries = [reg.get(i) for i in ids]
+        else:  # paper trading also runs strategies that failed or skipped the backtest: not live candidates
+            entries = [e for e in reg.with_status("paper") if passed_backtest(e)]
         return reg, entries
 
     def evaluate(self, strategy_ids: list[str] | None = None) -> dict:
