@@ -319,6 +319,9 @@ paper trading. Nothing trades real money.</p>
         acct = await account.snapshot()
         if c["killed"]:
             state = f'<b class="bad">KILL SWITCH ON</b> since {_when(c.get("since"))}'
+        elif c.get("halted"):
+            state = (f'<b class="bad">SAFETY HALT</b> since {_when(c.get("since"))}: {_e(c.get("reason", ""))}. '
+                     'Check the account on Bybit, then press Resume')
         elif c["paused"]:
             state = f'<b class="bad">PAUSED</b> since {_when(c.get("since"))}: {_e(c.get("reason", ""))}'
         else:
@@ -805,6 +808,8 @@ def _trading_stats(c: dict, settings, paths: Paths, paper: dict, events: list[di
 
     if c["killed"]:
         trading = ("Kill switch on", "bad")
+    elif c.get("halted"):
+        trading = ("Safety halt", "bad")
     elif c["paused"]:
         trading = ("Paused", "warn")
     else:
@@ -877,6 +882,8 @@ def _paper_switch_card(c: dict, paths: Paths, events: list[dict], jobs: list[dic
                      and j["status"] in ("queued", "running")), None)
     if c["killed"]:
         state, cls, why = "OFF", "bad", "the kill switch is on"
+    elif c.get("halted"):
+        state, cls, why = "OFF", "bad", "the safety halt stopped new entries (see Controls)"
     elif c["paused"]:
         state, cls, why = "OFF", "bad", "new entries are paused"
     elif starting:

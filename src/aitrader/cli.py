@@ -1422,6 +1422,9 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    from .ops.redact import install
+
+    install()  # no key, signature or signed URL is ever written to a log
     if args.env_file:
         from dotenv import load_dotenv
 
