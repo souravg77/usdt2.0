@@ -24,6 +24,7 @@ class StrategySpec:
     filter: str
     size: str
     decisions: tuple[str, ...] = ()
+    regime: str = ""  # the market state the rules are meant for ("" = not stated)
 
 
 @dataclass(frozen=True)
@@ -62,6 +63,9 @@ class Signal:
 class Strategy(ABC):
     spec: StrategySpec
     params: dict
+    # True when ``generate`` reads market-context columns (``funding_rate``...) that
+    # ``data.context.attach_context`` adds to the candle frame. Without them it must not trade.
+    needs_context: bool = False
 
     def __init__(self, **params):
         self.params = {**self.default_params(), **params}

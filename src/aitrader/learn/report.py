@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from ..backtest import BacktestConfig, metrics, run_backtest
 from ..data.store import CandleStore
 from ..indicators import candles_to_frame
-from .lab import MIN_BARS
+from .lab import MIN_BARS, with_context
 from .registry import Entry, make_strategy
 
 YEAR_MS = 365 * 86_400_000
@@ -71,7 +71,7 @@ def backtest_report(entries: list[Entry], store: CandleStore, exchanges: list[st
                     df = frames[key]
                     if df is None:
                         continue
-                    t = run_backtest(strat, df, ex, sym, tf, cfg)
+                    t = run_backtest(strat, with_context(strat, df, store, ex, sym, tf), ex, sym, tf, cfg)
                     trades += t
                     markets.append({"exchange": ex, "symbol": sym, "timeframe": tf, "bars": len(df),
                                     "from": int(df["ts"].iloc[0]), "to": int(df["ts"].iloc[-1]),

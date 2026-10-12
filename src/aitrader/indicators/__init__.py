@@ -1,4 +1,5 @@
-"""Technical modules: trend, momentum, volatility, structure, levels and volume profile.
+"""Technical modules: trend, momentum, volatility, structure, levels and volume profile,
+plus ``indicator_valid`` to tell whether a value can be trusted (warm-up done, no missing candles).
 
 Every function takes a pandas DataFrame/Series built from candles (see ``candles_to_frame``) and
 uses only data up to each bar, so values are free of look-ahead.
@@ -33,6 +34,14 @@ from .core import (
     swing_points,
     volume_profile,
     vwap,
+    supertrend,
+    williams_r,
+    keltner,
+    obv,
+    mfi,
+    cmf,
+    missing_candles,
+    indicator_valid,
 )
 
 __all__ = [
@@ -64,4 +73,12 @@ __all__ = [
     "swing_points",
     "volume_profile",
     "vwap",
+    "supertrend",
+    "williams_r",
+    "keltner",
+    "obv",
+    "mfi",
+    "cmf",
+    "missing_candles",
+    "indicator_valid",
 ]

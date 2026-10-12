@@ -11,11 +11,20 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 
 from ..backtest import BacktestConfig, metrics, run_backtest, split_periods
+from ..data.context import ContextStore, attach_context, has_context
 from ..data.store import CandleStore
 from ..indicators import candles_to_frame
 from .registry import Entry, make_strategy
 
 MIN_BARS = 300
+
+
+def with_context(strat, df, store, exchange: str, symbol: str, timeframe: str):
+    """``df`` plus funding / open-interest columns for a strategy that reads them
+    (``needs_context``), when the database has context rows; otherwise ``df`` unchanged."""
+    if not getattr(strat, "needs_context", False) or df is None or not has_context(store):
+        return df
+    return attach_context(df, ContextStore(store), exchange, symbol, timeframe)
 
 
 @dataclass(frozen=True)
@@ -67,7 +76,7 @@ def evaluate(entry: Entry, store: CandleStore, exchanges: list[str], symbols: li
                 candles = store.load(ex, sym, tf)
                 if len(candles) < MIN_BARS:
                     continue
-                ins, oos, _final = split_periods(candles_to_frame(candles))
+                ins, oos, _final = split_periods(with_context(strat, candles_to_frame(candles), store, ex, sym, tf))
                 t_in = run_backtest(strat, ins, ex, sym, tf, cfg)
                 t_oos = run_backtest(strat, oos, ex, sym, tf, cfg)
                 trades_in += t_in

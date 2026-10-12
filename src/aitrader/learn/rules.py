@@ -43,6 +43,13 @@ from ..indicators import (
     bullish_divergence,
     candle_patterns,
     cci,
+    cmf,
+    indicator_valid,
+    keltner,
+    mfi,
+    obv,
+    supertrend,
+    williams_r,
     directional_index,
     force_index,
     heikin_ashi,
@@ -125,6 +132,19 @@ FEATURES: dict[str, tuple[tuple[float, ...], str]] = {
     "rsi_bull_div": ((14, 30), "1 when a bullish RSI(N) divergence (lower price low, higher RSI low, within lookback bars) is confirmed"),
     "cci_bull_div": ((20, 30), "1 when a bullish CCI(N) divergence is confirmed"),
     "macd_bull_div": ((30,), "1 when a bullish MACD(12,26,9) line divergence is confirmed"),
+    "supertrend": ((10, 3), "Supertrend line for ATR(N) x mult (below price while trend is up)"),
+    "supertrend_dir": ((10, 3), "+1 Supertrend up, -1 down, 0 warming up"),
+    "keltner_upper": ((20, 2, 10), "upper Keltner channel: EMA(N) + mult x ATR(M)"),
+    "keltner_mid": ((20, 2, 10), "middle Keltner channel: EMA(N)"),
+    "keltner_lower": ((20, 2, 10), "lower Keltner channel: EMA(N) - mult x ATR(M)"),
+    "williams_r": ((14,), "Williams %R, -100 (oversold) to 0 (overbought)"),
+    "obv": ((), "On-Balance Volume (compare it with its own highs or average, not a level)"),
+    "obv_high": ((20,), "highest OBV of the previous N bars (excludes this bar)"),
+    "obv_sma": ((20,), "simple moving average of OBV"),
+    "mfi": ((14,), "Money Flow Index, 0-100"),
+    "cmf": ((20,), "Chaikin Money Flow, -1 to +1 (above 0 = buying pressure)"),
+    "sma_dev_atr": ((20, 14), "(close - SMA(N)) / ATR(M): how far price is stretched from its average"),
+    "no_gaps": ((200,), "1 if the last N bars exist with no missing candle, else 0"),
 }
 OPS = (">", "<", ">=", "<=", "crosses_above", "crosses_below")
 TRAILING = re.compile(r"^(close<ema\d{1,3}|close<psar|rsi>\d{2}(\.\d+)?)$")
@@ -434,6 +454,27 @@ def _feature(df: pd.DataFrame, e: Expr, cache: dict) -> pd.Series:
             s = bullish_divergence(df, cci(df, a[0]), a[1])
         elif n == "macd_bull_div":
             s = bullish_divergence(df, macd(close)["macd"], a[0])
+        elif n in ("supertrend", "supertrend_dir"):
+            st = supertrend(df, a[0], float(e.args[1]))
+            s = st["supertrend"] if n == "supertrend" else st["direction"]
+        elif n.startswith("keltner_"):
+            s = keltner(df, a[0], float(e.args[1]), a[2])[n[8:]]
+        elif n == "williams_r":
+            s = williams_r(df, a[0])
+        elif n == "obv":
+            s = obv(df)
+        elif n == "obv_high":
+            s = obv(df).shift(1).rolling(a[0], min_periods=a[0]).max()
+        elif n == "obv_sma":
+            s = sma(obv(df), a[0])
+        elif n == "mfi":
+            s = mfi(df, a[0])
+        elif n == "cmf":
+            s = cmf(df, a[0])
+        elif n == "sma_dev_atr":
+            s = (close - sma(close, a[0])) / atr(df, a[1]).replace(0, np.nan)
+        elif n == "no_gaps":
+            s = indicator_valid(df, a[0])
         else:  # pragma: no cover - parse_expr already rejects unknown names
             raise RuleError(f"unknown feature {n}")
         cache[k] = s.astype(float)
