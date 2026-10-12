@@ -14,6 +14,7 @@ import os
 
 from ..news.filter import NewsFilter
 from ..news.service import DEFAULT_DIR, load_latest
+from ..news.sites import add_site, load_sites, remove_site
 from ..news.x import XReader
 from .app import _csrf, _e, _ms, _q
 
@@ -44,10 +45,28 @@ def add_news_routes(app, *, settings, auth, jobs, page, guard, news_dir: str = D
         body += _top(auth, token, latest, job, NewsFilter(news_dir, cache_s=0), list(settings.symbols))
         if latest:
             body += _brief(latest.get("brief"))
+        body += _sites_section(auth, token, load_sites(news_dir))
         body += _x_section(auth, token, XReader(os.path.join(news_dir, "x.json")))
         if latest:
             body += _feeds(latest.get("feeds") or {})
         return page("News", body, user, token, refresh=20 if job else 300)
+
+    @app.post("/news/sites")
+    def sites(request: Request, csrf: str = Form(""), site: str = Form(""), remove: str = Form("")):
+        _user, token, redirect = guard(request)
+        if redirect:
+            return redirect
+        if not auth.check_csrf(token, csrf):
+            return PlainTextResponse("bad form token; reload the page", status_code=403)
+        try:
+            if remove:
+                remove_site(news_dir, site)
+                msg = f"Removed {site}."
+            else:
+                msg = f"The AI will check {add_site(news_dir, site)} first from the next news update."
+        except ValueError as exc:
+            return RedirectResponse("/news?error=" + _q(str(exc)) + "#sites", status_code=303)
+        return RedirectResponse("/news?msg=" + _q(msg) + "#sites", status_code=303)
 
     @app.post("/news/x/watch")
     def x_watch(request: Request, csrf: str = Form(""), username: str = Form(""), remove: str = Form("")):
@@ -164,6 +183,19 @@ def _feeds(f: dict) -> str:
     if f.get("errors"):
         out += f'<p class="muted small">Not reachable this time: {_e(", ".join(f["errors"]))}</p>'
     return out
+
+
+def _sites_section(auth, token, sites: list[str]) -> str:
+    chips = "".join(
+        f'<span class="tick-chip">{_link("https://" + x, x)} <form method="post" action="/news/sites" class="inline">'
+        f'{_csrf(auth, token)}<input type="hidden" name="site" value="{_e(x)}"><input type="hidden" name="remove" '
+        'value="1"><button class="ghost small" aria-label="remove">×</button></form></span>' for x in sites)
+    return ('<h2 id="sites">News sites</h2><div class="card"><p class="muted small">The AI checks these sites first '
+            'in every news update, then searches the rest of the web.</p>'
+            f'<div class="chips">{chips or "<span class=muted>none</span>"}</div>'
+            f'<form method="post" action="/news/sites" class="row">{_csrf(auth, token)}'
+            '<input name="site" placeholder="www.example.com/crypto" aria-label="news site address">'
+            '<button>Add site</button></form></div>')
 
 
 def _x_section(auth, token, reader: XReader) -> str:

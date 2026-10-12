@@ -308,3 +308,26 @@ def test_x_search_takes_turns_over_many_pairs(tmp_path):
     r.search_pairs(pairs, max_pairs=5)
     searched = [u.split("query=")[1].split("%29")[0] for u in fake.urls if "search/recent" in u]
     assert len(searched) == 10 and "C5" in searched[5] and "C0" in searched[7]
+
+
+def test_news_sites(client, tmp_path):
+    from aitrader.news.sites import DEFAULT_SITES, load_sites, normalize
+
+    assert normalize("https://m.economictimes.com/markets/cryptocurrency/") == \
+        "economictimes.indiatimes.com/markets/cryptocurrency"
+    for bad in ("javascript:alert(1)", "not a site", "ftp://x.com"):
+        with pytest.raises(ValueError):
+            normalize(bad)
+    c, _runner, paths = client
+    c.post("/login", data={"user": "admin", "password": PW})
+    page = c.get("/news").text
+    assert "www.cnbc.com/cryptoworld" in page and "coinmarketcap.com" in page
+    csrf = Auth("admin", PW, "k").csrf(c.cookies.get(COOKIE))
+    c.post("/news/sites", data={"csrf": csrf, "site": "https://decrypt.co/news"})
+    c.post("/news/sites", data={"csrf": csrf, "site": "coinmarketcap.com", "remove": "1"})
+    assert load_sites(paths.news) == [s for s in DEFAULT_SITES if s != "coinmarketcap.com"] + ["decrypt.co/news"]
+    api = FakeAPI([{"stop_reason": "tool_use", "content": [{"type": "tool_use", "id": "t",
+                                                            "name": "report_market_news", "input": REPORT}]}])
+    update(SYMS, paths.news, fetch=fake_fetch, post=api, x=None)
+    prompt = api.bodies[0]["messages"][0]["content"]
+    assert "Check these news sites first" in prompt and "decrypt.co/news" in prompt and "coinmarketcap" not in prompt

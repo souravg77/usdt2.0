@@ -14,6 +14,7 @@ import time
 
 from . import feeds as feeds_mod
 from .brief import poster, write_brief
+from .sites import load_sites
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +45,7 @@ def update(symbols: list[str], news_dir: str = DEFAULT_DIR, fetch=None, post=Non
            now_ms: int | None = None, events=None, max_searches: int | None = None, x="auto") -> dict:
     now_ms = now_ms or int(time.time() * 1000)
     data = feeds_mod.gather(fetch or feeds_mod.fetch_url, now_ms)
+    data["sites"] = load_sites(news_dir)
     x = x_reader(news_dir) if x == "auto" else x
     if x is not None:
         try:

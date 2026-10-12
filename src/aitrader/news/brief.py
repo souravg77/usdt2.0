@@ -108,7 +108,15 @@ def _prompt(symbols: list[str], feeds: dict) -> str:
             f"Crypto headlines (last 24h):\n{lines(feeds.get('crypto_headlines', []), 25)}\n\n"
             f"World headlines (last 24h):\n{lines(feeds.get('world_headlines', []), 25)}\n\n"
             f"{_x_text(feeds.get('x'))}"
+            f"{_sites_text(feeds.get('sites'))}"
             "Search the web for what these leave out, then call report_market_news.")
+
+
+def _sites_text(sites: list[str] | None) -> str:
+    if not sites:
+        return ""
+    return ("Check these news sites first (search them by name, or with site: and the address), then "
+            "the rest of the web:\n" + "\n".join(f"- {s}" for s in sites) + "\n\n")
 
 
 def _x_text(x: dict | None) -> str:
