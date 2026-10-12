@@ -159,7 +159,7 @@ $DOCKER compose --profile https up -d --force-recreate caddy  # picks up Caddyfi
 say "Daily backups"
 # Every day at 03:30 (server time): database, strategy registry, trade state, accounts. The newest
 # 14 are kept in data/backups/. One runs now as well, so there is a backup from the start.
-CRON_LINE="30 3 * * * cd $DIR && ./deploy/backup.sh >> data/backup.log 2>&1"
+CRON_LINE="30 3 * * * cd '$DIR' && ./deploy/backup.sh >> data/backup.log 2>&1"
 ( crontab -l 2>/dev/null | grep -v 'deploy/backup.sh' || true; echo "$CRON_LINE" ) | crontab -
 sudo systemctl enable --now cron >/dev/null 2>&1 || true
 DOCKER="$DOCKER" ./deploy/backup.sh || echo "warning: the first backup failed; run ./deploy/backup.sh to see why" >&2

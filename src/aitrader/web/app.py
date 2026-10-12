@@ -25,7 +25,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, File, Form, Request, UploadFile
+from fastapi import FastAPI, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
 
 from ..config import Settings
@@ -237,13 +237,20 @@ paper trading. Nothing trades real money.</p>
         return page("Submit a book", body, user, token)
 
     @app.post("/books")
-    async def books_submit(request: Request, book: UploadFile = File(...), csrf: str = Form(""),
-                           max: int = Form(12), test: str = Form("")):
-        user, token, redirect = guard(request)
+    async def books_submit(request: Request):
+        user, token, redirect = guard(request)  # before reading the body: no uploads without a login
         if redirect:
             return redirect
-        if not auth.check_csrf(token, csrf):
+        form = await request.form()
+        if not auth.check_csrf(token, str(form.get("csrf", ""))):
             return PlainTextResponse("bad form token; reload the page", status_code=403)
+        book, test = form.get("book"), str(form.get("test", ""))
+        try:
+            max = int(str(form.get("max", "12")))
+        except ValueError:
+            max = 12
+        if book is None or isinstance(book, str):
+            return RedirectResponse(f"/books?error={_q('Choose a file to upload.')}", status_code=303)
         try:
             path = await _save_upload(book, paths.books)
         except ValueError as exc:
