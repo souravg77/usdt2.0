@@ -761,6 +761,17 @@ async def _trade_run(s: Settings, args, control) -> int:
         print("testnet runs need AITRADER_MODE=testnet (the compose executor-testnet service sets it)",
               file=sys.stderr)
         return 1
+    if mode == "testnet":
+        keys = s.keys.get(f"{args.exchange}_testnet")
+        if not (keys and keys.api_key and keys.secret):
+            msg = ("testnet executor: waiting for the Binance testnet API key and secret "
+                   "(add them on the dashboard's Settings page)")
+            events.emit("waiting", msg, level="warning")
+            print(msg, file=sys.stderr)
+            if args.once:
+                return 1
+            while True:  # don't fail every tick: the keys watcher restarts us once they are saved
+                await asyncio.sleep(3600)
     adapter = make_adapter(args.exchange, s, testnet=(mode == "testnet"))
     ex = Executor(adapter, mode, args.exchange, PAPER_STATE,
                   state_path=os.path.join(TRADE_DIR, f"{mode}_state.json"), strategies=strategies,
