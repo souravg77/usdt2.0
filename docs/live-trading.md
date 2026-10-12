@@ -1,8 +1,12 @@
-# Phases 5 and 6: testnet, alerts, the go/no-go gate and the live pilot
+# Phases 5 and 6: alerts, the go/no-go gate and the live pilot
 
-The paper service (`learn paper`) decides every trade. The **executor** copies those decisions to
-an exchange with real orders: first on Bybit **Demo Trading** (real market prices, demo funds), and only after
-the go/no-go gate and your approval, on your real account with a small **pilot** budget.
+The paper service (`learn paper`) decides every trade, on real Bybit prices with simulated fills
+on this server (no key needed). Only after the go/no-go gate and your approval does the
+**executor** copy those decisions to your real Bybit account, with a small **pilot** budget.
+
+Bybit Demo Trading was used here before, but it isn't offered in every country (not in India), so
+it was removed in October 2026. What paper trading can't show is how Bybit handles the real
+orders and the resting stops, so start the live pilot with a very small budget.
 
 Nothing in this document happens on its own. Each step that moves closer to real money is a
 command you run on the VPS.
@@ -15,7 +19,6 @@ command you run on the VPS.
 | `context` | funding, open interest, total market cap ([market-context.md](market-context.md)) | `docker compose up -d` |
 | `paper` | finds signals, applies the calendar, market-context and AI filters, paper-trades them | `docker compose up -d` |
 | `web` | dashboard, including the Trading page with the kill switch | `docker compose up -d` |
-| `executor-testnet` | copies paper trades to Bybit Demo Trading | `docker compose --profile testnet up -d executor-testnet` |
 | `telegram` | alerts, daily summary, weekly report, `/status /pause /resume /kill` | `docker compose --profile telegram up -d telegram` |
 | `executor-live` | the live pilot (real money) | only after step 6 below |
 
@@ -63,22 +66,22 @@ docker compose run --rm collector trade kill --confirm
 The dashboard's **Trading** page has the same buttons (the kill switch needs you to type `KILL`),
 and so does Telegram (`/pause`, `/resume`, `/kill CONFIRM`).
 
-## Step 1: demo keys and the testnet executor
+## Step 1: your real Bybit key (read only until you go live)
 
-Make a Bybit Demo Trading key: log in at bybit.com, switch to **Demo Trading**, then avatar →
-**API** → create a key. Save it on the dashboard's Settings page (group "Bybit demo trading") or
-put it in `.env` (`BYBIT_DEMO_API_KEY`, `BYBIT_DEMO_API_SECRET`). Demo funds can be requested in
-the demo account (up to 100,000 USDT per request). Then:
+Make a key on bybit.com: **API Management → Create New Key → System-generated**, Read-Write, tick
+only **SPOT → Trade**, leave Contracts, Derivatives, Options, Wallet, Withdraw and Transfer off,
+and restrict it to the server's IP. Save it on the dashboard's Settings page (group "Bybit real
+account"); a key with any other permission is refused there. Never paste keys into a chat.
 
-```bash
-docker compose --profile testnet up -d executor-testnet
-docker compose logs -f executor-testnet
-```
+With the key saved, the Trading page shows your real Bybit balance (coins and their USDT value,
+read at most once a minute). That is the only thing the key is used for until the live pilot
+runs: every order still needs the live lock in `.env` (step 6).
 
-The service runs with `AITRADER_MODE=testnet`, so it can only reach Bybit Demo Trading
-(api-demo.bybit.com). When the paper service opens a position on Bybit, the executor buys it on
-the demo account within about 15 seconds, sized by the risk engine. It sells when the paper trade
-closes, or at once if the price is at or below the stop. Each fill is compared with its paper twin, so slippage is
+### How the live executor handles orders
+
+When the paper service opens a position, the live executor buys it on your account within about
+15 seconds, sized by the risk engine. It sells when the paper trade closes, or at once if the
+price is at or below the stop. Each fill is compared with its paper twin, so slippage is
 measured.
 
 Every open position also gets a **stop-loss order that rests on Bybit** (a spot conditional
@@ -107,9 +110,10 @@ How failures are handled:
   moves them to `other_exchange` in its state file and logs a warning. Close them by hand on
   Binance if any are left.
 
-**Test the kill switch on demo trading** once a position is open:
-`docker compose run --rm collector trade kill --confirm`. Check that the testnet executor sold it,
-then `trade resume`. The go/no-go gate looks for this test in the event log.
+**Test the kill switch** before going live: pull it on the Trading page (type `KILL`), check
+that paper trading shows OFF and Telegram (if set up) told you, then press Resume. Record it:
+`docker compose run --rm collector golive attest kill_switch --by Shawn`. Once the live pilot
+runs, each kill it carries out counts too.
 
 ## Step 2: Telegram alerts
 
@@ -120,7 +124,7 @@ then `trade resume`. The go/no-go gate looks for this test in the event log.
 4. `docker compose run --rm collector telegram --test` sends a test message.
 5. `docker compose --profile telegram up -d telegram`.
 
-You get demo (testnet) and live trades, paper closes, errors, crashes, disconnects, risk pauses, the
+You get live trades, paper closes, errors, crashes, disconnects, risk pauses, the
 kill switch, a daily summary just after 00:00 UTC, and the weekly report. The bot only obeys
 commands from your chat id.
 
@@ -156,7 +160,7 @@ prints every criterion with PASS or FAIL:
 | Paper vs backtest gap | ≤ 0.15R (`AITRADER_GATE_MAX_GAP_R`) |
 | Stability | no crash and no heartbeat gap over 30 min for 14 days (`AITRADER_GATE_STABLE_DAYS`) |
 | Security: keys | you confirm trade-only keys, no withdrawal or transfer, bound to IPs, 2FA |
-| Security: kill switch tested | a demo-trading (testnet) kill-switch run in the last 30 days |
+| Security: kill switch tested | `golive attest kill_switch`, or a live kill-switch run, in the last 30 days |
 
 Confirm the manual items once they are true:
 

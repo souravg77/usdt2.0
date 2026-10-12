@@ -12,7 +12,6 @@ from dotenv import load_dotenv
 class Mode(str, Enum):
     BACKTEST = "backtest"
     PAPER = "paper"
-    TESTNET = "testnet"
     LIVE = "live"
 
 
@@ -24,11 +23,17 @@ def _csv(value: str) -> list[str]:
     return [v.strip() for v in value.split(",") if v.strip()]
 
 
+def _mode(value: str) -> Mode:
+    value = value.strip().lower()
+    return Mode.PAPER if value == "testnet" else Mode(value)  # "testnet" was Bybit demo trading, now removed
+
+
 def _bool(value: str | None) -> bool:
     return (value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-# The only exchange the agent uses: Bybit spot (demo trading for fake money, the real account for live).
+# The only exchange the agent uses: Bybit spot. Prices come from the real exchange; paper trading
+# simulates fills on this server, and only the live pilot sends orders to the real account.
 EXCHANGE = "bybit"
 
 # The 20 most traded coins against USDT (stablecoins left out), Oct 2026; all listed on Bybit spot.
@@ -69,10 +74,9 @@ class Settings:
         e = os.environ.get
         keys = {
             "bybit": ExchangeKeys(e("BYBIT_API_KEY", ""), e("BYBIT_API_SECRET", "")),
-            "bybit_demo": ExchangeKeys(e("BYBIT_DEMO_API_KEY", ""), e("BYBIT_DEMO_API_SECRET", "")),
         }
         return cls(
-            mode=Mode(e("AITRADER_MODE", "paper").strip().lower()),
+            mode=_mode(e("AITRADER_MODE", "paper")),
             live_unlocked=_bool(e("AITRADER_LIVE_UNLOCKED")),
             live_confirm=e("AITRADER_LIVE_CONFIRM", ""),
             db_path=e("AITRADER_DB_PATH", "data/aitrader.db"),

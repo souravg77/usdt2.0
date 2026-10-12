@@ -155,7 +155,7 @@ def status_text(settings, control, paper_state: str, executor_states: dict[str, 
 
 
 def executor_state_paths(root: str = "data/trade") -> dict[str, str]:
-    return {m: os.path.join(root, f"{m}_state.json") for m in ("testnet", "live")}
+    return {m: os.path.join(root, f"{m}_state.json") for m in ("live",)}
 
 
 def _day(ms: int) -> str:

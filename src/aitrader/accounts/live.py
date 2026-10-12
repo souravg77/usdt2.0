@@ -9,7 +9,7 @@ Turning it **on** needs every one of these, checked here:
 - the user re-entered their password, typed the confirmation phrase and set a budget cap.
 
 Turning it **off** is instant and acts as a kill switch for real money: the account goes back to
-the testnet at once, and the ``users`` service sells every position it bought on the real
+paper at once, and the ``users`` service sells every position it bought on the real
 account before stopping the live executor.
 
 Every switch, on or off, by the user or the admin, is written to the audit log and the event
@@ -77,7 +77,7 @@ def turn_on(store: UserStore, settings, golive, root: str, user_id: int, passwor
 
 def turn_off(store: UserStore, root: str, user_id: int, actor: str, reason: str = "switched off",
              events: EventLog | None = None) -> None:
-    """Instant: back to the testnet, and the live executor sells what it bought."""
+    """Instant: back to paper, and the live executor sells what it bought."""
     user = store.get(user_id)
     if user is None:
         raise AccountError("no such account")

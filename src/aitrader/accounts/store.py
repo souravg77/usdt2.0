@@ -4,9 +4,11 @@
 - Exchange keys are encrypted at rest (Fernet, AES-128 + HMAC) with a key derived from
   ``AITRADER_KEYS_SECRET`` in ``.env``. Without that secret no key can be stored or read, and
   a copy of the database alone reveals nothing.
-- New accounts start ``pending``: the admin approves them before they can connect keys. Every
-  account trades on the testnet until the admin allows live trading for it and the user turns it
-  on with their own pilot budget, and even then only while the platform's live lock is open.
+- New accounts start ``pending``: the admin approves them before they can connect keys. Nothing
+  trades on an account until the admin allows live trading for it and the user turns it on with
+  their own pilot budget, and even then only while the platform's live lock is open. Until then
+  the account follows the paper results. (The stored mode for "live off" is still called
+  ``testnet``, from when it meant Bybit demo trading; demo keys are no longer used.)
 """
 
 from __future__ import annotations
@@ -205,7 +207,7 @@ class UserStore:
                 self.conn.execute("UPDATE users SET mode='testnet' WHERE id=?", (user_id,))
 
     def allow_live(self, user_id: int, allowed: bool) -> None:
-        """Admin switch. Turning it off also sends the user back to the testnet."""
+        """Admin switch. Turning it off also turns the user's live trading off."""
         with self.conn:
             self.conn.execute("UPDATE users SET live_allowed=? WHERE id=?", (int(allowed), user_id))
             if not allowed:

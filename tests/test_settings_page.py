@@ -36,11 +36,11 @@ def web(tmp_path, monkeypatch):
     def telegram(token, chat):
         calls.append(("telegram", token, chat))
 
-    async def bybit(exchange, testnet, key, secret, settings):
-        calls.append(("bybit", testnet, key))
+    async def bybit(exchange, key, secret, settings):
+        calls.append(("bybit", key))
         if "bybit" in down:
             raise down["bybit"]
-        if not testnet:
+        if key.startswith("c"):
             raise KeyRejected("this key can WITHDRAW funds")
 
     auth = Auth("admin", PW, "k")
@@ -92,17 +92,19 @@ def test_save_anthropic_key_encrypted_and_masked(web):
 
 def test_bybit_keys_are_checked_with_the_exchange(web):
     client, csrf, calls, paths, _ = web
-    r = client.post("/settings/keys/bybit_demo",
-                    data={"csrf": csrf, "BYBIT_DEMO_API_KEY": "a" * 64})
+    r = client.post("/settings/keys/bybit", data={"csrf": csrf, "BYBIT_API_KEY": "a" * 64})
     assert "needs both" in r.text
-    r = client.post("/settings/keys/bybit_demo", data={
-        "csrf": csrf, "BYBIT_DEMO_API_KEY": "a" * 64, "BYBIT_DEMO_API_SECRET": "b" * 64})
-    assert "checked and saved" in r.text and ("bybit", True, "a" * 64) in calls
     r = client.post("/settings/keys/bybit", data={
         "csrf": csrf, "BYBIT_API_KEY": "c" * 64, "BYBIT_API_SECRET": "d" * 64})
     assert "WITHDRAW" in r.text  # a real key with withdrawal rights is refused
+    assert secrets.SecretStore(SECRET, paths.keys_store).load() == {}
+    r = client.post("/settings/keys/bybit", data={
+        "csrf": csrf, "BYBIT_API_KEY": "a" * 64, "BYBIT_API_SECRET": "b" * 64})
+    assert "checked and saved" in r.text and ("bybit", "a" * 64) in calls
     saved = secrets.SecretStore(SECRET, paths.keys_store).load()
-    assert set(saved) == {"BYBIT_DEMO_API_KEY", "BYBIT_DEMO_API_SECRET"}
+    assert set(saved) == {"BYBIT_API_KEY", "BYBIT_API_SECRET"}
+    assert "demo" not in client.get("/settings").text.lower()  # the demo option is gone
+    assert client.post("/settings/keys/bybit_demo", data={"csrf": csrf}).text.count("unknown key group")
 
 
 def test_telegram_sends_a_test_message(web):
@@ -220,9 +222,6 @@ def test_keys_are_saved_when_the_check_cannot_run(web):
     r = client.post("/settings/keys/anthropic", data={"csrf": csrf, "ANTHROPIC_API_KEY": KEY})
     assert "saved" in r.text and "HTTP 529" in r.text
     assert secrets.SecretStore(SECRET, paths.keys_store).load()["ANTHROPIC_API_KEY"] == KEY
-    r = client.post("/settings/keys/bybit_demo", data={
-        "csrf": csrf, "BYBIT_DEMO_API_KEY": "a" * 64, "BYBIT_DEMO_API_SECRET": "b" * 64})
-    assert "saved" in r.text and "BYBIT_DEMO_API_KEY" in secrets.SecretStore(SECRET, paths.keys_store).load()
     r = client.post("/settings/keys/bybit", data={
         "csrf": csrf, "BYBIT_API_KEY": "c" * 64, "BYBIT_API_SECRET": "d" * 64})
     assert "Not saved" in r.text  # a real-money key needs its permissions confirmed
@@ -259,12 +258,12 @@ def test_saved_keys_show_as_dots_and_can_be_tested_again(web):
 
 def test_check_and_save_with_empty_boxes_checks_the_saved_key(web):
     client, csrf, calls, paths, _ = web
-    r = client.post("/settings/keys/bybit_demo", data={"csrf": csrf})
+    r = client.post("/settings/keys/bybit", data={"csrf": csrf})
     assert "paste the key first" in r.text  # nothing saved yet
-    client.post("/settings/keys/bybit_demo", data={
-        "csrf": csrf, "BYBIT_DEMO_API_KEY": "a" * 64, "BYBIT_DEMO_API_SECRET": "b" * 64})
+    client.post("/settings/keys/bybit", data={
+        "csrf": csrf, "BYBIT_API_KEY": "a" * 64, "BYBIT_API_SECRET": "b" * 64})
     calls.clear()
-    r = client.post("/settings/keys/bybit_demo", data={
-        "csrf": csrf, "BYBIT_DEMO_API_KEY": "", "BYBIT_DEMO_API_SECRET": ""})
-    assert "Bybit demo trading: working." in r.text and calls == [("bybit", True, "a" * 64)]
+    r = client.post("/settings/keys/bybit", data={
+        "csrf": csrf, "BYBIT_API_KEY": "", "BYBIT_API_SECRET": ""})
+    assert "Bybit real account: working." in r.text and calls == [("bybit", "a" * 64)]
     assert "Last check: Working" in r.text

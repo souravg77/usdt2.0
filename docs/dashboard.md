@@ -20,8 +20,8 @@ order it can cause is the kill switch selling what the executors bought.
   see its rules, sources and history. It also shows the AI trade filter (active model and
   candidates waiting for approval), paper-trading totals, and recent jobs.
 
-- **Trading.** Pause, resume and the kill switch (type `KILL` to confirm). Open positions from
-  paper, testnet and live, with the AI filter's probability; the paper P&L curve and the
+- **Trading.** Pause, resume and the kill switch (type `KILL` to confirm). Your real Bybit balance
+  (read only, once you save the key on Settings). Open positions from paper and live, with the AI filter's probability; the paper P&L curve and the
   executors' equity curves; the last 40 closed trades with their result in R, USDT and the paper
   twin's R; the event feed (trades, errors, disconnects, pauses); and the go/no-go gate with a
   "Check the gate now" button. The page refreshes every minute. See

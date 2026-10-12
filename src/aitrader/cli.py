@@ -781,7 +781,7 @@ def cmd_backup(s: Settings, args) -> int:
     finally:
         store.close()
     for path in ("data/learn/registry.json", "data/learn/paper_state.json", "data/ai/models/registry.json",
-                 "data/trade/testnet_state.json", "data/trade/live_state.json", "data/trade/control.json",
+                 "data/trade/live_state.json", "data/trade/control.json",
                  "data/golive/approval.json", "data/golive/attestations.json", "data/settings/keys.enc"):
         if os.path.exists(path):
             target = os.path.join(args.dest, path.replace("/", "__"))
@@ -844,7 +844,7 @@ def _events(service: str):
 
 
 def cmd_trade(s: Settings, args) -> int:
-    """Pause, resume, kill switch, status, and the testnet / live-pilot executor."""
+    """Pause, resume, kill switch, status, and the live-pilot executor."""
     from .trade import Control
     from .trade.report import executor_state_paths, status_text
 
@@ -884,12 +884,7 @@ async def _trade_run(s: Settings, args, control) -> int:
 
     mode = args.mode
     events = _events(f"executor-{mode}")
-    if mode == "testnet":
-        from .ops.secrets import restart_on_change
-
-        restart_on_change()  # testnet keys saved on the Settings page take effect by themselves
     strategies = set(args.strategy or []) or None
-    guard = monitor = pilot = None
     if mode == "live":
         assert_live_allowed(s)  # the three live-lock lines in .env, opened by you
         pilot = float(os.environ.get("AITRADER_PILOT_MAX_USDT", "0") or 0)
@@ -907,22 +902,7 @@ async def _trade_run(s: Settings, args, control) -> int:
             print("the live pilot runs 1 or 2 approved strategies", file=sys.stderr)
             return 1
         guard, monitor = gl.guard, gl.monitor
-    elif s.mode.value != "testnet":
-        print("testnet runs need AITRADER_MODE=testnet (the compose executor-testnet service sets it)",
-              file=sys.stderr)
-        return 1
-    if mode == "testnet":
-        keys = s.keys.get(f"{args.exchange}_demo")
-        if not (keys and keys.api_key and keys.secret):
-            msg = ("demo executor: waiting for the Bybit Demo Trading API key and secret "
-                   "(add them on the dashboard's Settings page)")
-            events.emit("waiting", msg, level="warning")
-            print(msg, file=sys.stderr)
-            if args.once:
-                return 1
-            while True:  # don't fail every tick: the keys watcher restarts us once they are saved
-                await asyncio.sleep(3600)
-    adapter = make_adapter(args.exchange, s, testnet=(mode == "testnet"))
+    adapter = make_adapter(args.exchange, s)
     ex = Executor(adapter, mode, args.exchange, PAPER_STATE,
                   state_path=os.path.join(TRADE_DIR, f"{mode}_state.json"), strategies=strategies,
                   control=control, risk=RiskEngine(RiskLimits.from_env()), events=events,
@@ -1038,7 +1018,7 @@ def cmd_users(s: Settings, args) -> int:
         cmd = args.users_cmd
         if cmd == "list":
             for u in store.list():
-                keys = ", ".join(f'{k["exchange"]}{"-testnet" if k["testnet"] else ""}' for k in store.key_info(u.id))
+                keys = ", ".join(k["exchange"] for k in store.key_info(u.id, testnet=False))
                 print(f"{u.id:4} {u.email:40} {u.status:9} {u.mode:8} live {'allowed' if u.live_allowed else 'off':8}"
                       f" keys: {keys or '-'}")
             return 0
@@ -1350,7 +1330,7 @@ def build_parser() -> argparse.ArgumentParser:
             t.add_argument("--confirm", action="store_true")
     tr.set_defaults(by=None, reason=None, confirm=False)
     trr = tr_sub.add_parser("run", help="service: mirror the paper trades with real orders")
-    trr.add_argument("--mode", choices=["testnet", "live"], default="testnet")
+    trr.add_argument("--mode", choices=["live"], default="live")
     trr.add_argument("--exchange", default=EXCHANGE, choices=EXCHANGES)
     trr.add_argument("--strategy", action="append", help="only these registry ids (repeatable)")
     trr.add_argument("--interval", type=float, default=15)
@@ -1394,10 +1374,10 @@ def build_parser() -> argparse.ArgumentParser:
     us = sub.add_parser("users", help="user accounts: list, approve, disable, live on/off, run")
     us_sub = us.add_subparsers(dest="users_cmd", required=True)
     us_sub.add_parser("list", help="every account with its status, mode and connected keys")
-    for name, h in (("approve", "let a new account connect keys and trade on the testnet"),
+    for name, h in (("approve", "let a new account connect its key (nothing trades until live-on)"),
                     ("disable", "block an account: sells what the agent bought for it and stops it"),
                     ("live-on", "allow an account to switch itself to real money"),
-                    ("live-off", "stop real money for an account (back to the testnet)"),
+                    ("live-off", "stop real money for an account (sells what the agent bought)"),
                     ("add", "create an active account (asks for the password)")):
         u = us_sub.add_parser(name, help=h)
         u.add_argument("email")

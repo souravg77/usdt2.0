@@ -35,7 +35,6 @@ from typing import Protocol
 log = logging.getLogger(__name__)
 
 PUBLIC_SPOT_URL = "wss://stream.bybit.com/v5/public/spot"
-TESTNET_SPOT_URL = "wss://stream-testnet.bybit.com/v5/public/spot"
 PING_S = 20.0  # Bybit: "send the ping heartbeat packet every 20 seconds"
 ARGS_PER_SUBSCRIBE = 10  # spot accepts at most 10 topics per subscribe request
 

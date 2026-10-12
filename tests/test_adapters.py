@@ -49,42 +49,36 @@ async def test_live_unlocked_only_with_all_conditions(settings, fake_ccxt):
     assert order.filled == 0.01 and order.reason == "test" and len(client.orders) == 1
 
 
-async def test_testnet_orders_need_testnet_mode(settings, fake_ccxt):
-    client = fake_ccxt()
-    a = BybitAdapter(settings, client=client, testnet=True)
-    with pytest.raises(RuntimeError):
-        await a.place_order("BTC/USDT", Side.BUY, 0.01)
-    settings.mode = Mode.TESTNET
-    await a.place_order("BTC/USDT", Side.BUY, 0.01)
-    assert len(client.orders) == 1
-
-
-def test_demo_trading_uses_bybit_demo_and_demo_keys(settings):
+def test_adapters_use_the_real_exchange_and_the_real_key(settings):
     import dataclasses
 
     from aitrader.config import ExchangeKeys
 
-    settings = dataclasses.replace(settings, keys={"bybit_demo": ExchangeKeys("d" * 18, "e" * 18),
-                                                   "bybit": ExchangeKeys("r" * 18, "s" * 18)})
-    demo = make_adapter("bybit", settings, testnet=True)
+    settings = dataclasses.replace(settings, keys={"bybit": ExchangeKeys("r" * 18, "s" * 18)})
     real = make_adapter("bybit", settings)
-    assert "api-demo." in demo.client.urls["api"]["private"] and demo.client.apiKey == "d" * 18
     assert "api-demo." not in real.client.urls["api"]["private"] and real.client.apiKey == "r" * 18
     assert real.client.options["enableUnifiedAccount"] is True
+    with pytest.raises(TypeError):
+        BybitAdapter(settings, testnet=True)  # demo trading is gone
+
+
+def _unlocked(settings):
+    settings.mode = Mode.LIVE
+    settings.live_unlocked = True
+    settings.live_confirm = LIVE_CONFIRM_PHRASE
+    return settings
 
 
 async def test_bybit_orders_are_spot_unleveraged_in_coins(settings, fake_ccxt):
-    settings.mode = Mode.TESTNET
     client = fake_ccxt()
-    await BybitAdapter(settings, client=client, testnet=True).place_order(
+    await BybitAdapter(_unlocked(settings), client=client).place_order(
         "BTC/USDT", Side.BUY, 0.01, client_id="ait" + "0" * 29)
     assert client.params == {"isLeverage": 0, "marketUnit": "baseCoin", "orderLinkId": "ait" + "0" * 29}
 
 
 async def test_bybit_resting_stop_is_a_spot_conditional_sell(settings, fake_ccxt):
-    settings.mode = Mode.TESTNET
     client = fake_ccxt()
-    a = BybitAdapter(settings, client=client, testnet=True)
+    a = BybitAdapter(_unlocked(settings), client=client)
     await a.place_stop("BTC/USDT", 0.01, 95.0, "aitstop")
     assert client.orders[-1][:4] == ("BTC/USDT", "market", "sell", 0.01)
     assert client.params == {"isLeverage": 0, "marketUnit": "baseCoin", "triggerPrice": 95.0,
@@ -100,6 +94,7 @@ async def test_bybit_resting_stop_is_a_spot_conditional_sell(settings, fake_ccxt
 
     client.cancel_order = gone
     assert await a.cancel_stop("aitstop", "BTC/USDT") is False  # it fired or was cancelled
+    settings.live_unlocked = False
     with pytest.raises(LiveTradingLocked):  # the live lock covers stops too
         await BybitAdapter(settings, client=fake_ccxt()).place_stop("BTC/USDT", 0.01, 95.0, "x")
 

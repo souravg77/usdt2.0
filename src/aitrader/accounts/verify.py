@@ -2,8 +2,7 @@
 
 Real-account keys are accepted only when Bybit itself reports (``/v5/user/query-api``) that the
 key can trade spot, is not read-only, **cannot withdraw** or transfer, has no derivatives or
-options permissions, and is bound to trusted IPs. Demo-trading keys only have to work (demo money
-can't be withdrawn). Keys that fail are never stored.
+options permissions, and is bound to trusted IPs. Keys that fail are never stored.
 """
 
 from __future__ import annotations
@@ -28,8 +27,7 @@ def _is_auth_error(exc: Exception) -> bool:
     return any(c.__name__ in _AUTH_ERRORS for c in type(exc).__mro__)
 
 
-async def verify_keys(exchange: str, testnet: bool, api_key: str, secret: str,
-                      settings: Settings, client=None) -> dict:
+async def verify_keys(exchange: str, api_key: str, secret: str, settings: Settings, client=None) -> dict:
     """Return the key's permissions, or raise KeyRejected with a reason a user can act on."""
     from ..exchanges.ccxt_adapter import ADAPTERS
 
@@ -38,21 +36,17 @@ async def verify_keys(exchange: str, testnet: bool, api_key: str, secret: str,
     api_key, secret = (api_key or "").strip(), (secret or "").strip()
     if len(api_key) < 16 or len(secret) < 16 or any(c.isspace() for c in api_key + secret):
         raise KeyRejected("that doesn't look like an API key and secret; copy both again")
-    adapter = ADAPTERS[exchange](settings, keys=ExchangeKeys(api_key, secret), testnet=testnet, client=client)
+    adapter = ADAPTERS[exchange](settings, keys=ExchangeKeys(api_key, secret), client=client)
     try:
         try:
             bal = await adapter.balance()
         except Exception as exc:
-            if _is_auth_error(exc):  # wrong key, wrong IP, or a real key used for demo (or back)
+            if _is_auth_error(exc):  # wrong key, wrong IP, or a key from Bybit's demo section
                 raise KeyRejected(f"Bybit refused the key ({type(exc).__name__}). Check that you "
-                                  f"copied a {'Demo Trading' if testnet else 'real-account'} key and its "
-                                  f"secret in full") from None
+                                  "copied a real-account key and its secret in full") from None
             # never echo the exception text: ccxt puts the signed request URL in it
-            raise KeyUnverified(f"couldn't reach Bybit{' demo trading' if testnet else ''} to check the "
-                                f"key ({type(exc).__name__})") from None
+            raise KeyUnverified(f"couldn't reach Bybit to check the key ({type(exc).__name__})") from None
         perms = {"balance_assets": len([a for a, v in bal.free.items() if v])}
-        if testnet:
-            return perms
         try:
             r = (await adapter.client.private_get_v5_user_query_api()).get("result") or {}
         except Exception as exc:

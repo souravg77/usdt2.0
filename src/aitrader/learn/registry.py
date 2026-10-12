@@ -2,7 +2,7 @@
 
 Each strategy sits on the promotion ladder (docs/promotion-ladder.md):
 
-    RESEARCH -> BACKTESTED -> OUT-OF-SAMPLE VALIDATED -> PAPER/DEMO -> SHADOW MONITORED
+    RESEARCH -> BACKTESTED -> OUT-OF-SAMPLE VALIDATED -> PAPER -> SHADOW MONITORED
              -> LIVE-ELIGIBLE -> LIVE ENABLED WITH EXPLICIT APPROVAL
     off the ladder: REJECTED, UNDER REVIEW, RETIRED
 
@@ -17,7 +17,7 @@ This module stores the rungs the learning pipeline decides (``STATUSES``):
     paper         -> retired        (paper results fell below the bar)
 
 The three rungs above paper are never stored here. ``learn.ladder`` reads them from the evidence:
-demo-trading results (shadow), the Phase 6 go/no-go report (live-eligible) and your approval in
+enough paper trades (shadow), the Phase 6 go/no-go report (live-eligible) and your approval in
 ``trade.golive`` (live enabled). There is no "live" status, so nothing in this module can move a
 strategy to real money: that stays a human decision through the go/no-go gate and the live lock.
 

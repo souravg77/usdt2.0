@@ -5,7 +5,8 @@ risk engine from that user's own balance. Each user has their own state, pause a
 under ``data/users/<id>/``; the platform's pause and kill switch (``data/trade/control.json``)
 also stop every user.
 
-Testnet is the default for everyone. A user trades real money only when all of these hold:
+Nothing is sent to Bybit for a user until live is on: until then their page follows the paper
+results. A user trades real money only when all of these hold:
 the platform's live lock is open (``safety.assert_live_allowed``), the go/no-go approval passes
 for the strategy, the admin allowed live for that user, the user switched to live with a pilot
 budget, and their real-account key passed the no-withdrawal check.
@@ -14,13 +15,12 @@ budget, and their real-account key passed the no-withdrawal check.
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import json
 import logging
 import os
 import time
 
-from ..config import EXCHANGE, ExchangeKeys, Mode, Settings
+from ..config import EXCHANGE, ExchangeKeys, Settings
 from ..ops import EventLog
 from ..safety import live_gate_problems
 from ..trade import Control, Executor, RiskEngine, RiskLimits
@@ -111,18 +111,12 @@ class UsersRunner:
                 stop = live_stop_control(self.root, u.id)
                 if not stop.killed:
                     stop.kill("live is off for this account", by="platform")
-            mode = "live" if live_on or draining else "testnet"
-            info = self.store.key_info(u.id, EXCHANGE, testnet=(mode == "testnet"))
+            if not (live_on or draining):
+                continue  # not live: nothing to send to Bybit for this account
+            info = self.store.key_info(u.id, EXCHANGE, testnet=False)
             if not info:
                 continue
-            own = user_control(self.root, u.id)
-            if u.status != "active" and not draining:
-                st = own.state()
-                if not st["killed"]:
-                    own.kill(f"account {u.status}", by="platform")  # sell what we bought, then stop
-                elif st.get("flattened_at"):
-                    continue
-            out[u.id] = (mode, info[0]["added"], u.pilot_max_usdt if mode == "live" else None)
+            out[u.id] = ("live", info[0]["added"], u.pilot_max_usdt)
         return out
 
     async def _executor(self, user_id: int, spec: tuple) -> Executor:
@@ -132,21 +126,16 @@ class UsersRunner:
         if cur:
             await _close(cur[1].adapter)
         mode, _added, pilot = spec
-        keys = self.store.load_keys(self.vault, user_id, EXCHANGE, testnet=(mode == "testnet"))
-        settings = dataclasses.replace(self.settings, mode=Mode.TESTNET) if mode == "testnet" else self.settings
-        adapter = self.adapter_factory(EXCHANGE, settings, ExchangeKeys(*keys), mode == "testnet")
+        keys = self.store.load_keys(self.vault, user_id, EXCHANGE, testnet=False)
+        adapter = self.adapter_factory(EXCHANGE, self.settings, ExchangeKeys(*keys))
         d = user_dir(self.root, user_id)
         events = EventLog(self.events_path or os.path.join(d, "events.jsonl"), service=f"user{user_id}-{mode}")
         ex = Executor(adapter, mode, EXCHANGE, self.paper_state,
                       state_path=os.path.join(d, f"{mode}_state.json"),
                       control=CombinedControl(user_control(self.root, user_id), self.platform,
-                                              [live_stop_control(self.root, user_id)] if mode == "live" else []),
-                      risk=self.risk, events=events,
-                      live_guard=self.live_guard if mode == "live" else None,
-                      monitor=self.live_monitor if mode == "live" else None, pilot_max_usdt=pilot,
-                      clock=self.clock)
-        if mode == "live" and ex.live_guard is None:
-            raise RuntimeError("live mode needs the go/no-go guard")
+                                              [live_stop_control(self.root, user_id)]),
+                      risk=self.risk, events=events, live_guard=self.live_guard,
+                      monitor=self.live_monitor, pilot_max_usdt=pilot, clock=self.clock)
         self._ex[user_id] = (spec, ex)
         return ex
 
@@ -177,10 +166,10 @@ class UsersRunner:
                 await _close(ex.adapter)
 
 
-def _make_adapter(exchange: str, settings: Settings, keys: ExchangeKeys, testnet: bool):
+def _make_adapter(exchange: str, settings: Settings, keys: ExchangeKeys):
     from ..exchanges.ccxt_adapter import ADAPTERS
 
-    return ADAPTERS[exchange](settings, keys=keys, testnet=testnet)
+    return ADAPTERS[exchange](settings, keys=keys)
 
 
 def _has_positions(path: str) -> bool:

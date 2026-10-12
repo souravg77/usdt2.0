@@ -27,9 +27,8 @@ from .app import _csrf, _e, _q
 GROUPS = [
     ("anthropic", "Anthropic (Claude)", "Lets the agent read trading books and write strategies. "
      "Get a key at console.anthropic.com, under API keys."),
-    ("bybit_demo", "Bybit demo trading", "Fake-money orders at real Bybit prices. On bybit.com switch "
-     "to Demo Trading, then API Management: create a key there (it only works for demo funds)."),
-    ("bybit", "Bybit real account", "Only for the live pilot. The key must be Read-Write with only SPOT "
+    ("bybit", "Bybit real account", "Shows your real Bybit balance on the Trading page (read only) and is "
+     "used by the live pilot. Paper trading needs no key. The key must be Read-Write with only SPOT "
      "trade ticked (no withdrawals, no transfers, no contracts) and bound to this server's IP. Saving it "
      "does not start live trading: that stays locked in .env until you open it on the server."),
     ("telegram", "Telegram alerts", "Trade alerts and /status, /pause, /kill from your phone. Create a "
@@ -186,12 +185,10 @@ def add_settings_routes(app, *, settings, auth, paths, jobs, keys_secret: str, p
                     raise ValueError("paste the GitHub token")
                 await asyncio.to_thread(checkers["github"], values["GITHUB_TOKEN"], values["GITHUB_REPO"])
             else:
-                testnet = group == "bybit_demo"
-                prefix = "BYBIT_DEMO_API" if testnet else "BYBIT_API"
-                key, secret = values[f"{prefix}_KEY"], values[f"{prefix}_SECRET"]
+                key, secret = values["BYBIT_API_KEY"], values["BYBIT_API_SECRET"]
                 if not (key and secret):
                     raise ValueError("Bybit needs both the API key and the API secret")
-                await checkers["bybit"]("bybit", testnet, key, secret, settings)
+                await checkers["bybit"]("bybit", key, secret, settings)
         except KeyUnverified as exc:
             if group == "bybit":  # a real-money key is saved only once its permissions are confirmed
                 raise KeyRejected(f"{exc}. Try again in a minute") from None

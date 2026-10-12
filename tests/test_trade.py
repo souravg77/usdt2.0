@@ -180,10 +180,11 @@ def ex(tmp_path):
     paper = tmp_path / "paper.json"
     _paper(paper, {KEY: _pos(SIG)})
     adapter = FakeAdapter()
-    events = EventLog(str(tmp_path / "ev.jsonl"), service="executor-testnet")
+    events = EventLog(str(tmp_path / "ev.jsonl"), service="executor-live")
 
     def make(**kw):
-        return Executor(adapter, kw.pop("mode", "testnet"), "bybit", str(paper),
+        kw.setdefault("live_guard", lambda sid: [])
+        return Executor(adapter, kw.pop("mode", "live"), "bybit", str(paper),
                         state_path=str(tmp_path / "state.json"), control=Control(str(tmp_path / "c.json")),
                         events=events, clock=lambda: NOW, **kw)
 
@@ -202,7 +203,7 @@ def test_executor_mirrors_paper_entry_and_exit(ex):
     p = e.state["positions"][KEY]
     assert p["status"] == "open" and p["entry"] == 100.1 and p["ai_prob"] == 0.7
     assert p["risk_usdt"] <= 10_000 * 0.005 + 1e-6
-    assert adapter.sent[0].id == client_id("testnet", KEY, SIG, "entry")
+    assert adapter.sent[0].id == client_id("live", KEY, SIG, "entry")
     run(e.tick())
     assert len(adapter.sent) == 1  # no second buy for the same signal
     _paper(paper, {}, [{"key": KEY, "signal_ts": SIG, "entry": 100.0, "exit": 104.0, "r": 0.8}])
@@ -276,7 +277,7 @@ def test_executor_kill_switch_flattens(ex, tmp_path):
     out = run(e.tick())
     assert out["closed"] == [KEY] and e.state["flattened"]
     assert adapter.cash.get("BTC", 0) == pytest.approx(0, abs=1e-9)
-    assert any(x["kind"] == "kill" and x["service"] == "executor-testnet" for x in events.read())
+    assert any(x["kind"] == "kill" and x["service"] == "executor-live" for x in events.read())
     run(e.tick())
     assert len(adapter.sent) == 2  # nothing new while killed
 
@@ -325,7 +326,9 @@ def test_executor_loss_cap_pauses(ex):
 def test_executor_pilot_cap_and_live_guard(ex):
     make, adapter, *_ = ex
     with pytest.raises(ValueError):
-        make(mode="live")  # no guard
+        make(live_guard=None)  # no guard
+    with pytest.raises(ValueError):
+        make(mode="testnet")  # demo trading is gone
     e = make(mode="live", live_guard=lambda sid: ["not approved"], pilot_max_usdt=500)
     assert run(e.tick())["skipped"] == [KEY] and not adapter.sent
     e2 = make(mode="live", live_guard=lambda sid: [], pilot_max_usdt=500)
@@ -370,7 +373,9 @@ def test_gate_fails_until_everything_is_in_place(tmp_path):
         gl.approve(["s1"], by="Shawn")
     _beats(events)
     gl.attest("keys", by="Shawn")
-    EventLog(events.path, service="executor-testnet").emit("kill", "flattened")
+    EventLog(events.path, service="executor-testnet").emit("kill", "flattened")  # old demo runs don't count
+    assert not gl.evaluate()["passed"]
+    gl.attest("kill_switch", by="Shawn", note="pulled it with nothing open")
     rep = gl.evaluate()
     assert rep["passed"], [c for c in rep["criteria"] if not c["passed"]]
     assert gl.guard("s1") == ["no go-live approval (aitrader golive approve)"]
@@ -433,20 +438,20 @@ class FakeOpener:
 
 
 def test_telegram_alerts_and_commands(tmp_path):
-    events = EventLog(str(tmp_path / "ev.jsonl"), service="executor-testnet")
+    events = EventLog(str(tmp_path / "ev.jsonl"), service="executor-live")
     events.emit("trade_open", "old event")  # before the service started: not replayed
     control = Control(str(tmp_path / "c.json"))
     opener = FakeOpener()
     bot = Telegram("T", "42", opener=opener)
     svc = TelegramService(bot, events, control, status_fn=lambda: "all good")
     assert svc.pump_alerts() == 0
-    events.emit("trade_open", "testnet BUY")
+    events.emit("trade_open", "live BUY")
     EventLog(events.path, service="paper").emit("trade_open", "paper BUY")  # too frequent: not sent
     events.emit("heartbeat", "alive")
     events.emit("risk_pause", "paused: daily loss")
     assert svc.pump_alerts() == 2
     sent = [p["text"] for m, p in opener.calls if m == "sendMessage"]
-    assert "testnet BUY" in sent[0] and "daily loss" in sent[1]
+    assert "live BUY" in sent[0] and "daily loss" in sent[1]
 
     def msg(text, chat=42, uid=1):
         return {"update_id": uid, "message": {"chat": {"id": chat}, "text": text, "from": {"username": "shawn"}}}
@@ -484,15 +489,15 @@ def test_weekly_report_flags_gap(tmp_path):
               + [{"entry_id": "off", "exit_ts": now_ms - HOUR, "r": 0.0, "pnl_usdt": 0}] * 25)
     with open(tmp_path / "paper.json", "w") as fh:
         json.dump({"open": {}, "trades": trades}, fh)
-    with open(tmp_path / "testnet.json", "w") as fh:
+    with open(tmp_path / "live.json", "w") as fh:
         json.dump({"positions": {}, "closed": [{"exit_ts": now_ms, "r": 0.2, "paper_r": 0.3, "pnl_usdt": 2,
                                                 "slip_entry_bps": 4, "slip_exit_bps": 3}]}, fh)
     rep = weekly(str(tmp_path / "reg.json"), str(tmp_path / "paper.json"),
-                 {"testnet": str(tmp_path / "testnet.json")}, now=NOW)
+                 {"live": str(tmp_path / "live.json")}, now=NOW)
     assert rep["flagged"] == ["off"]
-    assert rep["executors"]["testnet"]["vs_paper_r"] == pytest.approx(-0.1)
+    assert rep["executors"]["live"]["vs_paper_r"] == pytest.approx(-0.1)
     text = weekly_text(rep)
-    assert "CHECK" in text and "testnet" in text
+    assert "CHECK" in text and "live" in text
     day = datetime.fromtimestamp(NOW, timezone.utc).date()
     assert "50 closed" in daily_text(day, str(tmp_path / "paper.json"), {})
 
@@ -523,27 +528,12 @@ def test_cli_kill_needs_confirm(tmp_path, monkeypatch, capsys):
     # live refuses while the live lock is closed, before any exchange is touched
     with pytest.raises(Exception):
         main(["--env-file", "none", "trade", "run", "--mode", "live", "--once"])
-    assert main(["--env-file", "none", "trade", "run", "--mode", "testnet", "--once"]) == 1
-
-
-def test_testnet_executor_waits_for_keys_instead_of_erroring(tmp_path, monkeypatch, capsys):
-    import json
-
-    from aitrader.cli import main
-
-    monkeypatch.chdir(tmp_path)
-    for k in ("BYBIT_DEMO_API_KEY", "BYBIT_DEMO_API_SECRET"):
-        monkeypatch.delenv(k, raising=False)
-    monkeypatch.setenv("AITRADER_MODE", "testnet")
-    monkeypatch.setattr("aitrader.ops.secrets.restart_on_change", lambda *a, **k: None)
-    assert main(["--env-file", "none", "trade", "run", "--mode", "testnet", "--once"]) == 1
-    assert "waiting for the Bybit Demo Trading API key" in capsys.readouterr().err
-    events = [json.loads(line) for line in open("data/ops/events.jsonl")]
-    assert events[-1]["kind"] == "waiting" and events[-1]["level"] == "warning"
+    with pytest.raises(SystemExit):  # demo trading is gone
+        main(["--env-file", "none", "trade", "run", "--mode", "testnet", "--once"])
 
 
 def test_ccxt_adapter_client_ids_and_lock(monkeypatch):
-    from aitrader.config import Mode, Settings
+    from aitrader.config import LIVE_CONFIRM_PHRASE, Mode, Settings
     from aitrader.exchanges import BybitAdapter
 
     class OrderNotFound(Exception):
@@ -579,7 +569,7 @@ def test_ccxt_adapter_client_ids_and_lock(monkeypatch):
             return {"result": {"list": []}}
 
     client = Client()
-    ad = BybitAdapter(Settings(mode=Mode.TESTNET), testnet=True, client=client)
+    ad = BybitAdapter(Settings(mode=Mode.LIVE, live_unlocked=True, live_confirm=LIVE_CONFIRM_PHRASE), client=client)
     run(ad.place_order("BTC/USDT", Side.BUY, 0.1234567, client_id="ait123"))
     assert client.calls[0][3] == pytest.approx(0.12346)
     assert client.calls[0][5] == {"isLeverage": 0, "marketUnit": "baseCoin", "orderLinkId": "ait123"}

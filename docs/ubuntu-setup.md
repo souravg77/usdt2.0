@@ -13,7 +13,7 @@ service (dashboard, database, alerts) in one file.
   Canada/Ontario and Singapore) and blocks API calls from restricted regions. Check Bybit's terms
   for your own country and the VPS's country, and pick a VPS region Bybit serves.
 - Phase 1 only needs public market data, so **no API keys are required yet**. When you do add keys:
-  Bybit Demo Trading keys first; later a real key with spot trading only; **never give it Wallet
+  a real key with spot trading only (it only shows your balance until you go live); **never give it Wallet
   permissions** (withdraw or transfer); bind it to the VPS IP. Use a dedicated sub-account. Keep
   only the money the bot trades with on Bybit (an exchange can fail or freeze withdrawals).
 
@@ -172,16 +172,16 @@ Check `data/update.log` afterwards, or run `./deploy/update.sh --check` by hand.
 rather approve each update, leave the cron job out and run the script yourself after a pull
 request is merged.
 
-## 10. Testnet, Telegram and the go/no-go gate (Phases 5 and 6)
+## 10. Telegram and the go/no-go gate (Phases 5 and 6)
 
 Start the market-context service once (later updates keep it running):
 `docker compose up -d context`. Then, step by step, as described in
 [live-trading.md](live-trading.md):
 
-1. Bybit Demo Trading keys (`BYBIT_DEMO_API_KEY`, `BYBIT_DEMO_API_SECRET`) in `.env` or on the
-   Settings page, then `docker compose --profile testnet up -d executor-testnet`.
-2. Test the kill switch on demo trading: `docker compose run --rm collector trade kill --confirm`,
-   then `trade resume`.
+1. Your real Bybit key (spot trade only, bound to the server's IP) on the Settings page. It only
+   shows your balance until you go live.
+2. Test the kill switch: `docker compose run --rm collector trade kill --confirm`, then
+   `trade resume` and `golive attest kill_switch --by <name>`.
 3. Telegram: `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env`, then
    `docker compose --profile telegram up -d telegram`.
 4. Add the weekly report to cron (Mondays 06:00 UTC):

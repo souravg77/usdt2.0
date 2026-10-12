@@ -116,17 +116,6 @@ services:
       driver: json-file
       options: { max-size: "10m", max-file: "5" }
 
-  # Phase 5: mirrors the paper trades with real orders on Bybit demo trading (fake money).
-  # Needs the Bybit demo keys (Settings page).   docker compose --profile testnet up -d executor-testnet
-  executor-testnet:
-    <<: *app
-    profiles: ["testnet"]
-    depends_on: [paper]
-    command: ["trade", "run", "--mode", "testnet", "--exchange", "bybit"]
-    environment:
-      AITRADER_DB_PATH: /app/data/aitrader.db
-      AITRADER_MODE: testnet
-
   # Telegram alerts and /status /pause /resume /kill. Needs TELEGRAM_BOT_TOKEN and
   # TELEGRAM_CHAT_ID.   docker compose --profile telegram up -d telegram
   telegram:
@@ -135,8 +124,8 @@ services:
     command: ["telegram"]
     mem_limit: 512m
 
-  # User accounts: trades for every approved user on their own exchange account (testnet unless
-  # live is on for them). Needs AITRADER_KEYS_SECRET.   docker compose --profile users up -d users
+  # User accounts: trades for every approved user on their own Bybit account, only once live is
+  # on for them. Needs AITRADER_KEYS_SECRET.   docker compose --profile users up -d users
   users:
     <<: *app
     profiles: ["users"]

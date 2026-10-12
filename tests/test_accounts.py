@@ -120,23 +120,21 @@ def _perm(**p):
 ])
 def test_real_keys_with_risky_permissions_are_refused(raw, msg):
     with pytest.raises(KeyRejected, match=msg):
-        run(verify_keys("bybit", False, API_KEY, API_SECRET, Settings(), client=KeyClient(raw)))
+        run(verify_keys("bybit", API_KEY, API_SECRET, Settings(), client=KeyClient(raw)))
 
 
 def test_key_checks_pass_and_fail():
-    perms = run(verify_keys("bybit", False, API_KEY, API_SECRET, Settings(), client=KeyClient(GOOD)))
+    perms = run(verify_keys("bybit", API_KEY, API_SECRET, Settings(), client=KeyClient(GOOD)))
     assert perms["wallet"] == [] and perms["ip_restricted"] and perms["spot"] == ["SpotTrade"]
-    assert run(verify_keys("bybit", True, API_KEY, API_SECRET, Settings(mode=Mode.TESTNET),
-                           client=KeyClient(fail=False)))
     with pytest.raises(KeyRejected, match="refused"):
-        run(verify_keys("bybit", True, API_KEY, API_SECRET, Settings(), client=KeyClient(fail=True)))
-    with pytest.raises(KeyUnverified, match="couldn't reach Bybit demo trading") as err:
-        run(verify_keys("bybit", True, API_KEY, API_SECRET, Settings(), client=KeyClient(fail="network")))
+        run(verify_keys("bybit", API_KEY, API_SECRET, Settings(), client=KeyClient(fail=True)))
+    with pytest.raises(KeyUnverified, match="couldn't reach Bybit") as err:
+        run(verify_keys("bybit", API_KEY, API_SECRET, Settings(), client=KeyClient(fail="network")))
     assert "signature" not in str(err.value)  # the request URL is never echoed
     with pytest.raises(KeyRejected, match="supported"):
-        run(verify_keys("htx", False, API_KEY, API_SECRET, Settings(), client=KeyClient(GOOD)))
+        run(verify_keys("htx", API_KEY, API_SECRET, Settings(), client=KeyClient(GOOD)))
     with pytest.raises(KeyRejected):
-        run(verify_keys("bybit", True, "short", API_SECRET, Settings(), client=KeyClient()))
+        run(verify_keys("bybit", "short", API_SECRET, Settings(), client=KeyClient()))
 
 
 # ---- web --------------------------------------------------------------------------------------
@@ -148,8 +146,8 @@ def site(tmp_path, monkeypatch):
     users = UserStore(str(tmp_path / "accounts.db"))
     calls = []
 
-    async def verifier(exchange, testnet, api_key, secret, settings):
-        calls.append((exchange, testnet))
+    async def verifier(exchange, api_key, secret, settings):
+        calls.append(exchange)
         if "withdraw" in api_key:
             raise KeyRejected("this key can WITHDRAW funds")
         return {"enableWithdrawals": False}
@@ -194,7 +192,7 @@ def test_signup_approval_keys_and_isolation(site):
     for path in ("/", "/trading", "/books", "/admin/users", "/strategies/x"):
         assert client.get(path, follow_redirects=False).headers["location"] == "/me", path
     csrf = _csrf(client)
-    r = client.post("/me/keys", data={"csrf": csrf, "net": "testnet", "api_key": API_KEY, "secret": API_SECRET},
+    r = client.post("/me/keys", data={"csrf": csrf, "api_key": API_KEY, "secret": API_SECRET},
                     follow_redirects=False)
     assert "approved" in r.headers["location"] and not calls
 
@@ -210,14 +208,16 @@ def test_signup_approval_keys_and_isolation(site):
     client2, _ = make()
     _login(client2, "ann@example.com", "a long enough password")
     csrf = _csrf(client2)
-    assert client2.post("/me/keys", data={"net": "testnet", "api_key": API_KEY, "secret": API_SECRET},
+    assert client2.post("/me/keys", data={"api_key": API_KEY, "secret": API_SECRET},
                         follow_redirects=False).status_code == 403  # no CSRF token
-    r = client2.post("/me/keys", data={"csrf": csrf, "net": "live", "api_key": "withdraw" + API_KEY,
+    r = client2.post("/me/keys", data={"csrf": csrf, "api_key": "withdraw" + API_KEY,
                                        "secret": API_SECRET}, follow_redirects=False)
     assert "WITHDRAW" in r.headers["location"].replace("%20", " ") and not users.key_info(uid)
-    client2.post("/me/keys", data={"csrf": csrf, "net": "testnet", "api_key": API_KEY, "secret": API_SECRET})
+    client2.post("/me/keys", data={"csrf": csrf, "api_key": API_KEY, "secret": API_SECRET})
+    assert users.key_info(uid, testnet=False)  # always stored as a real-account key
     page = client2.get("/me").text
     assert API_KEY not in page and API_SECRET not in page and API_KEY[-4:] in page
+    assert "Demo trading" not in page and "paper" in page
     r = client2.post("/me/live/on", data={"csrf": csrf, "budget": "100", "password": "a long enough password",
                                           "confirm": LIVE_CONFIRM_PHRASE}, follow_redirects=False)
     assert "not turned on" in r.headers["location"].replace("%20", " ") and users.get(uid).mode == "testnet"
@@ -299,40 +299,43 @@ def test_users_runner_trades_each_account_separately(tmp_path):
     _paper(paper, {KEY: _pos(SIG)})
     adapters = {}
 
-    def factory(exchange, settings, keys, testnet):
-        assert testnet and settings.mode is Mode.TESTNET
+    def factory(exchange, settings, keys):
         adapters[keys.api_key] = adapters.get(keys.api_key) or FakeAdapter(usdt=1000 if "A" in keys.api_key else 5000)
         return adapters[keys.api_key]
 
     a = st.create("a@example.com", "a long enough password", status="active")
     b = st.create("b@example.com", "a long enough password", status="active")
-    c = st.create("c@example.com", "a long enough password")  # pending: has no keys anyway
-    st.save_keys(v, a.id, "bybit", True, "A" * 20, "x" * 20, {})
-    st.save_keys(v, b.id, "bybit", True, "B" * 20, "y" * 20, {})
-    st.allow_live(b.id, True)  # live allowed, but the platform lock is closed -> still testnet
+    c = st.create("c@example.com", "a long enough password", status="active")
+    for u, k in ((a, "A"), (b, "B"), (c, "C")):
+        st.save_keys(v, u.id, "bybit", False, k * 20, "x" * 20, {})
+        st.allow_live(u.id, True)
+    st.set_mode(a.id, "live", 10_000)
+    st.set_mode(b.id, "live", 10_000)  # c has a key but live is off: nothing is sent for it
+    live = Settings(mode=Mode.LIVE, live_unlocked=True, live_confirm=LIVE_CONFIRM_PHRASE)
     platform = Control(str(tmp_path / "platform.json"))
-    runner = UsersRunner(st, v, Settings(), str(paper), root=str(tmp_path / "users"),
-                         platform_control=platform, adapter_factory=factory, clock=lambda: NOW)
+    runner = UsersRunner(st, v, live, str(paper), root=str(tmp_path / "users"), platform_control=platform,
+                         adapter_factory=factory, live_guard=lambda sid: [], live_monitor=lambda c: None,
+                         clock=lambda: NOW)
     res = run(runner.tick())
-    assert set(res) == {a.id, b.id} and c.id not in res
+    assert set(res) == {a.id, b.id} and "C" * 20 not in adapters
     assert all("error" not in r for r in res.values()), res
     sent_a = adapters["A" * 20].sent
     sent_b = adapters["B" * 20].sent
     assert len(sent_a) == 1 and len(sent_b) == 1
     assert sent_b[0].filled > sent_a[0].filled  # sized from each account's own balance
-    assert os.path.exists(tmp_path / "users" / str(a.id) / "testnet_state.json")
+    assert os.path.exists(tmp_path / "users" / str(a.id) / "live_state.json")
 
     platform.kill(by="admin")  # the platform switch stops everyone
     run(runner.tick())
     assert all(len(x.sent) == 2 for x in adapters.values())
     platform.resume()
-    st.set_status(a.id, "disabled")  # disabling sells and then stops that account
-    assert user_control(str(tmp_path / "users"), a.id).killed is False
+    st.set_status(a.id, "disabled")  # disabling turns live off; nothing is left open, so it stops
     run(runner.tick())
-    assert user_control(str(tmp_path / "users"), a.id).killed
-    run(runner.tick())
-    run(runner.tick())
-    assert a.id not in runner._ex
+    assert a.id not in runner._ex and b.id in runner._ex
+    # with the platform lock closed, no account is run (nothing left open to sell)
+    closed = UsersRunner(st, v, Settings(), str(paper), root=str(tmp_path / "users"), platform_control=platform,
+                         adapter_factory=factory, clock=lambda: NOW)
+    assert run(closed.tick()) == {}
 
 
 def test_combined_control():
@@ -359,13 +362,12 @@ def test_switching_live_off_sells_live_positions(tmp_path):
     _paper(paper, {KEY: _pos(SIG)})
     adapters = {}
 
-    def factory(exchange, settings, keys, testnet):
-        k = ("t" if testnet else "L") + keys.api_key
+    def factory(exchange, settings, keys):
+        k = "L" + keys.api_key
         adapters[k] = adapters.get(k) or FakeAdapter(usdt=2000)
         return adapters[k]
 
     u = st.create("a@example.com", "a long enough password", status="active")
-    st.save_keys(v, u.id, "bybit", True, "T" * 20, "x" * 20, {})
     st.save_keys(v, u.id, "bybit", False, "R" * 20, "y" * 20, {})
     st.allow_live(u.id, True)
     st.set_mode(u.id, "live", 300)
@@ -382,5 +384,5 @@ def test_switching_live_off_sells_live_positions(tmp_path):
     run(runner.tick())  # the live executor keeps running only to sell
     assert len(real.sent) == 2 and real.sent[1].side.value == "sell"
     run(runner.tick())
-    assert runner._ex[u.id][0][0] == "testnet"  # then the account is back on the testnet
+    assert u.id not in runner._ex  # then nothing runs for the account until live is on again
     assert len(real.sent) == 2

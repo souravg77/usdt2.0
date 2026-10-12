@@ -79,8 +79,8 @@ def add_user_routes(app, *, settings, auth, paths, users: UserStore, keys_secret
 <label>Password (at least 12 characters) <input name="password" type="password" autocomplete="new-password" minlength="12" required></label>
 <label>Password again <input name="password2" type="password" autocomplete="new-password" required></label>
 <label class="row"><input type="checkbox" name="agree" value="1" required> I understand that crypto
-trading can lose money, that the agent trades on Bybit demo trading until live trading is allowed for
-my account, and that I keep my exchange key without withdrawal rights.</label>
+trading can lose money, that nothing trades on my Bybit account until live trading is allowed for
+my account and I turn it on, and that I keep my exchange key without withdrawal rights.</label>
 <button>Create account</button></form>
 <p>Already have an account? <a href="/login">Log in</a></p>""")
 
@@ -119,7 +119,7 @@ my account, and that I keep my exchange key without withdrawal rights.</label>
         d = user_dir(users_dir, user.id)
         ctl = user_control(users_dir, user.id).state()
         platform = _load_json(os.path.join(paths.trade_dir, "control.json"))
-        execs = {m: _load_json(os.path.join(d, f"{m}_state.json")) for m in ("testnet", "live")}
+        execs = {m: _load_json(os.path.join(d, f"{m}_state.json")) for m in ("live",)}
         execs = {m: s for m, s in execs.items() if s}
         live_open = not live_gate_problems(settings)
         notes = (f'<p class="good">{_e(msg)}</p>' if msg else "") + (f'<p class="bad">{_e(error)}</p>' if error else "")
@@ -129,7 +129,7 @@ my account, and that I keep my exchange key without withdrawal rights.</label>
         else:
             status = '<b class="good">active</b>'
         mode = ('<b class="bad">LIVE (real money)</b>' if user.mode == "live" and user.live_allowed and live_open
-                else "<b>demo trading</b> (fake money)")
+                else "<b>paper</b> (no orders on your account)")
         if ctl["killed"]:
             sw = '<b class="bad">KILL SWITCH ON</b>'
         elif ctl["paused"]:
@@ -147,7 +147,7 @@ my account, and that I keep my exchange key without withdrawal rights.</label>
                 'placeholder="KILL"></label><button class="danger">Pull the kill switch</button></form></div>')
 
         rows = "".join(
-            f'<tr><td>{_e(k["exchange"])} {"demo trading" if k["testnet"] else "real account"}</td>'
+            f'<tr><td>{_e(k["exchange"])} {"demo trading (no longer used)" if k["testnet"] else "real account"}</td>'
             f'<td><code>{_e(k["hint"])}</code></td><td>{_when(k["added"])}</td><td>'
             f'<form method="post" action="/me/keys/delete" class="inline">{csrf}'
             f'<input type="hidden" name="net" value="{"testnet" if k["testnet"] else "live"}">'
@@ -161,11 +161,10 @@ my account, and that I keep my exchange key without withdrawal rights.</label>
         else:
             key_form = f"""<form method="post" action="/me/keys">{csrf}
 <label>Exchange <select name="exchange"><option value="bybit">Bybit</option></select></label>
-<label>Account <select name="net"><option value="testnet">Demo trading (fake money, start here)</option>
-<option value="live">Real account</option></select></label>
+<input type="hidden" name="net" value="live">
 <label>API key <input name="api_key" autocomplete="off" required></label>
 <label>Secret key <input name="secret" type="password" autocomplete="off" required></label>
-<p class="small muted">Real-account keys are refused unless the key is Read-Write with only SPOT
+<p class="small muted">Use a key from your real Bybit account. It is refused unless the key is Read-Write with only SPOT
 trade ticked (no withdrawals, transfers or contracts) and bound to the server's IP. Keys are
 stored encrypted and never shown again.</p>
 <button>Check and connect</button></form>"""
@@ -178,7 +177,7 @@ stored encrypted and never shown again.</p>
             live_body = (f'<p class="switch on">Live trading <b>ON</b> · budget cap <b>{user.pilot_max_usdt or 0:,.2f} USDT</b></p>'
                          f'<form method="post" action="/me/live/off">{csrf}<button class="danger">'
                          'Turn live trading OFF now</button></form><p class="small muted">Instant: no new real-money '
-                         'trades, the agent sells what it bought on your real account and goes back to demo trading.</p>')
+                         'trades, the agent sells what it bought on your real account and goes back to paper.</p>')
         else:
             why = []
             if user.status != "active":
@@ -221,31 +220,30 @@ stored encrypted and never shown again.</p>
 
     @app.post("/me/keys")
     async def my_keys(request: Request, csrf: str = Form(""), exchange: str = Form(EXCHANGE),
-                      net: str = Form("testnet"), api_key: str = Form(""), secret: str = Form("")):
+                      api_key: str = Form(""), secret: str = Form("")):
         user, resp = checked(request, csrf)
         if resp:
             return resp
         if user.status != "active":
             return back(error="Your account isn't approved yet.")
-        testnet = net != "live"
         try:
             v = vault()
-            perms = await verifier(exchange, testnet, api_key, secret, settings)
+            perms = await verifier(exchange, api_key, secret, settings)
         except (KeyRejected, AccountError) as exc:
             return back(error=f"Key not connected: {exc}")
-        users.save_keys(v, user.id, exchange, testnet, api_key, secret, perms)
-        users.log(user.id, user.email, "key_added", f"{exchange} {'testnet' if testnet else 'real account'}")
-        return back(msg=f"{exchange.title()} {'demo trading' if testnet else 'real-account'} key connected.")
+        users.save_keys(v, user.id, exchange, False, api_key, secret, perms)
+        users.log(user.id, user.email, "key_added", f"{exchange} real account")
+        return back(msg=f"{exchange.title()} real-account key connected.")
 
     @app.post("/me/keys/delete")
-    def my_keys_delete(request: Request, csrf: str = Form(""), net: str = Form("testnet")):
+    def my_keys_delete(request: Request, csrf: str = Form(""), net: str = Form("live")):
         user, resp = checked(request, csrf)
         if resp:
             return resp
         if net == "live":
             turn_off(users, users_dir, user.id, actor=user.email, reason="real-account key removed", events=events())
         users.delete_keys(user.id, EXCHANGE, net != "live")
-        users.log(user.id, user.email, "key_removed", "testnet" if net != "live" else "real account")
+        users.log(user.id, user.email, "key_removed", "old demo key" if net != "live" else "real account")
         return back(msg="Key removed. Remove it on the exchange too if you no longer use it.")
 
     @app.post("/me/live/on")
@@ -322,9 +320,8 @@ stored encrypted and never shown again.</p>
         csrf = _csrf(auth, token)
         rows = []
         for u in users.list():
-            keys = ", ".join(f'{k["exchange"]} {"testnet" if k["testnet"] else "real"}'
-                             for k in users.key_info(u.id)) or "-"
-            st = _load_json(os.path.join(user_dir(users_dir, u.id), f"{u.mode}_state.json"))
+            keys = ", ".join(f'{k["exchange"]} real' for k in users.key_info(u.id, testnet=False)) or "-"
+            st = _load_json(os.path.join(user_dir(users_dir, u.id), "live_state.json"))
             n_open = sum(1 for p in st.get("positions", {}).values() if p.get("status") == "open")
             pnl = sum(t.get("pnl_usdt", 0) for t in st.get("closed", []))
             actions = []
@@ -337,7 +334,7 @@ stored encrypted and never shown again.</p>
             actions.append(f'<form method="post" action="/admin/users/{u.id}/live" class="inline">{csrf}'
                            f'<input type="hidden" name="allow" value="{live}"><button>'
                            f'{"Stop live" if u.live_allowed else "Allow live"}</button></form>')
-            rows.append(f'<tr><td>{_e(u.email)}</td><td>{_e(u.status)}</td><td>{_e(u.mode)}'
+            rows.append(f'<tr><td>{_e(u.email)}</td><td>{_e(u.status)}</td><td>{"live" if u.mode == "live" else "paper"}'
                         f'{" (live allowed)" if u.live_allowed else ""}</td><td>{_e(keys)}</td>'
                         f'<td>{n_open} open · {pnl:+,.2f} USDT</td><td>{_when(u.created)}</td>'
                         f'<td class="actions">{" ".join(actions)}</td></tr>')

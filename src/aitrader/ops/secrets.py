@@ -8,7 +8,7 @@ Only the names in ``FIELDS`` can be stored. The live-trading lock (AITRADER_MODE
 AITRADER_LIVE_UNLOCKED, AITRADER_LIVE_CONFIRM) can never be set here: it stays in ``.env`` on
 the server.
 
-Services that use these keys (Telegram, the testnet executor) restart themselves when the file
+Services that use these keys (Telegram) restart themselves when the file
 changes, so a saved key takes effect within a minute.
 """
 
@@ -38,8 +38,6 @@ class Field:
 FIELDS = [
     Field("ANTHROPIC_API_KEY", "Anthropic API key", "anthropic"),
     Field("ANTHROPIC_WORKSPACE_ID", "Workspace ID (only if Anthropic asks for one)", "anthropic", secret=False),
-    Field("BYBIT_DEMO_API_KEY", "Demo trading API key", "bybit_demo"),
-    Field("BYBIT_DEMO_API_SECRET", "Demo trading API secret", "bybit_demo"),
     Field("BYBIT_API_KEY", "Real-account API key", "bybit"),
     Field("BYBIT_API_SECRET", "Real-account API secret", "bybit"),
     Field("TELEGRAM_BOT_TOKEN", "Bot token", "telegram"),
