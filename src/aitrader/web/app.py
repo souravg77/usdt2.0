@@ -337,7 +337,7 @@ paper trading. Nothing trades real money.</p>
         events = EventLog(paths.events).read(limit=600)
         body = [note, _trading_stats(c, settings, paths, paper, events, acct),
                 '<div class="grid">', _account_card(acct), _paper_switch_card(c, paths, events, jobs.list(), csrf),
-                _live_card(settings, paths, events), "</div>",
+                _ai_card(paths, jobs.list(), csrf), _live_card(settings, paths, events), "</div>",
                 '<div class="grid">', controls, _gate_card(paths, csrf), "</div>",
                 "<h2>Equity</h2>", _equity_svg(paper, execs),
                 "<h2>Open positions</h2>", _positions_table(paper, execs),
@@ -406,6 +406,47 @@ paper trading. Nothing trades real money.</p>
             return ("Paper trading is on: every strategy is being loaded into paper trading, then a year of "
                     "price history is downloaded and each one is backtested. Trades open when a strategy's "
                     "signal appears on a closed candle.")
+        return _control_post(request, csrf, act)
+
+    @app.post("/trading/ai/train")
+    def trading_ai_train(request: Request, csrf: str = Form("")):
+        def act(user):
+            busy = {j.get("meta", {}).get("kind") for j in jobs.list() if j["status"] in ("queued", "running")}
+            if "ai-train" in busy:
+                return "The AI filter is already being trained; see Recent jobs on the Overview page."
+            if "paper-start" in busy:
+                return ("Wait until paper trading has finished switching on: the AI filter learns from the "
+                        "year of price history it is still downloading.")
+            jobs.submit("Train the AI trade filter on every strategy's backtested and paper signals",
+                        [["ai", "retrain", "--all"]], meta={"kind": "ai-train"})
+            _event("ai_train", f"AI filter training started from the dashboard by {user}")
+            return ("Training started. When it finishes, the AI filter card shows how the new model did on "
+                    "data it never saw, and a Turn on button if it beat the unfiltered strategies.")
+        return _control_post(request, csrf, act)
+
+    @app.post("/trading/ai/on")
+    def trading_ai_on(request: Request, csrf: str = Form(""), version: str = Form("")):
+        def act(user):
+            from ..ai import ModelRegistry
+
+            reg = ModelRegistry(paths.models)
+            try:
+                reg.promote(version, approved_by=user)
+            except (KeyError, ValueError) as exc:
+                return f"Not turned on: {exc}"
+            _event("ai_promote", f"AI filter {version} turned on from the dashboard by {user}", "warning")
+            return (f"AI filter {version} is on. Paper trading now skips the signals it rates weakest and "
+                    "shrinks the doubtful ones; Turn off takes every signal again at once.")
+        return _control_post(request, csrf, act)
+
+    @app.post("/trading/ai/off")
+    def trading_ai_off(request: Request, csrf: str = Form("")):
+        def act(user):
+            from ..ai import ModelRegistry
+
+            ModelRegistry(paths.models).deactivate(by=user)
+            _event("ai_off", f"AI filter turned off from the dashboard by {user}")
+            return "AI filter off: every signal is taken at full size."
         return _control_post(request, csrf, act)
 
     @app.post("/trading/paper/off")
@@ -560,8 +601,56 @@ def _filter_card(paths: Paths) -> str:
         text = "Off: every signal is taken."
     waiting = [v for v in reg.versions() if reg.info(v)["status"] == "candidate"]
     if waiting:
-        text += f"<br>{len(waiting)} candidate(s) waiting for approval (<code>aitrader ai promote</code>)"
+        text += f'<br>{len(waiting)} candidate(s) waiting for approval on the <a href="/trading">Trading</a> page'
+    elif not reg.active:
+        text += '<br><a href="/trading">Train it on the Trading page</a>'
+
     return f'<div class="card"><h3>AI trade filter</h3><p>{text}</p></div>'
+
+
+def _ai_card(paths: Paths, job_list: list[dict], csrf: str) -> str:
+    """The AI trade filter: train a new model, turn the best candidate on, or turn it off."""
+    from ..ai import ModelRegistry
+
+    reg = ModelRegistry(paths.models)
+    training = next((j for j in job_list if j["status"] in ("queued", "running")
+                     and j.get("meta", {}).get("kind") == "ai-train"), None)
+    if reg.active:
+        f = reg.info(reg.active)["test"]["filtered"]
+        state = (f'<b class="good">ON</b>: model {_e(reg.active)} (on unseen data {f["trades"]} trades, '
+                 f'{f["expectancy_r"]:+.3f}R each)')
+    else:
+        state = '<b class="bad">OFF</b>: every signal is taken at full size'
+    parts = [f'<div class="card"><h3>AI trade filter</h3><p>{state}</p>',
+             '<p class="small muted">The filter learns from every strategy\'s backtested and paper signals '
+             'which ones reached 1R before the stop. It is tested on a later period it never saw, and it can be '
+             'turned on only when it beat the strategies without a filter there (higher result per trade, '
+             'no worse drawdown). When on, paper trading skips the weakest signals and shrinks doubtful '
+             'ones. A monthly retrain never turns a model on by itself.</p>']
+    newest = reg.versions()[-1] if reg.versions() else None
+    if newest and newest != reg.active:
+        m = reg.info(newest)
+        u, f = m["test"]["unfiltered"], m["test"]["filtered"]
+        verdict = ('<b class="good">beat the unfiltered strategies</b>' if m["status"] == "candidate"
+                   else f'<b class="bad">{_e(m["status"])}</b>: {_e(m.get("why", ""))}')
+        parts.append(f'<p class="small">Latest model {_e(newest)} {verdict}<br>on unseen data: without filter '
+                     f'{u["trades"]} trades {u["expectancy_r"]:+.3f}R each; with it {f["trades"]} trades '
+                     f'{f["expectancy_r"]:+.3f}R each</p>')
+    buttons = []
+    if training:
+        parts.append(f'<p class="small">Training now (<a href="/jobs/{_e(training["id"])}">progress</a>)</p>')
+    else:
+        buttons.append(f'<form method="post" action="/trading/ai/train">{csrf}<button class="ghost">'
+                       f'{"Retrain" if reg.versions() else "Train the AI filter"}</button></form>')
+    if newest and newest != reg.active and reg.info(newest)["status"] == "candidate":
+        buttons.append(f'<form method="post" action="/trading/ai/on">{csrf}'
+                       f'<input type="hidden" name="version" value="{_e(newest)}">'
+                       f'<button>Turn on {_e(newest)}</button></form>')
+    if reg.active:
+        buttons.append(f'<form method="post" action="/trading/ai/off">{csrf}<button class="ghost">'
+                       'Turn the AI filter off</button></form>')
+    parts.append(f'<div class="row">{"".join(buttons)}</div></div>')
+    return "".join(parts)
 
 
 def _paper_card(paths: Paths) -> str:

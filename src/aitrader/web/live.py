@@ -9,10 +9,13 @@ however many browsers poll, Bybit sees at most one request per pair and timefram
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 
 from ..config import EXCHANGE
 from ..data.store import CandleStore
+
+log = logging.getLogger(__name__)
 
 CACHE_S = 1.0
 LIMIT = 500  # enough history for the 200-bar EMA on the chart
@@ -29,8 +32,11 @@ class LiveMarket:
         if self._client is None:
             import ccxt.async_support as ccxt_async
 
+            # the charts are spot only: loading just the spot markets keeps the first request fast
+            # (Bybit's full list adds perpetuals and options, several slow calls)
             self._client = getattr(ccxt_async, self.exchange)(
-                {"enableRateLimit": True, "options": {"defaultType": "spot"}})
+                {"enableRateLimit": True,
+                 "options": {"defaultType": "spot", "fetchMarkets": {"types": ["spot"]}}})
         return self._client
 
     async def _cached(self, key: tuple, fetch) -> dict:
@@ -60,12 +66,18 @@ class LiveMarket:
     async def tickers(self, symbols: list[str]) -> dict:
         async def fetch():
             try:
-                raw = await asyncio.wait_for(self.client().fetch_tickers(symbols), timeout=8)
+                # every spot ticker in one call, then ours picked out: asking for a list makes ccxt
+                # refuse the whole call when a single pair isn't listed, and the cards then froze
+                # on the collector's hourly candles
+                raw = await asyncio.wait_for(self.client().fetch_tickers(), timeout=8)
                 rows = [{"symbol": s, "price": t.get("last"), "change": t.get("percentage"),
                          "high": t.get("high"), "low": t.get("low"), "volume": t.get("quoteVolume")}
                         for s in symbols if (t := raw.get(s))]
+                if not rows:
+                    raise LookupError("none of the pairs came back")
                 return {"source": "live", "tickers": rows}
             except Exception as exc:
+                log.warning("live tickers failed, using saved prices: %s: %s", type(exc).__name__, exc)
                 return {"source": "database", "note": _why(exc), "tickers": self._saved_tickers(symbols)}
         return await self._cached(("t", tuple(symbols)), fetch)
 
