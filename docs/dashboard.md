@@ -27,6 +27,10 @@ order it can cause is the kill switch selling what the executors bought.
   "Check the gate now" button. The page refreshes every minute. See
   [live-trading.md](live-trading.md).
 
+- **Pairs.** The Bybit spot pair ranking with the reasons for each rank, the pairs it left out,
+  each pair's current market regime (1h, 4h, 1d), and paper and backtest results split by regime.
+  "Rank pairs now" queues `aitrader pairs rank`. See [regime-and-pairs.md](regime-and-pairs.md).
+
 - **Users** (admin) and **My account** (users): sign-up, approval, each user's exchange keys,
   positions, trades and kill switch. See [user-accounts.md](user-accounts.md).
 

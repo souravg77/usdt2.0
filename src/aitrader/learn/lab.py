@@ -3,7 +3,8 @@
 Each candidate runs on every stored market (exchange x symbol x one of its timeframes) using the
 in-sample and out-of-sample periods from ``split_periods``. The final 20% of history stays
 untouched, as in Phase 3. Trades are pooled across markets and the strategy moves to paper only
-if it clears every bar in ``Gate``; otherwise it is rejected with the reasons.
+if it clears every bar in ``Gate``; otherwise it is rejected with the reasons. The summary also
+splits the out-of-sample trades by market regime (``by_regime_oos``); the gate does not use it.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from dataclasses import asdict, dataclass
 from ..backtest import BacktestConfig, metrics, run_backtest, split_periods
 from ..data.store import CandleStore
 from ..indicators import candles_to_frame
+from ..market.regime import breakdown, labels_by_close
 from .registry import Entry, make_strategy
 
 MIN_BARS = 300
@@ -55,21 +57,29 @@ class Gate:
 
 
 def evaluate(entry: Entry, store: CandleStore, exchanges: list[str], symbols: list[str],
-             cfg: BacktestConfig | None = None, gate: Gate | None = None, move: bool = True) -> dict:
+             cfg: BacktestConfig | None = None, gate: Gate | None = None, move: bool = True,
+             regimes: dict | None = None) -> dict:
     """Backtest one registry entry and move it to paper or rejected (only record the result with
-    ``move=False``). Returns the summary."""
+    ``move=False``). Returns the summary. ``regimes`` caches each market's regime labels when
+    several entries are tested in a row."""
     cfg, gate = cfg or BacktestConfig(), gate or Gate()
+    regimes = {} if regimes is None else regimes
     strat = make_strategy(entry)
-    trades_in, trades_oos, markets = [], [], []
+    trades_in, trades_oos, markets, tagged = [], [], [], []
     for ex in exchanges:
         for sym in symbols:
             for tf in strat.spec.timeframes:
                 candles = store.load(ex, sym, tf)
                 if len(candles) < MIN_BARS:
                     continue
-                ins, oos, _final = split_periods(candles_to_frame(candles))
+                df = candles_to_frame(candles)
+                ins, oos, _final = split_periods(df)
                 t_in = run_backtest(strat, ins, ex, sym, tf, cfg)
                 t_oos = run_backtest(strat, oos, ex, sym, tf, cfg)
+                key = (ex, sym, tf, len(candles), candles[-1].ts)
+                if key not in regimes:
+                    regimes[key] = labels_by_close(df, tf)
+                tagged += [(regimes[key].get(t.signal_ts), t) for t in t_oos]
                 trades_in += t_in
                 trades_oos += t_oos
                 markets.append({"exchange": ex, "symbol": sym, "timeframe": tf,
@@ -82,6 +92,7 @@ def evaluate(entry: Entry, store: CandleStore, exchanges: list[str], symbols: li
     else:
         why = gate.check(m_in, m_oos)
     summary = {"in_sample": _round(m_in), "out_of_sample": _round(m_oos), "markets": markets,
+               "by_regime_oos": breakdown(tagged),
                "gate": asdict(gate), "failed": why,
                "costs": {"taker_fee": cfg.taker_fee, "maker_fee": cfg.maker_fee,
                          "slippage_bps": cfg.slippage_bps}}

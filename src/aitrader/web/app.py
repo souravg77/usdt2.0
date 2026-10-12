@@ -51,6 +51,7 @@ class Paths:
     keys_store: str = "data/settings/keys.enc"
     report: str = "data/reports/backtest.json"
     news: str = "data/news"
+    pairs: str = "data/pairs/ranking.json"
 
 
 def create_app(settings: Settings, auth: Auth, jobs: JobRunner, paths: Paths | None = None,
@@ -149,6 +150,7 @@ def create_app(settings: Settings, auth: Auth, jobs: JobRunner, paths: Paths | N
 
     from .market_pages import add_market_routes
     from .news_pages import add_news_routes
+    from .pair_pages import add_pair_routes
     from .replay_pages import add_replay_routes
     from .report_pages import add_report_routes
     from .settings_pages import add_settings_routes
@@ -157,6 +159,8 @@ def create_app(settings: Settings, auth: Auth, jobs: JobRunner, paths: Paths | N
     add_report_routes(app, settings=settings, auth=auth, jobs=jobs, page=page, guard=guard,
                       report_path=paths.report)
     add_news_routes(app, settings=settings, auth=auth, jobs=jobs, page=page, guard=guard, news_dir=paths.news)
+    add_pair_routes(app, settings=settings, auth=auth, jobs=jobs, page=page, guard=guard, ranking_path=paths.pairs,
+                    paper_state=paths.paper_state, report_path=paths.report)
     add_replay_routes(app, settings=settings, auth=auth, jobs=jobs, page=page, guard=guard,
                       registry_path=paths.registry, report_path=paths.report)
 
@@ -414,7 +418,7 @@ paper trading. Nothing trades real money.</p>
     return app
 
 
-NAV = [("/", "Overview"), ("/markets", "Markets"), ("/trading", "Trading"), ("/replay", "Replay"),
+NAV = [("/", "Overview"), ("/markets", "Markets"), ("/pairs", "Pairs"), ("/trading", "Trading"), ("/replay", "Replay"),
        ("/news", "News"), ("/reports", "Reports"), ("/books", "Submit a book"), ("/admin/users", "Users"), ("/settings", "Settings")]
 
 

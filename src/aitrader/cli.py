@@ -17,6 +17,7 @@ from .data.feeds import LiveFeed
 from .data.quality import check_candles
 from .data.store import CandleStore
 from .exchanges import PaperExchange, make_adapter
+from .market.pairs import configured_symbols, open_paper_symbols
 from .models import OrderType, Side
 from .safety import live_gate_problems
 
@@ -45,7 +46,8 @@ def cmd_status(s: Settings, _args) -> int:
     for name, k in s.keys.items():
         print(f"keys[{name}]: {'set' if k.present else 'not set'}")
     print(f"db: {s.db_path}")
-    print(f"symbols: {', '.join(s.symbols)}")
+    print(f"symbols: {', '.join(configured_symbols(s.symbols))} "
+          f"(AITRADER_PAIRS={os.environ.get('AITRADER_PAIRS') or 'fixed'})")
     print(f"timeframes: {', '.join(s.timeframes)}")
     return 0
 
@@ -58,7 +60,7 @@ async def cmd_download(s: Settings, args) -> int:
     for ex in exchanges:
         adapter = make_adapter(ex, s)
         try:
-            for sym in args.symbol or s.symbols:
+            for sym in args.symbol or configured_symbols(s.symbols):
                 for tf in args.timeframe or s.timeframes:
                     try:
                         n = await download(adapter, store, sym, tf, since, until)
@@ -94,8 +96,10 @@ async def cmd_collect(s: Settings, args) -> int:
     try:
         while True:
             since = int(time.time() * 1000) - args.backfill_days * 86_400_000
+            # the ranked pairs when AITRADER_PAIRS=ranked, plus any with an open paper position
+            symbols = configured_symbols(s.symbols, keep=open_paper_symbols(PAPER_STATE))
             for ex, adapter in adapters.items():
-                for sym in s.symbols:
+                for sym in symbols:
                     for tf in s.timeframes:
                         try:
                             n = await download(adapter, store, sym, tf, since)
@@ -380,8 +384,9 @@ def cmd_learn(s: Settings, args) -> int:
 
     def run_tests(entries, move: bool = True) -> None:
         store = CandleStore(s.db_path)
+        regimes: dict = {}  # each market's regime labels, worked out once for all entries
         for e in entries:
-            res = evaluate(e, store, exchanges, symbols, cfg, move=move)
+            res = evaluate(e, store, exchanges, symbols, cfg, move=move, regimes=regimes)
             m = res["out_of_sample"]
             if move:
                 verdict = {"paper": "PASSED -> paper trading", "rejected": "rejected"}.get(e.status, "untested")
@@ -515,7 +520,8 @@ def cmd_learn(s: Settings, args) -> int:
             from .strategies.context_filter import ContextFilter
 
             context = ContextFilter(ContextStore(store))
-        trader = PaperTrader(store, args.registry, exchanges, symbols,
+        pairs = symbols if args.symbol else (lambda: configured_symbols(s.symbols))  # re-read each tick
+        trader = PaperTrader(store, args.registry, exchanges, pairs,
                              PaperConfig(start_equity=s.paper_start_usdt, backtest=cfg),
                              calendar=None if args.no_calendar else CalendarFilter(),
                              ai_filter=None if args.no_ai else LiveFilter(args.models),
@@ -1031,6 +1037,44 @@ async def _users_run(s: Settings, store, args) -> int:
 
 
 
+def cmd_pairs(s: Settings, args) -> int:
+    """Rank Bybit spot USDT pairs from public data, or show the ranking and current regimes."""
+    from .market import pairs
+    from .market.regime import current_regimes
+
+    if args.pairs_cmd == "rank":
+        async def run():
+            client = pairs.public_client(args.exchange)
+            try:
+                return await pairs.rank_pairs(client, pairs.RankConfig(min_turnover_usdt=args.min_turnover,
+                                                                       depth_top=args.depth_top),
+                                              args.registry, PAPER_STATE, exchange=args.exchange)
+            finally:
+                await client.close()
+
+        rk = asyncio.run(run())
+        pairs.save_ranking(rk, args.out)
+        print(pairs.ranking_text(rk, args.top))
+        print(f"ranking saved to {args.out}")
+        return 0
+    if args.pairs_cmd == "show":
+        rk = pairs.load_ranking(args.out)
+        if not rk.get("pairs"):
+            print("no pair ranking yet: run `aitrader pairs rank`")
+            return 1
+        print(pairs.ranking_text(rk, args.top))
+        return 0
+    store = CandleStore(s.db_path)
+    try:
+        rows = current_regimes(store, args.symbol or configured_symbols(s.symbols),
+                               args.timeframe or ["1h", "4h", "1d"], args.exchange_data or EXCHANGES)
+    finally:
+        store.close()
+    for r in rows:
+        print(f"{r['symbol']:12} {r['timeframe']:4} {r['label'] or '-':16} {r['confidence']:.2f}  {r['reason']}")
+    return 0
+
+
 def cmd_doctor(s: Settings, args) -> int:
     """Health check of this installation: settings, secrets, live lock, data, services, disk, backups."""
     from .ops.doctor import report, run_checks
@@ -1252,6 +1296,18 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("--max-gap", type=float, default=0.15)
     rp.add_argument("--quiet", action="store_true", help="don't send it to the event log / Telegram")
 
+    pa = sub.add_parser("pairs", help="rank Bybit spot USDT pairs; show the ranking and market regimes")
+    pa.add_argument("pairs_cmd", choices=["rank", "show", "regimes"])
+    pa.add_argument("--out", default="data/pairs/ranking.json", help="ranking file")
+    pa.add_argument("--top", type=int, default=30, help="rows to print")
+    pa.add_argument("--exchange", default="bybit", help="rank: ccxt exchange id (public data only)")
+    pa.add_argument("--min-turnover", type=float, default=2_000_000, help="rank: 24h USDT turnover floor")
+    pa.add_argument("--depth-top", type=int, default=40, help="rank: order books to check")
+    pa.add_argument("--registry", default="data/learn/registry.json")
+    pa.add_argument("--symbol", action="append", help="regimes: pairs (default: the configured list)")
+    pa.add_argument("--timeframe", action="append", help="regimes: default 1h, 4h, 1d")
+    pa.add_argument("--exchange-data", action="append", help="regimes: stored candles to use")
+
     us = sub.add_parser("users", help="user accounts: list, approve, disable, live on/off, run")
     us_sub = us.add_subparsers(dest="users_cmd", required=True)
     us_sub.add_parser("list", help="every account with its status, mode and connected keys")
@@ -1307,6 +1363,7 @@ def main(argv: list[str] | None = None) -> int:
         "report": cmd_report,
         "users": cmd_users,
         "doctor": cmd_doctor,
+        "pairs": cmd_pairs,
     }[args.cmd]
     result = handler(settings, args)
     if asyncio.iscoroutine(result):

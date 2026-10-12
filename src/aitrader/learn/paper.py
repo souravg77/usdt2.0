@@ -6,8 +6,9 @@ fill rules as the backtest (``simulate_signal``): entry at the next bar's open p
 stop first, gaps fill at the open, fees on both sides. Results are kept per strategy and checked
 against ``RetireRule``; a strategy whose paper results fall below the bar is retired and takes
 no new trades. When a person has promoted a Phase 4 trade-filter model, each new signal is
-checked by it first: skipped below its threshold, sized by its confidence above. No exchange
-order is ever sent from here.
+checked by it first: skipped below its threshold, sized by its confidence above. Each signal
+records the market regime of its bar (``aitrader.market.regime``) so results can be split by it;
+the regime never blocks a paper trade here. No exchange order is ever sent from here.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from ..backtest import BacktestConfig, metrics
 from ..backtest.engine import Trade, simulate_signal
 from ..data.store import CandleStore
 from ..indicators import candles_to_frame
+from ..market.regime import breakdown, classify
 from ..models import TIMEFRAME_MS, Side
 from ..strategies.base import Signal
 from .registry import Registry, make_strategy
@@ -55,6 +57,7 @@ class PaperTrader:
                  state_path: str = DEFAULT_STATE, calendar=None, ai_filter=None, control=None,
                  context=None, events=None, news=None):
         self.store, self.registry_path = store, registry_path
+        # ``symbols`` may be a function returning the list (the pair ranking, read each tick)
         self.exchanges, self.symbols = exchanges, symbols
         self.cfg = cfg or PaperConfig()
         self.state_path, self.calendar = state_path, calendar
@@ -80,6 +83,8 @@ class PaperTrader:
         if self.control is not None and self.control.paused:
             allow = False
         frames: dict = {}  # (exchange, symbol, timeframe) -> (frame, newest close, new candle since last tick)
+        regimes: dict = {}  # (exchange, symbol, timeframe) -> regime of the newest closed bar
+        symbols = self._symbols()
         for entry in reg.with_status("paper"):
             try:
                 strat = make_strategy(entry)
@@ -87,7 +92,7 @@ class PaperTrader:
                 log.exception("can't build %s; skipping it", entry.id)
                 continue
             for ex in self.exchanges:
-                for sym in self.symbols:
+                for sym in symbols:
                     for tf in strat.spec.timeframes:
                         key = f"{entry.id}|{ex}|{sym}|{tf}"
                         if key in self.state["open"] or not allow:
@@ -115,12 +120,15 @@ class PaperTrader:
                             self._note_filtered(key, sig, ai)
                             events["filtered"].append(key)
                             continue
+                        if market not in regimes:
+                            regimes[market] = _regime(df, tf)
                         self.state["open"][key] = {"entry_id": entry.id, "signal": _sig_dict(sig),
                                                    "size_mult": size_mult * ctx_mult * ai["size"], "filled": False,
-                                                   "ai_prob": ai["prob"], "ai_version": ai["version"]}
+                                                   "ai_prob": ai["prob"], "ai_version": ai["version"],
+                                                   "regime": regimes[market]}
                         events["opened"].append(key)
-                        log.info("paper signal %s entry~%.6g stop %.6g ai p=%s size x%.2f", key,
-                                 sig.entry, sig.stop, ai["prob"], ai["size"])
+                        log.info("paper signal %s entry~%.6g stop %.6g ai p=%s size x%.2f regime %s", key,
+                                 sig.entry, sig.stop, ai["prob"], ai["size"], (regimes[market] or {}).get("label"))
         for market, (_df, close, _fresh) in frames.items():
             self._seen[market] = close
         self._score(reg, events)
@@ -158,6 +166,15 @@ class PaperTrader:
 
     # ---- internals ------------------------------------------------------------------------------
 
+    def _symbols(self) -> list[str]:
+        if not callable(self.symbols):
+            return self.symbols
+        try:
+            return list(self.symbols())
+        except Exception:  # a broken ranking file must not stop paper trading
+            log.exception("can't read the pair list; skipping new entries this tick")
+            return []
+
     def _frame(self, ex, sym, tf, start, now_ms):
         step = TIMEFRAME_MS[tf]
         candles = [c for c in self.store.load(ex, sym, tf, start) if c.ts + step <= now_ms]
@@ -186,8 +203,10 @@ class PaperTrader:
         for key in events["opened"]:
             sig = self.state["open"][key]["signal"]
             ai = self.state["open"][key].get("ai_prob")
+            regime = (self.state["open"][key].get("regime") or {}).get("label")
             self.events.emit("trade_open", f"paper BUY signal {key} entry~{sig['entry']:.6g} "
-                             f"stop {sig['stop']:.6g}" + (f" (AI p={ai:.2f})" if ai is not None else ""),
+                             f"stop {sig['stop']:.6g}" + (f" (AI p={ai:.2f})" if ai is not None else "")
+                             + (f" regime {regime}" if regime else ""),
                              key=key, mode="paper")
         for key in events["closed"]:
             t = next((t for t in reversed(self.state["trades"]) if t["key"] == key), None)
@@ -257,7 +276,8 @@ class PaperTrader:
             self.state["equity"][entry_id] = equity + pnl
             row = {**_trade_dict(t), "key": key, "entry_id": entry_id, "units": pos["units"],
                    "pnl_usdt": pnl, "equity_after": equity + pnl,
-                   "ai_prob": pos.get("ai_prob"), "ai_version": pos.get("ai_version")}
+                   "ai_prob": pos.get("ai_prob"), "ai_version": pos.get("ai_version"),
+                   "regime": (pos.get("regime") or {}).get("label")}
             self.state["trades"].append(row)
             del self.state["open"][key]
             events["closed"].append(key)
@@ -276,6 +296,7 @@ class PaperTrader:
                 "max_drawdown_r": round(m["max_drawdown_r"], 3),
                 "equity_usdt": round(self.state["equity"].get(entry.id, self.cfg.start_equity), 2),
                 "open": sum(1 for p in self.state["open"].values() if p["entry_id"] == entry.id),
+                "by_regime": breakdown((r.get("regime"), _trade_from(r)) for r in rows),
             }
             if entry.status != "paper":
                 continue
@@ -316,6 +337,14 @@ class PaperTrader:
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(self.state, fh, indent=1)
         os.replace(tmp, self.state_path)
+
+
+def _regime(df, timeframe: str) -> dict | None:
+    try:
+        return classify(df, timeframe).as_dict()
+    except Exception:  # the label is for reports only: never let it stop a paper trade
+        log.exception("regime classifier failed on %s", timeframe)
+        return None
 
 
 def _sig_dict(sig: Signal) -> dict:

@@ -26,6 +26,9 @@ Example::
 
 Feature expressions look like ``rsi(14)``, ``bb_upper(20,2)``, ``close[1]`` (one bar ago) or
 ``1.5*avg_volume(20)``. See ``FEATURES`` for the full list.
+
+Optional ``"avoid_regimes": ["trend-down", "low-liquidity"]`` skips entries on bars whose market
+regime (``aitrader.market.regime.REGIMES``) is listed. Without it the regime never blocks a trade.
 """
 
 from __future__ import annotations
@@ -63,6 +66,7 @@ from ..indicators import (
     vwap,
 )
 from ..backtest.engine import CUSTOM_EXITS
+from ..market.regime import REGIMES, regime_labels
 from ..models import TIMEFRAME_MS, Side
 from ..strategies.base import Signal, Strategy, StrategySpec
 
@@ -319,6 +323,11 @@ def validate_spec(spec: dict) -> dict:
     out["risk_pct"] = min(float(risk), MAX_RISK_PCT)
     out["decisions"] = [str(d)[:300] for d in (spec.get("decisions") or [])][:12]
     out["uncodable"] = [str(d)[:300] for d in (spec.get("uncodable") or [])][:12]
+    avoid = spec.get("avoid_regimes") or []
+    if not isinstance(avoid, list) or any(a not in REGIMES for a in avoid):
+        errors.append(f"avoid_regimes must be a list drawn from {', '.join(REGIMES)}")
+    elif avoid:  # only stored when set, so existing specs keep their ids
+        out["avoid_regimes"] = sorted(set(avoid))
     if errors:
         raise RuleError("; ".join(errors))
     return out
@@ -327,6 +336,8 @@ def validate_spec(spec: dict) -> dict:
 def spec_id(spec: dict) -> str:
     """Stable id: the name plus a short hash of the trading rules (not the prose)."""
     core = {k: spec[k] for k in ("timeframes", "entry", "stop", "target", "exit")}
+    if spec.get("avoid_regimes"):
+        core["avoid_regimes"] = spec["avoid_regimes"]
     digest = hashlib.sha256(json.dumps(core, sort_keys=True).encode()).hexdigest()[:6]
     return f"{spec['name']}-{digest}"
 
@@ -500,6 +511,8 @@ class RuleStrategy(Strategy):
         cond = pd.Series(True, index=df.index)
         for c in r["entry"]:
             cond &= condition_series(df, c, cache)
+        if r.get("avoid_regimes"):
+            cond &= ~regime_labels(df, timeframe).isin(r["avoid_regimes"])
         stop_s = self._stop_series(df, cache)
         trailing = "|".join(x for x in (
             r["exit"]["trailing"],
