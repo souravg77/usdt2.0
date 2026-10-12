@@ -11,7 +11,7 @@
 #   3. downloads the code into ~/AI_crypto_trader
 #   4. creates .env with strong random secrets (the dashboard password is printed once)
 #   5. builds the image, prepares the database, starts collector, context, paper, web and caddy
-#   6. schedules a daily backup (cron, 03:30) and makes the first one
+#   6. schedules a daily backup (cron, 03:30) and makes the first one, and a daily pair ranking (02:45)
 #   7. runs `aitrader doctor`
 # Live trading stays locked. Running it again is safe: existing settings are kept.
 set -euo pipefail
@@ -164,6 +164,10 @@ say "Daily backups"
 CRON_LINE="30 3 * * * cd '$DIR' && ./deploy/backup.sh >> data/backup.log 2>&1"
 ( crontab -l 2>/dev/null | grep -v 'deploy/backup.sh' || true; echo "$CRON_LINE" ) | crontab -
 sudo systemctl enable --now cron >/dev/null 2>&1 || true
+# Daily Bybit pair ranking at 02:45 (public data, no key), shown on the Pairs page. It changes which
+# pairs trade only if you set AITRADER_PAIRS=ranked in .env.
+RANK_LINE="45 2 * * * cd '$DIR' && $DOCKER compose run --rm -T collector pairs rank >> data/pairs.log 2>&1"
+( crontab -l 2>/dev/null | grep -v 'pairs rank' || true; echo "$RANK_LINE" ) | crontab -
 DOCKER="$DOCKER" ./deploy/backup.sh || echo "warning: the first backup failed; run ./deploy/backup.sh to see why" >&2
 
 say "Health check"

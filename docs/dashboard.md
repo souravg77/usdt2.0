@@ -40,6 +40,9 @@ order it can cause is the kill switch selling what the executors bought.
   testimonials and win-rate screenshots are not evidence of profit; an idea from here still has
   to be written as a strategy and pass the backtest, out-of-sample and paper gates. Everything on
   the page comes from web pages, so it is escaped and only http(s) links are shown.
+- **Pairs.** The Bybit spot pair ranking with the reasons for each rank, the pairs it left out,
+  each pair's current market regime (1h, 4h, 1d), and paper and backtest results split by regime.
+  "Rank pairs now" queues `aitrader pairs rank`. See [regime-and-pairs.md](regime-and-pairs.md).
 
 - **Users** (admin) and **My account** (users): sign-up, approval, each user's exchange keys,
   positions, trades and kill switch. See [user-accounts.md](user-accounts.md).
