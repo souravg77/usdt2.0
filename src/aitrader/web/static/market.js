@@ -39,6 +39,15 @@
       resize();
     });
   });
+  var resetBtn = document.getElementById("studies-reset");
+  if (resetBtn) resetBtn.addEventListener("click", function () {
+    try { localStorage.removeItem("aitrader.studies"); } catch (e) { /* private window */ }
+    chips.forEach(function (b) {
+      on[b.dataset.study] = b.dataset.on === "1";
+      b.setAttribute("aria-pressed", on[b.dataset.study] ? "true" : "false");
+    });
+    resize();
+  });
   function panels() { return PANELS.filter(function (k) { return on[k]; }); }
 
   function css(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }

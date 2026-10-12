@@ -208,7 +208,7 @@ def test_paper_switch_and_live_card(web, monkeypatch):
     assert steps[:4] == [["learn", "add-library"], ["learn", "add-builtin"], ["learn", "add-shorts"],
                          ["learn", "paper-all"]]
     assert steps[4][0] == "download" and "--since" in steps[4]
-    assert steps[5] == ["learn", "test", "--paper"]
+    assert steps[5] == ["learn", "test", "--paper"] and steps[6] == ["learn", "keep-top"]
 
     client.post("/trading/kill", data={"csrf": csrf, "confirm": "KILL"})
     r = client.post("/trading/paper/on", data={"csrf": csrf}, follow_redirects=False)
@@ -223,6 +223,22 @@ def test_paper_switch_and_live_card(web, monkeypatch):
 
     EventLog(paths.events, service="paper").emit("heartbeat", "alive")
     assert "Paper trading <b class=\"good\">ON</b>" in client.get("/trading").text
+
+
+def test_keep_only_the_best_from_the_trading_page(web, monkeypatch):
+    client, auth, runner, paths = web
+    submitted = []
+    monkeypatch.setattr(runner, "submit", lambda title, steps, meta=None: submitted.append((steps, meta)) or "j1")
+    csrf = auth.csrf(login(client))
+    r = client.get("/trading")
+    assert 'action="/trading/paper/keep"' in r.text and 'name="n" min="10" max="20" value="15"' in r.text
+    assert client.post("/trading/paper/keep", data={"n": "12"}, follow_redirects=False).status_code == 403
+    r = client.post("/trading/paper/keep", data={"csrf": csrf, "n": "50"}, follow_redirects=False)
+    assert "Ranking" in r.headers["location"]
+    assert submitted == [([["learn", "keep-top", "--n", "20"]], {"kind": "keep-top"})]  # clamped to 10-20
+    r = client.post("/trading/paper/keep", data={"csrf": csrf, "n": "ten"}, follow_redirects=False)
+    assert "Not+changed" in r.headers["location"] or "Not%20changed" in r.headers["location"]
+    assert len(submitted) == 1
 
 
 def test_logout_survives_restart(tmp_path):

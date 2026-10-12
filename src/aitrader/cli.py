@@ -518,6 +518,22 @@ def cmd_learn(s: Settings, args) -> int:
         print(f"{moved} strategies moved to paper trading; {n} paper trading now "
               f"({len(reg.with_status('retired'))} retired after poor paper results stay retired)")
         return 0
+    if cmd == "keep-top":
+        from .learn.keep import indicators_used, keep_top, save_n, saved_n
+
+        n = save_n(args.registry, args.n) if args.n else saved_n(args.registry)
+        out = keep_top(reg, n)
+        reg.save()
+        print(f"the best {len(out['kept'])} strategies keep paper trading (at most {n}):")
+        for i, k in enumerate(out["kept"], 1):
+            print(f"  {i:2d}. {k['id']:44} {k['score']:+.3f}R per trade"
+                  f"{'' if k['passed'] else '  (did not pass the backtest)'}")
+        untested = f", {out['untested']} had no backtest result yet" if out["untested"] else ""
+        print(f"{len(out['benched'])} taken out of paper trading, {len(out['returned'])} brought back{untested}")
+        used = indicators_used(reg)
+        if used:
+            print("indicators they use: " + ", ".join(f"{k} ({c})" for k, c in used.items()))
+        return 0
     if cmd == "test":
         if args.ids:
             entries = [reg.get(i) for i in args.ids]
@@ -1260,6 +1276,9 @@ def build_parser() -> argparse.ArgumentParser:
     le_sub.add_parser("add-shorts", help="add a short twin (Bybit perpetual futures) of every long strategy")
     le_sub.add_parser("paper-all", help="paper-trade every strategy, including untested and rejected "
                                         "ones (fake money; poor ones retire on their paper results)")
+    lk = le_sub.add_parser("keep-top", help="keep only the best N strategies paper trading (ranked by "
+                                            "backtest and paper results); the rest leave paper trading")
+    lk.add_argument("--n", type=int, help="how many to keep, 10-20 (default: the last number used, else 15)")
     lt = le_sub.add_parser("test", help="backtest candidates; passes go to paper trading")
     lt.add_argument("ids", nargs="*")
     lt.add_argument("--retest", action="store_true", help="also re-test rejected strategies")
