@@ -354,7 +354,7 @@ def test_registry_migrates_old_statuses(tmp_path):
 
 def test_ladder_reads_shadow_eligible_and_approval_from_evidence(tmp_path):
     from aitrader.learn.ladder import Evidence, label, ladder_state
-    from aitrader.trade.golive import GoLive
+    from aitrader.trade.golive import GoLive, _seal, confirmation_phrase
 
     reg_path, golive, trade, models = (str(tmp_path / n) for n in ("reg.json", "golive", "trade", "models"))
     passed = {"failed": [], "out_of_sample": {"trades": 40, "expectancy_r": 0.2}}
@@ -376,7 +376,9 @@ def test_ladder_reads_shadow_eligible_and_approval_from_evidence(tmp_path):
         json.dump({"trades": [{"entry_id": "s", "r": 0.1}] * 30 + [{"entry_id": "p", "r": 0.1}] * 29}, fh)
     gl = GoLive(root=golive, registry_path=reg_path, models_dir=models)
     gl._save("report.json", {"passed": True, "strategies": ["el", "ap"]})
-    gl._save("approval.json", {"by": "me", **gl._fingerprint(["ap"])})
+    approval = {"by": "me", "report": {"passed": True}, **gl._fingerprint(["ap"]),
+                "confirmation": confirmation_phrase(["ap"])}
+    gl._save("approval.json", {**approval, "seal": _seal(approval)})
     got = states()
     assert got == {"p": "paper", "s": "shadow", "el": "live_eligible", "ap": "live_enabled",
                    "untested": "paper", "rv": "under_review"}

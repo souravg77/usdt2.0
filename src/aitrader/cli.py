@@ -906,6 +906,7 @@ def cmd_trade(s: Settings, args) -> int:
 async def _trade_run(s: Settings, args, control) -> int:
     from .safety import assert_live_allowed
     from .trade import Executor, GateConfig, GoLive, RiskEngine, RiskLimits
+    from .trade.golive import approval_intact
 
     mode = args.mode
     events = _events(f"executor-{mode}")
@@ -917,7 +918,11 @@ async def _trade_run(s: Settings, args, control) -> int:
             print("set AITRADER_PILOT_MAX_USDT in .env: the most USDT the live pilot may use", file=sys.stderr)
             return 1
         gl = GoLive(events=events, cfg=GateConfig.from_env())
-        approved = sorted((gl._load("approval.json").get("strategies") or {}))
+        approval = gl._load("approval.json")
+        approved = sorted((approval.get("strategies") or {}))
+        if approved and not approval_intact(approval):
+            print("the go-live approval was edited or not made by `golive approve`: approve again", file=sys.stderr)
+            return 1
         if not approved:
             print("no go-live approval: run `aitrader golive check` then `aitrader golive approve`",
                   file=sys.stderr)
@@ -952,6 +957,29 @@ async def _trade_run(s: Settings, args, control) -> int:
     return 0
 
 
+def confirm_live_approval(strategy_ids: list[str], ask=input, isatty=None) -> str | None:
+    """LIVE ENABLED needs a person at a terminal typing the phrase that names the strategies.
+    There is deliberately no --yes flag, and piped input is refused. Returns what was typed, or
+    None when it wasn't confirmed."""
+    from .trade.golive import confirmation_phrase
+
+    if not (isatty or sys.stdin.isatty)():
+        print("approving live trading needs a person: run it in a terminal "
+              "(with docker: `docker compose run --rm -it collector golive approve ...`)", file=sys.stderr)
+        return None
+    phrase = confirmation_phrase(strategy_ids)
+    print("This lets the live executor place REAL orders with real money for: " + ", ".join(sorted(strategy_ids)))
+    print("Nothing here promises a profit. To approve, type exactly:\n  " + phrase)
+    try:
+        typed = ask("> ").strip()
+    except EOFError:
+        typed = ""
+    if typed != phrase:
+        print("not approved", file=sys.stderr)
+        return None
+    return typed
+
+
 def cmd_golive(s: Settings, args) -> int:
     """Phase 6 go/no-go gate: check it, record the manual items, approve or revoke."""
     from .trade import GateConfig, GoLive
@@ -970,8 +998,11 @@ def cmd_golive(s: Settings, args) -> int:
         print(f"recorded: {args.item} confirmed by {a['by']}")
         return 0
     if cmd == "approve":
+        phrase = confirm_live_approval(args.strategy or [])
+        if phrase is None:
+            return 1
         try:
-            gl.approve(args.strategy or [], by=args.by)
+            gl.approve(args.strategy or [], by=args.by, confirmation=phrase)
         except ValueError as exc:
             print(f"not approved: {exc}", file=sys.stderr)
             return 1
