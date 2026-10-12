@@ -76,6 +76,14 @@ the demo account within about 15 seconds, sized by the risk engine. It sells whe
 closes, or at once if the price is at or below the stop. Each fill is compared with its paper twin, so slippage is
 measured.
 
+Every open position also gets a **stop-loss order that rests on Bybit** (a spot conditional
+order, `orderFilter=StopOrder`) at the strategy's stop. It sells at market if the price falls to
+the stop, even while the server or the executor is down. The executor cancels it before it sells
+for any other reason (paper exit, kill switch), so a leftover stop can never sell coins that
+belong to another position. A stop that fired is booked as the exit (`stop on bybit`), including
+one that fired while the server was down. If Bybit refuses the stop, you get a warning, the
+executor keeps watching the stop itself and tries again after 5 minutes.
+
 How failures are handled:
 
 - Orders are spot market orders, sized in the coin (`marketUnit=baseCoin`) and never borrowed

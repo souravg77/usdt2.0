@@ -81,6 +81,29 @@ async def test_bybit_orders_are_spot_unleveraged_in_coins(settings, fake_ccxt):
     assert client.params == {"isLeverage": 0, "marketUnit": "baseCoin", "orderLinkId": "ait" + "0" * 29}
 
 
+async def test_bybit_resting_stop_is_a_spot_conditional_sell(settings, fake_ccxt):
+    settings.mode = Mode.TESTNET
+    client = fake_ccxt()
+    a = BybitAdapter(settings, client=client, testnet=True)
+    await a.place_stop("BTC/USDT", 0.01, 95.0, "aitstop")
+    assert client.orders[-1][:4] == ("BTC/USDT", "market", "sell", 0.01)
+    assert client.params == {"isLeverage": 0, "marketUnit": "baseCoin", "triggerPrice": 95.0,
+                             "orderLinkId": "aitstop"}
+    assert await a.cancel_stop("aitstop", "BTC/USDT") is True
+    assert client.cancelled == (None, "BTC/USDT", {"trigger": True, "orderLinkId": "aitstop"})
+
+    class OrderNotFound(Exception):
+        pass
+
+    async def gone(*args):
+        raise OrderNotFound()
+
+    client.cancel_order = gone
+    assert await a.cancel_stop("aitstop", "BTC/USDT") is False  # it fired or was cancelled
+    with pytest.raises(LiveTradingLocked):  # the live lock covers stops too
+        await BybitAdapter(settings, client=fake_ccxt()).place_stop("BTC/USDT", 0.01, 95.0, "x")
+
+
 async def test_find_order_reads_open_then_history(settings):
     class Client:
         markets = {"BTC/USDT": {}}

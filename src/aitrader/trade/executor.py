@@ -8,6 +8,9 @@ with real orders on one exchange:
   account's equity (never more than the strategy's risk, capped at 1%);
 - it is sold at market when the paper twin closes, or at once if the live price is at or below
   the stop;
+- a stop-loss order also rests on the exchange for every open position (when the adapter
+  supports it), so the position is protected while this server is down. It is cancelled before
+  the executor sells, and a stop that fired is booked as the exit;
 - every fill is compared with its paper twin, so real slippage is measured.
 
 Safety and failure handling:
@@ -89,7 +92,7 @@ class Executor:
         ctl = self.control.state()
         try:
             if not self.state["checked"]:
-                await self._check_holdings()
+                await self._check_holdings(out)
             await self._reconcile_pending(out)
             if ctl["killed"]:
                 # flatten once per kill: a new kill (new "since") flattens again
@@ -102,6 +105,7 @@ class Executor:
                 await self._manage_exits(paper, out)
                 if paper is not None and not ctl["paused"]:
                     await self._enter_new(paper, out)
+                await self._arm_stops(out)
             await self.record_equity()
             self._check_risk()
             self._healthy()
@@ -212,6 +216,8 @@ class Executor:
         for key, p in list(self.state["positions"].items()):
             if p["status"] != "open":
                 continue
+            if p.get("stop_cid") and await self._stop_fired(key, out):
+                continue
             reason = None
             twin = (paper or {}).get("open", {}).get(key)
             if paper is not None and (twin is None or twin["signal"]["ts"] != p["signal_ts"]):
@@ -234,6 +240,14 @@ class Executor:
 
     async def _exit(self, key: str, reason: str, out: dict) -> None:
         p = self.state["positions"][key]
+        if p.get("stop_cid"):
+            # the resting stop must go first: left behind, it could later sell coins of another position
+            if not await self.adapter.cancel_stop(p["stop_cid"], p["symbol"]):
+                if await self._stop_fired(key, out, force=True, after_cancel=True):
+                    return
+            p.pop("stop_cid", None)
+            p.pop("stop_armed", None)
+            self.save()
         base = p["symbol"].split("/")[0]
         bal = await self.adapter.balance()
         amount = min(p["amount"], bal.free.get(base, 0.0))
@@ -314,6 +328,70 @@ class Executor:
             self.events.emit("kill", f"{self.mode}: kill switch done, {len(targets)} position(s) sold",
                              level="warning")
 
+    # ---- resting stops on the exchange ---------------------------------------------------------
+
+    async def _arm_stops(self, out: dict) -> None:
+        """Give every open position a stop-loss order that waits on the exchange."""
+        place = getattr(self.adapter, "place_stop", None)
+        if place is None:
+            return
+        now = self.clock()
+        for key, p in list(self.state["positions"].items()):
+            if p["status"] != "open" or now < p.get("stop_retry_at", 0):
+                continue
+            if p.get("stop_cid"):
+                if not p.get("stop_armed"):
+                    await self._stop_fired(key, out, force=True)  # a send that may not have arrived
+                continue
+            amount = await self._sellable(p["symbol"], p["amount"], p["stop"])
+            if amount <= 0:
+                continue
+            n = p.get("stops", 0)
+            p.update(stops=n + 1, stop_cid=client_id(self.mode, key, p["signal_ts"], f"stop{n}"), stop_armed=False)
+            self.save()  # written before sending, like every order
+            try:
+                order = await place(p["symbol"], amount, p["stop"], p["stop_cid"],
+                                    reason=f"{p['entry_id']}: resting stop")
+            except Exception as exc:
+                # it may still have reached the exchange: the next pass looks it up by its id
+                self.events.emit("error", f"{self.mode}: resting stop for {key} not confirmed: "
+                                 f"{type(exc).__name__}: {exc}", level="warning", key=key)
+                continue
+            if order.status in (OrderStatus.REJECTED, OrderStatus.CANCELED):
+                p.pop("stop_cid")
+                p["stop_retry_at"] = now + 300
+                self.events.emit("error", f"{self.mode}: resting stop for {key} was {order.status.value} "
+                                 f"({order.reason}); the executor still watches the stop itself",
+                                 level="warning", key=key)
+            else:
+                p["stop_armed"] = True
+                self.events.emit("stop_armed", f"{self.mode}: stop for {p['symbol']} rests on "
+                                 f"{self.exchange} at {p['stop']:g}", key=key)
+
+    async def _stop_fired(self, key: str, out: dict, force: bool = False, after_cancel: bool = False) -> bool:
+        """Look the resting stop up (once a minute unless ``force``). True when it sold
+        (the sale is booked as the exit). A stop the exchange no longer holds is dropped, so a
+        new one is placed. ``after_cancel``: a cancel just failed, so an open stop is an error."""
+        p = self.state["positions"][key]
+        now = self.clock()
+        if not force and now - p.get("stop_checked", 0) < 60:
+            return False
+        p["stop_checked"] = now
+        order = await self.adapter.find_order(p["stop_cid"], p["symbol"])
+        if order is not None and order.filled > 0:
+            p.update(status="pending_exit", exit_cid=p.pop("stop_cid"), exit_reason=f"stop on {self.exchange}")
+            p.pop("stop_armed", None)
+            await self._apply_exit(key, order, out)
+            return True
+        if order is not None and order.status is OrderStatus.OPEN:
+            if after_cancel:  # triggered but not filled yet, most likely: the next tick looks again
+                raise RuntimeError(f"resting stop for {key} is still open after cancelling it")
+            p["stop_armed"] = True  # also confirms a send whose answer was lost
+            return False
+        p.pop("stop_cid", None)  # never arrived, cancelled or expired: arm a new one
+        p.pop("stop_armed", None)
+        return False
+
     async def _sellable(self, symbol: str, amount: float, price: float) -> float:
         check = getattr(self.adapter, "sellable", None)
         return amount if check is None else await check(symbol, amount, price)
@@ -352,8 +430,11 @@ class Executor:
                 else:
                     await self._apply_exit(key, order, out)
 
-    async def _check_holdings(self) -> None:
+    async def _check_holdings(self, out: dict) -> None:
         """After a restart: every open position must still be in the account."""
+        for key, p in list(self.state["positions"].items()):
+            if p["status"] == "open" and p.get("stop_cid"):
+                await self._stop_fired(key, out, force=True)  # it may have sold while the server was down
         bal = await self.adapter.balance()
         for key, p in self.state["positions"].items():
             if p["status"] != "open":

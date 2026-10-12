@@ -253,6 +253,37 @@ class BybitAdapter(CcxtAdapter):
         order.reason = reason
         return order
 
+    async def place_stop(self, symbol, amount, trigger_price, client_id, reason=""):
+        """A resting stop-loss on Bybit: a spot conditional order (orderFilter StopOrder) that sells
+        ``amount`` at market once the last price falls to ``trigger_price``. It waits on the
+        exchange, so the position is protected even while this server is down."""
+        self._check_order_allowed()
+        await self.throttle.acquire()
+        amount = await self._precise(symbol, amount)
+        if hasattr(self.client, "price_to_precision"):
+            trigger_price = float(self.client.price_to_precision(symbol, trigger_price))
+        log.info("STOP %s sell %s %s at %s id=%s reason=%s", self.name, amount, symbol, trigger_price,
+                 client_id, reason)
+        params = {"isLeverage": 0, "marketUnit": "baseCoin", "triggerPrice": trigger_price,
+                  self.client_id_param: client_id}
+        raw = await self.client.create_order(symbol, "market", "sell", amount, None, params)
+        order = self._to_order(raw, symbol)
+        order.reason = reason
+        return order
+
+    async def cancel_stop(self, client_id, symbol) -> bool:
+        """Cancel the resting stop sent with ``client_id``. False when Bybit no longer has it open
+        (it fired, or was cancelled); any other error is raised."""
+        self._check_order_allowed()
+        await self.throttle.acquire()
+        try:
+            await self.client.cancel_order(None, symbol, {"trigger": True, "orderLinkId": client_id})
+        except Exception as exc:
+            if type(exc).__name__ == "OrderNotFound":
+                return False
+            raise
+        return True
+
     def _to_order(self, raw: dict, symbol: str) -> Order:
         """ccxt reads the fee from ``cumFeeDetail``; older answers only have ``cumExecFee`` and
         ``feeCurrency`` (a buy pays its fee in the coin bought, a sell in USDT)."""
