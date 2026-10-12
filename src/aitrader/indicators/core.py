@@ -64,6 +64,42 @@ def adx(df: pd.DataFrame, n: int = 14) -> pd.Series:
     return dx.ewm(alpha=1 / n, adjust=False, min_periods=n).mean()
 
 
+def supertrend(df: pd.DataFrame, n: int = 10, mult: float = 3.0) -> pd.DataFrame:
+    """Supertrend: ``mult`` x ATR(``n``) bands around the bar's mid price (high + low) / 2.
+    The lower band only rises and the upper band only falls while price stays inside them; a
+    close beyond the active band flips the trend. ``direction`` is +1 (line below price, up),
+    -1 (line above price, down) or 0 during warm-up; ``supertrend`` is the active band. Each bar
+    uses only itself and earlier bars. The first bar after warm-up starts in +1 (an arbitrary
+    seed, as in most charting tools), so treat the first flip after warm-up with care."""
+    a = atr(df, n).to_numpy(float)
+    hl2 = ((df["high"] + df["low"]) / 2).to_numpy(float)
+    close = df["close"].to_numpy(float)
+    size = len(df)
+    upper, lower = np.full(size, np.nan), np.full(size, np.nan)
+    line = np.full(size, np.nan)
+    direction = np.zeros(size, dtype=int)
+    prev = None  # index of the previous bar with a value
+    for i in range(size):
+        if np.isnan(a[i]):
+            continue
+        bu, bl = hl2[i] + mult * a[i], hl2[i] - mult * a[i]
+        if prev is None:
+            upper[i], lower[i], d = bu, bl, 1
+        else:
+            upper[i] = bu if bu < upper[prev] or close[prev] > upper[prev] else upper[prev]
+            lower[i] = bl if bl > lower[prev] or close[prev] < lower[prev] else lower[prev]
+            d = direction[prev]
+            if d == 1 and close[i] < lower[i]:
+                d = -1
+            elif d == -1 and close[i] > upper[i]:
+                d = 1
+        direction[i] = d
+        line[i] = lower[i] if d == 1 else upper[i]
+        prev = i
+    return pd.DataFrame({"supertrend": line, "direction": direction, "upper": upper, "lower": lower},
+                        index=df.index)
+
+
 # ---- momentum -----------------------------------------------------------------------------------
 
 
@@ -128,6 +164,14 @@ def macd(close: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> p
     return pd.DataFrame({"macd": line, "signal": sig, "hist": line - sig})
 
 
+def williams_r(df: pd.DataFrame, n: int = 14) -> pd.Series:
+    """Williams %R (-100 to 0): where the close sits in the last ``n`` bars' high-low range.
+    Near -100 is oversold, near 0 overbought. NaN during warm-up or on a zero range."""
+    hi = df["high"].rolling(n, min_periods=n).max()
+    lo = df["low"].rolling(n, min_periods=n).min()
+    return -100 * (hi - df["close"]) / (hi - lo).replace(0, np.nan)
+
+
 # ---- volatility ---------------------------------------------------------------------------------
 
 
@@ -153,6 +197,13 @@ def bollinger(close: pd.Series, n: int = 20, k: float = 2.0) -> pd.DataFrame:
     sd = close.rolling(n, min_periods=n).std(ddof=0)
     upper, lower = mid + k * sd, mid - k * sd
     return pd.DataFrame({"mid": mid, "upper": upper, "lower": lower, "width": (upper - lower) / mid})
+
+
+def keltner(df: pd.DataFrame, n: int = 20, mult: float = 2.0, atr_n: int = 10) -> pd.DataFrame:
+    """Keltner Channels: EMA(``n``) of close plus and minus ``mult`` x ATR(``atr_n``)."""
+    mid = ema(df["close"], n)
+    a = atr(df, atr_n)
+    return pd.DataFrame({"mid": mid, "upper": mid + mult * a, "lower": mid - mult * a})
 
 
 def parabolic_sar(df: pd.DataFrame, step: float = 0.02, max_step: float = 0.2) -> pd.DataFrame:
@@ -221,6 +272,38 @@ def vwap(df: pd.DataFrame, n: int | None = 20, anchor: str | None = None) -> pd.
 def relative_volume(df: pd.DataFrame, n: int = 20) -> pd.Series:
     """This bar's volume divided by the average of the previous ``n`` bars."""
     return df["volume"] / df["volume"].shift(1).rolling(n, min_periods=n).mean()
+
+
+def obv(df: pd.DataFrame) -> pd.Series:
+    """On-Balance Volume: running total of volume, added on up closes and subtracted on down
+    closes. It starts at 0 on the first bar, so only its changes and its own highs, lows and
+    averages mean anything, never its level."""
+    sign = np.sign(df["close"].diff()).fillna(0.0)
+    return (sign * df["volume"]).cumsum()
+
+
+def mfi(df: pd.DataFrame, n: int = 14) -> pd.Series:
+    """Money Flow Index (0-100): RSI-like ratio of up-bar to down-bar money flow (typical price
+    x volume) over ``n`` bars. 100 when there was no down flow, 50 when there was no flow at all.
+    The first value needs ``n`` price changes, so ``n + 1`` bars."""
+    tp = (df["high"] + df["low"] + df["close"]) / 3
+    flow = tp * df["volume"]
+    change = tp.diff()
+    pos = flow.where(change > 0, 0.0).where(change.notna()).rolling(n, min_periods=n).sum()
+    neg = flow.where(change < 0, 0.0).where(change.notna()).rolling(n, min_periods=n).sum()
+    out = 100 - 100 / (1 + pos / neg.replace(0, np.nan))
+    out = out.where(neg != 0, 100.0).where(pos + neg != 0, 50.0)
+    return out.where(pos.notna())
+
+
+def cmf(df: pd.DataFrame, n: int = 20) -> pd.Series:
+    """Chaikin Money Flow (-1 to +1): volume-weighted average over ``n`` bars of where each bar
+    closed in its range (+1 at the high, -1 at the low). Above 0 means buying pressure. A bar
+    with no range counts as 0; NaN while there is no volume in the window."""
+    rng = df["high"] - df["low"]
+    mfm = (((df["close"] - df["low"]) - (df["high"] - df["close"])) / rng.replace(0, np.nan)).fillna(0.0)
+    vol = df["volume"].rolling(n, min_periods=n).sum()
+    return (mfm * df["volume"]).rolling(n, min_periods=n).sum() / vol.replace(0, np.nan)
 
 
 # ---- structure and levels -----------------------------------------------------------------------
@@ -351,3 +434,43 @@ def volume_profile(df: pd.DataFrame, bins: int = 24) -> pd.DataFrame:
     out = pd.DataFrame({"low": edges[:-1], "high": edges[1:], "volume": vol})
     out["poc"] = out["volume"] == out["volume"].max()
     return out
+
+
+# ---- validity -----------------------------------------------------------------------------------
+# Every indicator above returns NaN (or 0 for the +1/-1 state columns) until it has enough bars.
+# They don't see gaps in the candle series, though: a rolling window that spans a missing candle
+# silently covers more time than it should. ``indicator_valid`` gives the same yes/no answer for
+# any indicator: warm-up done and no missing candle inside its window.
+
+
+def _step_ms(df: pd.DataFrame, step_ms: int | None) -> int:
+    if step_ms:
+        return int(step_ms)
+    diffs = np.diff(df["ts"].to_numpy(np.int64))
+    return int(np.median(diffs)) if len(diffs) else 0
+
+
+def missing_candles(df: pd.DataFrame, step_ms: int | None = None) -> pd.Series:
+    """How many candles are missing just before each bar (0 for a regular series). ``step_ms``
+    is the timeframe in ms; by default the median spacing of ``ts``."""
+    step = _step_ms(df, step_ms)
+    gap = df["ts"].astype("int64").diff()
+    if not step:
+        return pd.Series(0, index=df.index, dtype=int)
+    return ((gap / step).round() - 1).clip(lower=0).fillna(0).astype(int)
+
+
+def indicator_valid(df: pd.DataFrame, warmup: int, step_ms: int | None = None,
+                    value: pd.Series | None = None) -> pd.Series:
+    """True on bars where an indicator that needs ``warmup`` bars can be trusted: at least
+    ``warmup`` bars of history, no missing candle inside the last ``warmup`` bars, and (when
+    ``value`` is given) the value itself is a finite number. Uses only past bars."""
+    warmup = int(warmup)
+    ok = pd.Series(np.arange(len(df)) + 1 >= warmup, index=df.index)
+    if warmup > 1:
+        # the window's own gaps sit before its last warmup - 1 bars (not before its first bar)
+        gaps = (missing_candles(df, step_ms) > 0).astype(int)
+        ok &= gaps.rolling(warmup - 1, min_periods=1).max() == 0
+    if value is not None:
+        ok &= np.isfinite(value.astype(float))
+    return ok

@@ -268,6 +268,9 @@ def test_exit_when_condition_closes_trade():
     "bar_range", "nr(7)", "range_atr(10)", "bullish_engulfing", "hammer", "doji", "inside_bar", "outside_bar", "body_pct",
     "lower_shadow_ratio", "green_streak", "red_streak", "closes_above_sma(5)", "closes_below_sma(20)",
     "rsi_bull_div(14,30)", "cci_bull_div", "macd_bull_div(40)", "highest_high(30)[1]",
+    "supertrend(10,3)", "supertrend_dir(7,2.5)", "keltner_upper(20,2,10)", "keltner_mid", "keltner_lower(20,1.5)",
+    "williams_r(14)", "obv", "obv_high(20)", "obv_sma(30)", "mfi(14)", "cmf(20)", "sma_dev_atr(20,14)",
+    "no_gaps(100)",
 ])
 def test_every_new_feature_evaluates(expr):
     from aitrader.learn.rules import _feature
@@ -404,3 +407,65 @@ def test_open_paper_trade_keeps_its_exit_rule_after_a_restart():
 def test_lab_gate_rejects_results_that_could_be_luck():
     noisy = {"trades": 40, "expectancy_r": 0.1, "profit_factor": 1.2, "max_drawdown_r": 5, "t_stat": 0.6}
     assert any("luck" in w for w in Gate().check({**noisy, "trades": 60}, noisy))
+
+
+def test_new_indicator_features_match_the_indicators():
+    from aitrader.indicators import cmf, keltner, mfi, obv, supertrend, williams_r
+    from aitrader.learn.rules import _feature
+
+    df = synthetic(n=400)
+
+    def f(expr):
+        return _feature(df, parse_expr(expr), {})
+
+    pd.testing.assert_series_equal(f("mfi(10)"), mfi(df, 10).astype(float), check_names=False)
+    pd.testing.assert_series_equal(f("cmf"), cmf(df, 20).astype(float), check_names=False)
+    pd.testing.assert_series_equal(f("williams_r(21)"), williams_r(df, 21).astype(float), check_names=False)
+    pd.testing.assert_series_equal(f("keltner_upper(20,1.5,14)"), keltner(df, 20, 1.5, 14)["upper"],
+                                   check_names=False)
+    st = supertrend(df, 10, 3)
+    pd.testing.assert_series_equal(f("supertrend"), st["supertrend"], check_names=False)
+    pd.testing.assert_series_equal(f("supertrend_dir"), st["direction"].astype(float), check_names=False)
+    assert f("obv_high(5)").iloc[10] == obv(df).iloc[5:10].max()  # previous bars only
+    gapped = df.drop(df.index[200])
+    ok = _feature(gapped, parse_expr("no_gaps(50)"), {})
+    assert ok.iloc[100] == 1 and ok.iloc[210] == 0 and ok.iloc[260] == 1
+
+
+def test_spec_with_new_indicators_validates_and_trades():
+    spec = {
+        "name": "supertrend_obv", "timeframes": ["1h"], "source": {"book": "t"},
+        "entry": [{"left": "supertrend_dir(10,3)", "op": "crosses_above", "right": 0},
+                  {"left": "obv", "op": ">", "right": "obv_sma(20)"},
+                  {"left": "cmf(20)", "op": ">", "right": 0},
+                  {"left": "no_gaps(200)", "op": ">=", "right": 1}],
+        "stop": {"type": "indicator", "expr": "supertrend(10,3)"},
+        "target": {"r": 2},
+        "exit": {"when": [{"left": "williams_r(14)", "op": ">", "right": -5},
+                          {"left": "mfi(14)", "op": ">", "right": 85}]},
+    }
+    strat = RuleStrategy(spec)
+    sigs = strat.generate(synthetic(), "b", "X", "1h")
+    assert sigs and all(s.stop < s.entry for s in sigs)
+    assert run_backtest(strat, synthetic(), "b", "X", "1h", BacktestConfig())
+    with pytest.raises(RuleError, match="supertrend"):
+        validate_spec({**spec, "entry": [{"left": "supertrend(10,3,7)", "op": ">", "right": 0}]})
+
+
+
+def test_lab_gives_context_only_to_strategies_that_read_it(tmp_path):
+    from aitrader.data.context import ContextStore
+    from aitrader.learn.lab import with_context
+    from aitrader.strategies import STRATEGIES
+
+    store = CandleStore(str(tmp_path / "c.db"))
+    df = synthetic(n=300)
+    funding = STRATEGIES["funding_extreme_long"]()
+    assert "funding_rate" not in with_context(funding, df, store, "bybit", "BTC/USDT", "1h")
+    ContextStore(store).upsert(("bybit", "BTC/USDT", "funding_rate", int(t), -0.001)
+                               for t in df["ts"].iloc[::8])
+    got = with_context(funding, df, store, "bybit", "BTC/USDT", "1h")
+    assert got["funding_rate"].notna().all() and (got["funding_rate"] == -0.001).all()
+    plain = STRATEGIES["trend_pullback"]()
+    assert with_context(plain, df, store, "bybit", "BTC/USDT", "1h") is df
+    store.close()

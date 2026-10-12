@@ -298,8 +298,11 @@ STRATEGIES: dict[str, type[Strategy]] = {
 
 def _register_more() -> None:
     from .divergence import CciDivergence
+    from .families import FAMILY_STRATEGIES
 
     STRATEGIES[CciDivergence.spec.name] = CciDivergence
+    for cls in FAMILY_STRATEGIES:
+        STRATEGIES[cls.spec.name] = cls
 
 
 _register_more()

@@ -40,7 +40,8 @@ behind the Phase 6 go/no-go gate and the three-setting live lock.
 The eight strategy books Shawn sent were read in full, and their 54 rule-based strategies ship
 with the code in `src/aitrader/learn/library/`. `learn add-library` registers them, so they
 don't need the API key. Carli's CCI divergence is a hand-coded strategy (`cci_divergence`); add
-it with `learn add-builtin`. The list and what was approximated are in
+it with `learn add-builtin`, which also adds the twelve untested strategy-family candidates
+listed in [strategies.md](strategies.md). The list and what was approximated are in
 [knowledge/rules-from-books.md](knowledge/rules-from-books.md).
 
 Every new book makes the library bigger. Each one is read the same way: notes go in

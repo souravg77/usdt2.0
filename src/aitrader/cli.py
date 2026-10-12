@@ -227,8 +227,9 @@ def cmd_strategies(_s: Settings, _args) -> int:
     for cls in STRATEGIES.values():
         sp = cls.spec
         print(f"== {sp.name} ({sp.source}); timeframes {', '.join(sp.timeframes)}")
-        for label in ("setup", "entry", "stop", "target", "filter", "size"):
-            print(f"  {label:7} {getattr(sp, label)}")
+        for label in ("regime", "setup", "entry", "stop", "target", "filter", "size"):
+            if getattr(sp, label):
+                print(f"  {label:7} {getattr(sp, label)}")
         print()
     return 0
 

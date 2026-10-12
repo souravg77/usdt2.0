@@ -25,6 +25,7 @@ from ..data.store import CandleStore
 from ..indicators import candles_to_frame
 from ..models import TIMEFRAME_MS, Side
 from ..strategies.base import Signal
+from .lab import with_context
 from .registry import Registry, make_strategy
 
 log = logging.getLogger(__name__)
@@ -101,7 +102,8 @@ class PaperTrader:
                         # signals only appear when a candle closes: skip markets with no new candle
                         if not fresh or df is None or len(df) < MIN_BARS:
                             continue
-                        sigs = [s for s in strat.generate(df, ex, sym, tf) if s.ts == newest_close]
+                        sdf = with_context(strat, df, self.store, ex, sym, tf)
+                        sigs = [s for s in strat.generate(sdf, ex, sym, tf) if s.ts == newest_close]
                         if not sigs or sigs[-1].ts <= self.state["last_signal"].get(key, 0):
                             continue
                         sig = sigs[-1]
