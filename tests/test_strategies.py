@@ -217,5 +217,5 @@ def test_add_builtin_registers_families_as_untested_candidates(tmp_path):
     assert main(["--env-file", "", "learn", "--registry", str(reg), "add-builtin"]) == 0
     entries = Registry(str(reg)).entries
     for name in FAMILY_NAMES:
-        assert entries[f"builtin-{name}"].status == "candidate"
+        assert entries[f"builtin-{name}"].status == "research"  # the ladder's first state (was "candidate")
 

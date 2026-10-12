@@ -404,6 +404,7 @@ def cmd_learn(s: Settings, args) -> int:
     from .backtest import BacktestConfig
     from .learn import (Entry, Registry, RuleError, claude_caller, evaluate, extract_strategies,
                         spec_id, PaperConfig, PaperTrader)
+    from .learn.registry import UNTESTED
     from .strategies import STRATEGIES
 
     reg = Registry(args.registry)
@@ -418,10 +419,16 @@ def cmd_learn(s: Settings, args) -> int:
             res = evaluate(e, store, exchanges, symbols, cfg, move=move)
             m = res["out_of_sample"]
             if move:
-                verdict = {"paper": "PASSED -> paper trading", "rejected": "rejected"}.get(e.status, "untested")
+                verdict = {"paper": "PASSED -> paper trading", "rejected": "rejected",
+                           "under_review": "UNDER REVIEW (holdout)"}.get(e.status, "untested")
             else:
                 verdict = "no data" if not res["markets"] else "failed" if res["failed"] else "passed"
+            wf, mc, h = res["walk_forward"], res["monte_carlo"], res["holdout"]
             print(f"  {e.id:40} {verdict:24} oos trades={m['trades']:4d} exp={m['expectancy_r']:+.3f}R"
+                  f" sharpe={m['sharpe']:+.2f} sortino={m['sortino']:+.2f}"
+                  f"\n      walk-forward {wf['positive']}/{wf['counted']} windows > 0R; Monte Carlo p95 DD "
+                  f"{mc['max_drawdown_r_p95']:.1f}R, P(loss) {mc['loss_probability']:.0%}; holdout "
+                  + (f"{h['trades']} trades {h['expectancy_r']:+.3f}R" if h["evaluated"] else "not looked at")
                   + (f"\n      why: {'; '.join(res['failed'])}" if res["failed"] else ""))
         store.close()
         reg.save()
@@ -466,7 +473,7 @@ def cmd_learn(s: Settings, args) -> int:
         reg.save()
         print(f"{added} new strategies from the book library ({len(specs)} in it) -> {args.registry}")
         if args.test:
-            run_tests(reg.with_status("candidate"))
+            run_tests(reg.with_status("research"))
         return 0
     if cmd == "add-builtin":
         for name in args.names or list(STRATEGIES):
@@ -476,7 +483,7 @@ def cmd_learn(s: Settings, args) -> int:
         return 0
     if cmd == "paper-all":
         moved = 0
-        for e in reg.with_status("candidate", "rejected"):
+        for e in reg.with_status(*UNTESTED, "rejected", "under_review"):
             e.set_status("paper", "paper-test every strategy (turned on from the dashboard or `learn paper-all`)")
             moved += 1
         reg.save()
@@ -490,7 +497,7 @@ def cmd_learn(s: Settings, args) -> int:
         elif args.paper:
             entries = reg.with_status("paper")
         else:
-            entries = reg.with_status("candidate", *(("rejected",) if args.retest else ()))
+            entries = reg.with_status(*UNTESTED, *(("rejected",) if args.retest else ()))
         if not entries:
             print("nothing to test (add strategies with `learn read` or `learn add-builtin`)")
             return 0
@@ -514,10 +521,13 @@ def cmd_learn(s: Settings, args) -> int:
     if cmd == "list":
         if not reg.entries:
             print("no strategies yet")
+        from .learn.ladder import Evidence, ladder_state, label
+
+        ev = Evidence(registry_path=args.registry)
         for e in sorted(reg.entries.values(), key=lambda e: (e.status, e.id)):
             bt = e.backtest.get("out_of_sample", {})
             pp = e.paper or {}
-            print(f"{e.status:9} {e.id:40} bt oos {bt.get('trades', 0):4d} tr {bt.get('expectancy_r', 0):+.3f}R"
+            print(f"{label(ladder_state(e, ev)[0]):23} {e.id:40} bt oos {bt.get('trades', 0):4d} tr {bt.get('expectancy_r', 0):+.3f}R"
                   f" | paper {pp.get('trades', 0):3d} tr {pp.get('expectancy_r', 0):+.3f}R "
                   f"{pp.get('equity_usdt', 0) or 0:,.0f} USDT  {e.source[:40]}")
         return 0

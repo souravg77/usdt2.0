@@ -25,7 +25,8 @@ def walk_forward(strategy_cls: type[Strategy], df: pd.DataFrame, exchange: str, 
     """Optimise on a training window, test on the next window, roll forward by ``test_bars``.
 
     Each test window is run with ``warmup`` bars of history before it so indicators are ready,
-    but only trades entered inside the test window count.
+    but only trades entered inside the test window count. With an empty ``grid`` nothing is tuned
+    and each row is simply the next unseen window (the backtest gate uses it that way).
     """
     rows = []
     keys = list(grid)
@@ -34,7 +35,9 @@ def walk_forward(strategy_cls: type[Strategy], df: pd.DataFrame, exchange: str, 
     while start + train_bars + test_bars <= len(df):
         train = df.iloc[start:start + train_bars]
         best, best_score = combos[0], float("-inf")
-        for params in combos:
+        if len(combos) == 1:  # nothing to choose: don't spend a backtest on the training window
+            best_score = None
+        for params in combos if len(combos) > 1 else []:
             m = metrics(run_backtest(strategy_cls(**params), train, exchange, symbol, timeframe, cfg))
             score = m[objective] if m["trades"] >= min_trades else float("-inf")
             if score > best_score:
