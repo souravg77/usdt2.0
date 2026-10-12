@@ -163,7 +163,7 @@ def create_app(settings: Settings, auth: Auth, jobs: JobRunner, paths: Paths | N
     from .report_pages import add_report_routes
     from .settings_pages import add_settings_routes
 
-    add_market_routes(app, settings=settings, page=page, guard=guard, live=live)
+    add_market_routes(app, settings=settings, page=page, guard=guard, live=live, paper_state=paths.paper_state)
     add_report_routes(app, settings=settings, auth=auth, jobs=jobs, page=page, guard=guard,
                       report_path=paths.report)
     add_news_routes(app, settings=settings, auth=auth, jobs=jobs, page=page, guard=guard, news_dir=paths.news)
@@ -973,6 +973,12 @@ padding:10px 12px;border-radius:var(--radius);font-weight:400;transition:border-
 .ohlc{min-height:1.6em;margin:8px 0 6px;display:flex;flex-wrap:wrap;gap:4px 8px}
 #chart{display:block;width:100%;height:440px;touch-action:pan-y}
 #market:not(.js) .js-only{display:none}
+.studies{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0 2px}
+.chip{display:inline-flex;align-items:center;gap:6px;background:var(--bg2);border:1px solid var(--line);color:var(--muted);
+padding:4px 10px;border-radius:999px;font-weight:600;font-size:.8em}
+.chip:hover{border-color:var(--accent)}.chip[aria-pressed=true]{color:var(--fg);border-color:var(--accent);background:var(--card2)}
+.chip i{width:10px;height:3px;border-radius:2px;display:inline-block}
+.legend{display:flex;flex-wrap:wrap;gap:2px 12px;font-size:.8em;min-height:1.3em}.legend b{font-weight:600}
 details.health summary{cursor:pointer;font-weight:600}details.health table{margin-top:12px}
 @media (max-width:640px){header{padding:8px 12px}main{padding:14px 12px}nav{margin-left:0;width:100%}
 nav a{white-space:nowrap}.who{margin-left:auto}#chart{height:340px}.segs{margin-left:0}h1{font-size:1.3em}}

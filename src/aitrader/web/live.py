@@ -15,7 +15,7 @@ from ..config import EXCHANGE
 from ..data.store import CandleStore
 
 CACHE_S = 1.0
-LIMIT = 200
+LIMIT = 500  # enough history for the 200-bar EMA on the chart
 
 
 class LiveMarket:
