@@ -255,3 +255,16 @@ def test_saved_keys_show_as_dots_and_can_be_tested_again(web):
     client.post("/settings/keys/anthropic/delete", data={"csrf": csrf})
     page = client.get("/settings").text
     assert "Last check" not in page.split("Anthropic (Claude)</h3>")[1].split("</div>")[0]
+
+
+def test_check_and_save_with_empty_boxes_checks_the_saved_key(web):
+    client, csrf, calls, paths, _ = web
+    r = client.post("/settings/keys/binance_testnet", data={"csrf": csrf})
+    assert "paste the key first" in r.text  # nothing saved yet
+    client.post("/settings/keys/binance_testnet", data={
+        "csrf": csrf, "BINANCE_TESTNET_API_KEY": "a" * 64, "BINANCE_TESTNET_API_SECRET": "b" * 64})
+    calls.clear()
+    r = client.post("/settings/keys/binance_testnet", data={
+        "csrf": csrf, "BINANCE_TESTNET_API_KEY": "", "BINANCE_TESTNET_API_SECRET": ""})
+    assert "Binance testnet: working." in r.text and calls == [("binance", True, "a" * 64)]
+    assert "Last check: Working" in r.text

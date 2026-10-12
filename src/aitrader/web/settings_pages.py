@@ -194,7 +194,7 @@ def add_settings_routes(app, *, settings, auth, paths, jobs, keys_secret: str, p
                      'here. Run the installer again (it creates one), or add it by hand.</p>')
         body += "<h2>API keys</h2><p class=muted>Saved keys are encrypted on the server and never " \
                 "shown again (only dots and their last 4 characters). Leave a box empty to keep the " \
-                "saved key; \"Test saved key\" checks it again without typing it. A key saved here " \
+                "saved key; \"Check and save\" with empty boxes checks the saved key again. A key saved here " \
                 "replaces the same key in .env.</p>"
         for group, title, help_text in GROUPS:
             fields = [f for f in secrets.FIELDS if f.group == group]
@@ -252,8 +252,10 @@ def add_settings_routes(app, *, settings, auth, paths, jobs, keys_secret: str, p
             return done(error="unknown key group")
         now = current(fields)
         given = {f.name: str(form.get(f.name, "")).strip() for f in fields}
-        if not any(given.values()):
-            return done(error="paste the key first")
+        if not any(given.values()):  # nothing typed: check the keys already saved
+            if not any(now.values()):
+                return done(error="paste the key first")
+            return await test_saved(group, fields)
         values = {f.name: given[f.name] or now.get(f.name, "") for f in fields}
         try:
             warning = await check(group, values)
@@ -281,6 +283,9 @@ def add_settings_routes(app, *, settings, auth, paths, jobs, keys_secret: str, p
         fields = [f for f in secrets.FIELDS if f.group == group]
         if not fields:
             return done(error="unknown key group")
+        return await test_saved(group, fields)
+
+    async def test_saved(group: str, fields) -> RedirectResponse:
         title = dict((g, t) for g, t, _ in GROUPS)[group]
         try:
             note = await check(group, current(fields))
