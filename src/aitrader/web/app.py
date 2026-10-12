@@ -88,7 +88,8 @@ def create_app(settings: Settings, auth: Auth, jobs: JobRunner, paths: Paths | N
         nav = ""
         if user:
             links = nav_links if nav_links is not None else (
-                '<a href="/">Overview</a><a href="/trading">Trading</a><a href="/books">Submit a book</a>'
+                '<a href="/">Overview</a><a href="/markets">Markets</a><a href="/trading">Trading</a>'
+                '<a href="/books">Submit a book</a>'
                 + ('<a href="/admin/users">Users</a>' if users is not None else "")
                 + '<a href="/settings">Settings</a>')
             nav = (f'<nav>{links}'
@@ -143,7 +144,10 @@ def create_app(settings: Settings, auth: Auth, jobs: JobRunner, paths: Paths | N
                         samesite="strict", secure=secure_cookie)
         return resp
 
+    from .market_pages import add_market_routes
     from .settings_pages import add_settings_routes
+
+    add_market_routes(app, settings=settings, page=page, guard=guard)
 
     add_settings_routes(app, settings=settings, auth=auth, paths=paths, jobs=jobs,
                         keys_secret=keys_secret, page=page, guard=guard, checkers=checkers)
@@ -640,7 +644,7 @@ table{width:100%;border-collapse:collapse;display:block;overflow-x:auto}th,td{te
 pre{background:var(--card);border:1px solid var(--line);padding:12px;border-radius:8px;overflow-x:auto;white-space:pre-wrap;word-break:break-word}
 .row{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0}button.ghost{background:none;color:var(--accent)}button.danger{background:var(--bad);border-color:var(--bad)}
 form.kill{margin-top:12px;border-top:1px solid var(--line);padding-top:8px}ul.gate{padding-left:0;list-style:none;margin:6px 0}
-.chart svg{width:100%;height:180px;display:block}
+.chart svg{width:100%;height:180px;display:block}.chart svg.candles{height:auto}
 .switch{font-size:1.1em}.switch.on b{color:var(--bad)}
 .good{color:var(--good)}.bad{color:var(--bad)}.warn{color:#a86b00}.stack{margin:12px 0}.muted{color:var(--muted)}.small{font-size:.85em}.pill{border:1px solid var(--line);border-radius:99px;padding:1px 8px;font-size:.85em}
 """

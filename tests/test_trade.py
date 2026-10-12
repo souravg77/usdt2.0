@@ -508,6 +508,22 @@ def test_cli_kill_needs_confirm(tmp_path, monkeypatch, capsys):
     assert main(["--env-file", "none", "trade", "run", "--mode", "testnet", "--once"]) == 1
 
 
+def test_testnet_executor_waits_for_keys_instead_of_erroring(tmp_path, monkeypatch, capsys):
+    import json
+
+    from aitrader.cli import main
+
+    monkeypatch.chdir(tmp_path)
+    for k in ("BINANCE_TESTNET_API_KEY", "BINANCE_TESTNET_API_SECRET"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("AITRADER_MODE", "testnet")
+    monkeypatch.setattr("aitrader.ops.secrets.restart_on_change", lambda *a, **k: None)
+    assert main(["--env-file", "none", "trade", "run", "--mode", "testnet", "--once"]) == 1
+    assert "waiting for the Binance testnet API key" in capsys.readouterr().err
+    events = [json.loads(line) for line in open("data/ops/events.jsonl")]
+    assert events[-1]["kind"] == "waiting" and events[-1]["level"] == "warning"
+
+
 def test_ccxt_adapter_client_ids_and_lock(monkeypatch):
     from aitrader.config import Mode, Settings
     from aitrader.exchanges import BinanceAdapter
