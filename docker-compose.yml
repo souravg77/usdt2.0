@@ -53,6 +53,16 @@ services:
     <<: *app
     command: ["news", "run"]
 
+  # Trader-research log: Claude searches Reddit, TradingView, blogs and papers for public reports
+  # on our strategy families (Research page). Research input only: it never changes trading, risk
+  # or a strategy's status. Needs the Anthropic key; every AITRADER_RESEARCH_EVERY_HOURS (168).
+  #   docker compose --profile research up -d research
+  research:
+    <<: *app
+    profiles: ["research"]
+    command: ["research", "run"]
+    mem_limit: 512m
+
   # Paper-trades every strategy that passed `aitrader learn test`, with the calendar, market
   # context and AI filters. Never sends exchange orders.
   paper:

@@ -150,6 +150,7 @@ def create_app(settings: Settings, auth: Auth, jobs: JobRunner, paths: Paths | N
     from .market_pages import add_market_routes
     from .news_pages import add_news_routes
     from .replay_pages import add_replay_routes
+    from .research_pages import add_research_routes
     from .report_pages import add_report_routes
     from .settings_pages import add_settings_routes
 
@@ -157,6 +158,7 @@ def create_app(settings: Settings, auth: Auth, jobs: JobRunner, paths: Paths | N
     add_report_routes(app, settings=settings, auth=auth, jobs=jobs, page=page, guard=guard,
                       report_path=paths.report)
     add_news_routes(app, settings=settings, auth=auth, jobs=jobs, page=page, guard=guard, news_dir=paths.news)
+    add_research_routes(app, auth=auth, jobs=jobs, page=page, guard=guard, news_dir=paths.news)
     add_replay_routes(app, settings=settings, auth=auth, jobs=jobs, page=page, guard=guard,
                       registry_path=paths.registry, report_path=paths.report)
 
@@ -415,7 +417,7 @@ paper trading. Nothing trades real money.</p>
 
 
 NAV = [("/", "Overview"), ("/markets", "Markets"), ("/trading", "Trading"), ("/replay", "Replay"),
-       ("/news", "News"), ("/reports", "Reports"), ("/books", "Submit a book"), ("/admin/users", "Users"), ("/settings", "Settings")]
+       ("/news", "News"), ("/research", "Research"), ("/reports", "Reports"), ("/books", "Submit a book"), ("/admin/users", "Users"), ("/settings", "Settings")]
 
 
 def max_val(v) -> int:
