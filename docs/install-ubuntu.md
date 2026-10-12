@@ -161,7 +161,7 @@ nano .env        # save with Ctrl+O, Enter; exit with Ctrl+X
 | `ANTHROPIC_API_KEY` | to let the agent read books | from console.anthropic.com |
 | `BINANCE_TESTNET_API_KEY` / `_SECRET` | Phase 5 testing | see the "connect Binance" guide, stage 1 |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | alerts on your phone | docs/live-trading.md, step 2 |
-| `AITRADER_SYMBOLS` | which coins | default: BTC, ETH, SOL, BNB, XRP against USDT |
+| `AITRADER_SYMBOLS` | which coins | default: the 20 most traded coins against USDT (see `TOP_PAIRS` in src/aitrader/config.py) |
 
 **Never** put real Binance keys in `.env` until the go/no-go gate passes (Phase 6). Leave
 `AITRADER_LIVE_UNLOCKED=false`.

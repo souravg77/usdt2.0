@@ -53,7 +53,7 @@ class PaperTrader:
     def __init__(self, store: CandleStore, registry_path: str, exchanges: list[str],
                  symbols: list[str], cfg: PaperConfig | None = None,
                  state_path: str = DEFAULT_STATE, calendar=None, ai_filter=None, control=None,
-                 context=None, events=None):
+                 context=None, events=None, news=None):
         self.store, self.registry_path = store, registry_path
         self.exchanges, self.symbols = exchanges, symbols
         self.cfg = cfg or PaperConfig()
@@ -62,6 +62,7 @@ class PaperTrader:
         self.control = control  # trade.Control: pause / kill switch, or None
         self.context = context  # market-context filter (funding, open interest...), or None
         self.events = events  # ops.EventLog for alerts and the stability record, or None
+        self.news = news  # news.NewsFilter (AI web-search brief): can only shrink or pause entries
         self.state = {"open": {}, "trades": [], "equity": {}, "last_signal": {}}
         if os.path.exists(state_path):
             with open(state_path, encoding="utf-8") as fh:
@@ -150,17 +151,21 @@ class PaperTrader:
         return candles_to_frame(candles) if candles else None
 
     def _context(self, exchange: str, symbol: str, now_ms: int) -> float:
-        """Size multiplier from the market-context filter (0 = no new entry)."""
-        if self.context is None:
-            return 1.0
-        try:
-            d = self.context.decide(exchange, symbol, now_ms)
-        except Exception:  # missing context data must never stop paper trading
-            log.exception("market-context filter failed; ignoring it this tick")
-            return 1.0
-        if not d.allow_entries:
-            return 0.0
-        return d.size_multiplier
+        """Size multiplier from the market-context and news filters (0 = no new entry)."""
+        mult = 1.0
+        for name, f, args in (("market-context", self.context, (exchange, symbol, now_ms)),
+                              ("news", self.news, (symbol, now_ms))):
+            if f is None:
+                continue
+            try:
+                d = f.decide(*args)
+            except Exception:  # missing context data must never stop paper trading
+                log.exception("%s filter failed; ignoring it this tick", name)
+                continue
+            if not d.allow_entries:
+                return 0.0
+            mult *= d.size_multiplier
+        return mult
 
     def _emit(self, events: dict) -> None:
         if self.events is None:

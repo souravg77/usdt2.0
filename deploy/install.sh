@@ -115,6 +115,10 @@ setkey() {  # setkey NAME VALUE: set NAME in .env if it is empty or missing
 say "Settings (.env)"
 NEW_PW=""
 [ -f .env ] || cp .env.example .env
+# the old 5-pair default becomes the top-20 list; a list you changed yourself is kept
+if grep -qx 'AITRADER_SYMBOLS=BTC/USDT,ETH/USDT,SOL/USDT,BNB/USDT,XRP/USDT' .env; then
+  sed -i 's#^AITRADER_SYMBOLS=.*#AITRADER_SYMBOLS=BTC/USDT,ETH/USDT,SOL/USDT,BNB/USDT,XRP/USDT,DOGE/USDT,ADA/USDT,TRX/USDT,LINK/USDT,AVAX/USDT,SUI/USDT,LTC/USDT,BCH/USDT,DOT/USDT,TON/USDT,NEAR/USDT,APT/USDT,UNI/USDT,AAVE/USDT,PEPE/USDT#' .env
+fi
 chmod 600 .env
 if ! grep -qE '^AITRADER_WEB_PASSWORD=.{12,}' .env; then
   NEW_PW="$(openssl rand -base64 18 | tr -d '/+=' | cut -c1-20)"
@@ -139,7 +143,7 @@ grep -q '^AITRADER_LIVE_UNLOCKED=true' .env && echo "NOTE: live trading is unloc
 say "Building and starting (the first build takes a few minutes)"
 $DOCKER compose build
 $DOCKER compose run --rm -T collector migrate
-$DOCKER compose up -d collector context paper web
+$DOCKER compose up -d collector context news paper web
 # The testnet trader (fake money) runs too: it waits until testnet keys are saved on the Settings
 # page. Telegram and user accounts are restarted on the new code only if they were running.
 # The live pilot (real money) is never started or restarted from here.

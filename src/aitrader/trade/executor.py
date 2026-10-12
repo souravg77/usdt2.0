@@ -141,7 +141,14 @@ class Executor:
                 if problems:
                     self._skip(mark, key, "live trading not approved: " + "; ".join(problems), out)
                     continue
-            book = await self.adapter.get_orderbook(symbol, 5)
+            try:
+                book = await self.adapter.get_orderbook(symbol, 5)
+            except Exception as exc:
+                if type(exc).__name__ != "BadSymbol":
+                    raise
+                # Binance's testnet lists fewer coins than the real exchange: skip, don't fail the tick
+                self._skip(mark, key, f"{symbol} isn't listed on {self.exchange} {self.mode}", out)
+                continue
             price = book.best_ask
             if not price or price <= sig["stop"]:
                 self._skip(mark, key, f"price {price} is at or below the stop {sig['stop']}", out)
