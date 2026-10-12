@@ -1004,8 +1004,11 @@ async def _trade_run(s: Settings, args, control) -> int:
         from .data.bybit_ws import BybitSpotStream
 
         # streamed prices: stops checked every second, quiet coins get no new entries
+        from .ops import feedstats
+
         ex.prices = BybitSpotStream(s.symbols)
         stream = asyncio.create_task(ex.prices.run())
+        reporter = asyncio.create_task(feedstats.report(ex.prices))  # the Monitor page's feed health
     try:
         if args.once:
             print(json.dumps(await ex.tick(), indent=1))
@@ -1015,6 +1018,7 @@ async def _trade_run(s: Settings, args, control) -> int:
         if stream is not None:
             ex.prices.stop()
             stream.cancel()
+            reporter.cancel()
         await adapter.close()
     return 0
 

@@ -25,6 +25,7 @@ Public market data only: no keys, no orders. Pairs are given as ``BTC/USDT`` or 
 from __future__ import annotations
 
 import asyncio
+import collections
 import itertools
 import json
 import logging
@@ -120,6 +121,10 @@ class BybitSpotStream:
         self.connected, self._fresh = False, False
         self.connects = 0  # successful connections so far (1 + reconnects)
         self.last_error = ""
+        # feed health for the dashboard: ping round trips and the recent connection history
+        self.latency_ms: float | None = None
+        self._pings: dict[str, float] = {}
+        self.history: collections.deque = collections.deque(maxlen=20)
 
     # ---- read side -------------------------------------------------------------------------------
 
@@ -169,6 +174,19 @@ class BybitSpotStream:
     def symbols(self) -> list[str]:
         return list(self._names.values())
 
+    def status(self) -> dict:
+        """Feed health: connection, ping round trip, per-pair age of the last update and the
+        recent connection history (wall-clock times)."""
+        return {"category": self.category, "connected": self.connected, "connects": self.connects,
+                "reconnects": max(0, self.connects - 1), "latency_ms": self.latency_ms,
+                "last_error": self.last_error,
+                "ages": {name: (None if math.isinf(self.age(name)) else round(self.age(name), 1))
+                         for name in self.symbols},
+                "history": list(self.history)}
+
+    def _note(self, what: str) -> None:
+        self.history.append({"at": round(time.time(), 1), "event": what})
+
     # ---- connection ------------------------------------------------------------------------------
 
     def stop(self) -> None:
@@ -185,6 +203,7 @@ class BybitSpotStream:
             try:
                 ws = await self._connect(self.url)
                 self.connected, self.connects = True, self.connects + 1
+                self._note("connected" if self.connects == 1 else "reconnected")
                 await self._subscribe(ws)
                 if await self._session(ws):
                     backoff = self.min_backoff
@@ -195,6 +214,7 @@ class BybitSpotStream:
                     backoff = self.min_backoff
                 self.last_error = f"{type(exc).__name__}: {exc}"[:300]
                 log.warning("bybit %s stream: %s", self.category, self.last_error)
+                self._note(f"dropped: {self.last_error}")
             finally:
                 self.connected = False
                 if ws is not None:
@@ -244,7 +264,9 @@ class BybitSpotStream:
     async def _pinger(self, ws: Socket) -> None:
         while True:
             await asyncio.sleep(self.ping_s)
-            await ws.send(json.dumps({"op": "ping", "req_id": str(next(self._req))}))
+            req = str(next(self._req))
+            self._pings = {req: self._clock()}  # only the newest ping is timed
+            await ws.send(json.dumps({"op": "ping", "req_id": req}))
 
     # ---- messages --------------------------------------------------------------------------------
 
@@ -255,6 +277,11 @@ class BybitSpotStream:
         except ValueError:
             return False
         if not isinstance(msg, dict):
+            return False
+        if msg.get("op") in ("ping", "pong") or msg.get("ret_msg") == "pong":
+            sent = self._pings.pop(str(msg.get("req_id")), None)
+            if sent is not None:
+                self.latency_ms = round((self._clock() - sent) * 1000, 1)
             return False
         if msg.get("op") == "subscribe" and msg.get("success") is False:
             self.last_error = f"subscribe refused: {msg.get('ret_msg', '')}"[:300]
