@@ -124,7 +124,3 @@ def restart_on_change(path: str = DEFAULT_PATH, interval: float = 20.0) -> threa
     t = threading.Thread(target=loop, daemon=True, name="keys-watch")
     t.start()
     return t
-
-
-def masked(value: str) -> str:
-    return "…" + value[-4:] if len(value) > 8 else "set"

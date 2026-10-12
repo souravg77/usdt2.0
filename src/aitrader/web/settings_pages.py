@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 import urllib.request
 
 from fastapi import Form, Request
@@ -118,12 +119,69 @@ def add_settings_routes(app, *, settings, auth, paths, jobs, keys_secret: str, p
             if not v.strip():
                 os.environ.pop(k, None)
 
+    async def check(group: str, values: dict) -> str:
+        """Run the group's check. Returns '' when confirmed, or the reason it couldn't run;
+        raises KeyRejected when the service refuses, ValueError when something is missing."""
+        try:
+            if group == "anthropic":
+                if not values["ANTHROPIC_API_KEY"]:
+                    raise ValueError("paste the Anthropic API key too")
+                await asyncio.to_thread(checkers["anthropic"], values["ANTHROPIC_API_KEY"],
+                                        values["ANTHROPIC_WORKSPACE_ID"])
+            elif group == "telegram":
+                if not (values["TELEGRAM_BOT_TOKEN"] and values["TELEGRAM_CHAT_ID"]):
+                    raise ValueError("Telegram needs both the bot token and the chat ID")
+                await asyncio.to_thread(checkers["telegram"], values["TELEGRAM_BOT_TOKEN"],
+                                        values["TELEGRAM_CHAT_ID"])
+            else:
+                testnet = group == "binance_testnet"
+                prefix = "BINANCE_TESTNET_API" if testnet else "BINANCE_API"
+                key, secret = values[f"{prefix}_KEY"], values[f"{prefix}_SECRET"]
+                if not (key and secret):
+                    raise ValueError("Binance needs both the API key and the secret key")
+                await checkers["binance"]("binance", testnet, key, secret, settings)
+        except KeyUnverified as exc:
+            if group == "binance":  # a real-money key is saved only once its permissions are confirmed
+                raise KeyRejected(f"{exc}. Try again in a minute") from None
+            record(group, None, str(exc))
+            return str(exc)
+        record(group, True, "working")
+        return ""
+
+    checks_path = os.path.join(os.path.dirname(store_path) or ".", "checks.json")
+
+    def last_checks() -> dict:
+        try:
+            with open(checks_path) as fh:
+                return json.load(fh)
+        except (OSError, ValueError):
+            return {}
+
+    def record(group: str, ok, text: str = "") -> None:
+        """Remember the last check result per group (no key material, just the outcome);
+        ``ok=None`` with no text forgets it."""
+        data = last_checks()
+        if ok is None and not text:
+            data.pop(group, None)
+        else:
+            data[group] = {"ok": ok, "text": text[:300], "ts": int(time.time())}
+        try:
+            os.makedirs(os.path.dirname(checks_path) or ".", exist_ok=True)
+            with open(checks_path, "w") as fh:
+                json.dump(data, fh)
+        except OSError:
+            pass
+
+    def current(fields) -> dict:
+        return {**{f.name: os.environ.get(f.name, "") for f in fields}, **stored()}
+
     @app.get("/settings")
     def settings_page(request: Request, msg: str = "", error: str = ""):
         user, token, redirect = guard(request)
         if redirect:
             return redirect
         saved = stored()
+        checked = last_checks()
         body = ""
         if msg:
             body += f'<p class="good">{_e(msg)}</p>'
@@ -135,28 +193,50 @@ def add_settings_routes(app, *, settings, auth, paths, jobs, keys_secret: str, p
             body += ('<p class="bad">AITRADER_KEYS_SECRET is missing in .env, so keys can\'t be saved '
                      'here. Run the installer again (it creates one), or add it by hand.</p>')
         body += "<h2>API keys</h2><p class=muted>Saved keys are encrypted on the server and never " \
-                "shown again (only their last 4 characters). A key saved here replaces the same key " \
-                "in .env. Each key is checked before it is saved.</p>"
+                "shown again (only dots and their last 4 characters). Leave a box empty to keep the " \
+                "saved key; \"Test saved key\" checks it again without typing it. A key saved here " \
+                "replaces the same key in .env.</p>"
         for group, title, help_text in GROUPS:
             fields = [f for f in secrets.FIELDS if f.group == group]
             rows = ""
             for f in fields:
+                value = saved.get(f.name) or os.environ.get(f.name, "")
                 if f.name in saved:
-                    state = f'<span class="good">saved here {_e(secrets.masked(saved[f.name]))}</span>'
-                elif os.environ.get(f.name):
+                    state = '<span class="good">saved</span>'
+                elif value:
                     state = '<span class="good">set in .env</span>'
                 else:
                     state = '<span class="muted">not set</span>'
+                if not value:
+                    hint = "paste to set"
+                elif f.secret:  # dots plus the last 4 characters; the key itself never leaves the server
+                    hint = "•" * 12 + (" " + value[-4:] if len(value) > 8 else "")
+                else:
+                    hint = value
                 kind = "password" if f.secret else "text"
                 rows += (f'<label>{_e(f.label)} · {state}<input type="{kind}" name="{f.name}" '
-                         f'autocomplete="off" spellcheck="false" placeholder="paste to set or replace"></label>')
-            remove = ""
+                         f'autocomplete="off" spellcheck="false" placeholder="{_e(hint)}"></label>')
+            has_value = any(saved.get(f.name) or os.environ.get(f.name) for f in fields)
+            last = checked.get(group)
+            status = ""
+            if last and has_value:
+                cls = "good" if last["ok"] else "bad" if last["ok"] is False else "warn"
+                word = "Working" if last["ok"] else "Not working" if last["ok"] is False else "Not confirmed"
+                when = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(last["ts"]))
+                detail = "" if last["ok"] else f": {last['text']}"
+                status = f'<p class="{cls}">Last check: {word}{_e(detail)} ({when})</p>'
+            elif has_value:
+                status = '<p class=muted>Not checked yet: tap "Test saved key".</p>'
+            extra = ""
+            if has_value:
+                extra += (f'<form method="post" action="/settings/keys/{group}/test" class="inline">'
+                          f'{_csrf(auth, token)}<button class="ghost">Test saved key</button></form> ')
             if any(f.name in saved for f in fields):
-                remove = (f'<form method="post" action="/settings/keys/{group}/delete" class="inline">'
+                extra += (f'<form method="post" action="/settings/keys/{group}/delete" class="inline">'
                           f'{_csrf(auth, token)}<button class="ghost">Remove saved keys</button></form>')
             body += (f'<div class="card stack"><h3>{_e(title)}</h3><p class=muted>{_e(help_text)}</p>'
-                     f'<form method="post" action="/settings/keys/{group}">{_csrf(auth, token)}{rows}'
-                     f'<button>Check and save</button></form>{remove}</div>')
+                     f'{status}<form method="post" action="/settings/keys/{group}">{_csrf(auth, token)}{rows}'
+                     f'<button>Check and save</button></form><p>{extra}</p></div>')
         body += ('<p class=muted>Live trading is unlocked only in .env on the server, never from this '
                  'page.</p>')
         return page("Settings", body, user, token)
@@ -170,46 +250,49 @@ def add_settings_routes(app, *, settings, auth, paths, jobs, keys_secret: str, p
         fields = [f for f in secrets.FIELDS if f.group == group]
         if not fields:
             return done(error="unknown key group")
-        current = {**{f.name: os.environ.get(f.name, "") for f in fields}, **stored()}
+        now = current(fields)
         given = {f.name: str(form.get(f.name, "")).strip() for f in fields}
         if not any(given.values()):
             return done(error="paste the key first")
-        values = {f.name: given[f.name] or current.get(f.name, "") for f in fields}
-        warning = ""
+        values = {f.name: given[f.name] or now.get(f.name, "") for f in fields}
         try:
-            if group == "anthropic":
-                if not values["ANTHROPIC_API_KEY"]:
-                    return done(error="paste the Anthropic API key too")
-                await asyncio.to_thread(checkers["anthropic"], values["ANTHROPIC_API_KEY"],
-                                        values["ANTHROPIC_WORKSPACE_ID"])
-            elif group == "telegram":
-                if not (values["TELEGRAM_BOT_TOKEN"] and values["TELEGRAM_CHAT_ID"]):
-                    return done(error="Telegram needs both the bot token and the chat ID")
-                await asyncio.to_thread(checkers["telegram"], values["TELEGRAM_BOT_TOKEN"],
-                                        values["TELEGRAM_CHAT_ID"])
-            else:
-                testnet = group == "binance_testnet"
-                prefix = "BINANCE_TESTNET_API" if testnet else "BINANCE_API"
-                key, secret = values[f"{prefix}_KEY"], values[f"{prefix}_SECRET"]
-                if not (key and secret):
-                    return done(error="Binance needs both the API key and the secret key")
-                await checkers["binance"]("binance", testnet, key, secret, settings)
-        except KeyUnverified as exc:
-            if group == "binance":  # a real-money key is saved only once its permissions are confirmed
-                return done(error=f"Not saved: {exc}. Try again in a minute.")
-            warning = f" (Couldn't confirm it yet: {exc}. Saved anyway; it is used as soon as the service can reach it.)"
-        except KeyRejected as exc:
+            warning = await check(group, values)
+        except KeyRejected as exc:  # the saved key (if any) is unchanged, so its last check stands
             return done(error=f"Not saved: {exc}")
+        except ValueError as exc:
+            return done(error=str(exc))
         try:
             save({k: v for k, v in values.items() if given[k]})
         except AccountError as exc:
             return done(error=str(exc))
         title = dict((g, t) for g, t, _ in GROUPS)[group]
         if warning:
-            return done(msg=f"{title}: saved.{warning}")
+            return done(msg=f"{title}: saved. (Couldn't confirm it yet: {warning}. Saved anyway; it is "
+                            f"used as soon as the service can reach it.)")
         extra = " Telegram sent you a test message." if group == "telegram" else ""
         return done(msg=f"{title}: checked and saved.{extra} Services using it restart by themselves "
                         f"within a minute.")
+
+    @app.post("/settings/keys/{group}/test")
+    async def test_keys(request: Request, group: str, csrf: str = Form("")):
+        bad = post_guard(request, csrf)
+        if bad:
+            return bad
+        fields = [f for f in secrets.FIELDS if f.group == group]
+        if not fields:
+            return done(error="unknown key group")
+        title = dict((g, t) for g, t, _ in GROUPS)[group]
+        try:
+            note = await check(group, current(fields))
+        except KeyRejected as exc:
+            record(group, False, str(exc))
+            return done(error=f"{title}: not working: {exc}")
+        except ValueError as exc:
+            return done(error=f"{title}: {exc}")
+        if note:
+            return done(error=f"{title}: couldn't confirm it: {note}. Try again in a minute.")
+        extra = " Telegram sent you a test message." if group == "telegram" else ""
+        return done(msg=f"{title}: working.{extra}")
 
     @app.post("/settings/keys/{group}/delete")
     def delete_keys(request: Request, group: str, csrf: str = Form("")):
@@ -223,6 +306,7 @@ def add_settings_routes(app, *, settings, auth, paths, jobs, keys_secret: str, p
             save({f.name: "" for f in fields})
         except AccountError as exc:
             return done(error=str(exc))
+        record(group, None)
         return done(msg="Removed the saved keys (values in .env, if any, are used again after a restart).")
 
     @app.post("/settings/setup")
