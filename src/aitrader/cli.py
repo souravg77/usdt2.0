@@ -392,6 +392,31 @@ def cmd_learn(s: Settings, args) -> int:
             return 0
         run_tests(entries)
         return 0
+    if cmd == "report":
+        from .learn.library import library_specs
+        from .learn.report import backtest_report, report_text, save_report
+
+        # every strategy the agent knows: the registry, the book library and the built-ins
+        entries = dict(reg.entries)
+        for spec in library_specs()[0]:
+            entries.setdefault(spec_id(spec), Entry(id=spec_id(spec), kind="rule", name=spec["name"], spec=spec,
+                                                    source=f"{spec['source']['book']} {spec['source']['pages']}".strip()))
+        if not args.no_builtins:
+            for name in STRATEGIES:
+                entries.setdefault(f"builtin-{name}", Entry(id=f"builtin-{name}", kind="builtin", name=name,
+                                                           source=STRATEGIES[name].spec.source))
+        store = CandleStore(s.db_path)
+        try:
+            rep = backtest_report(list(entries.values()), store, args.exchange or ["binance"], symbols,
+                                  years=args.years, cfg=cfg,
+                                  progress=lambda n, total, sid, k: print(f"  [{n}/{total}] {sid}: {k} trades",
+                                                                          flush=True))
+        finally:
+            store.close()
+        path = save_report(rep, args.out)
+        print(report_text(rep))
+        print(f"report saved to {path}")
+        return 0
     if cmd == "list":
         if not reg.entries:
             print("no strategies yet")
@@ -1050,6 +1075,11 @@ def build_parser() -> argparse.ArgumentParser:
     lt = le_sub.add_parser("test", help="backtest candidates; passes go to paper trading")
     lt.add_argument("ids", nargs="*")
     lt.add_argument("--retest", action="store_true", help="also re-test rejected strategies")
+    lrp = le_sub.add_parser("report", help="backtest every strategy over the last N years: win report "
+                                           "per strategy and per year")
+    lrp.add_argument("--years", type=int, default=5)
+    lrp.add_argument("--out", default="data/reports/backtest.json")
+    lrp.add_argument("--no-builtins", action="store_true", help="leave out the hand-coded strategies")
     le_sub.add_parser("list", help="every strategy with its status and results")
     ls = le_sub.add_parser("show", help="full rules, sources and results of one strategy")
     ls.add_argument("id")

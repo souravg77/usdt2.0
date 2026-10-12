@@ -59,6 +59,20 @@ async def test_download_paginates_and_resumes(fake_ccxt):
     assert check_candles(store.load("binance", "BTC/USDT", "1m"), "1m").ok
 
 
+async def test_download_fills_in_older_history(fake_ccxt):
+    """The collector stores only recent candles; asking for years back must still fetch them."""
+    s = Settings()
+    raw = [[i * 60_000, 1, 2, 0.5, 1.5, 1] for i in range(40)]
+    adapter = BinanceAdapter(s, client=fake_ccxt(raw), throttle=Throttle(1000, 1000))
+    store = CandleStore(":memory:")
+    store.upsert([Candle("binance", "BTC/USDT", "1m", i * 60_000, 1, 2, 0.5, 1.5, 1) for i in range(30, 35)])
+    n = await download(adapter, store, "BTC/USDT", "1m", 0, 40 * 60_000)
+    assert n == 35  # 0-29 before the stored ones, 35-39 after
+    rows = store.load("binance", "BTC/USDT", "1m")
+    assert [r.ts for r in rows] == [i * 60_000 for i in range(40)]
+    assert store.first_ts("binance", "BTC/USDT", "1m") == 0
+
+
 async def test_throttle_limits_rate():
     clock = [0.0]
     t = Throttle(rate_per_sec=2, burst=1, clock=lambda: clock[0])
