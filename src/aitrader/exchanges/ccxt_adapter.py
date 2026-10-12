@@ -1,4 +1,4 @@
-"""The Bybit spot adapter, built on ccxt. Orders go through the live gate unless on demo trading."""
+"""The Bybit spot adapter, built on ccxt. Every order goes through the live lock."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import logging
 
 import ccxt.async_support as ccxt_async
 
-from ..config import ExchangeKeys, Mode, Settings
+from ..config import ExchangeKeys, Settings
 from ..models import (
     Balance,
     Candle,
@@ -38,7 +38,6 @@ class CcxtAdapter(ExchangeAdapter):
     """Generic ccxt-backed adapter. ``client`` may be injected (tests use a fake)."""
 
     ccxt_id: str = ""
-    supports_testnet: bool = False
     client_id_param: str = "clientOrderId"  # ccxt's unified name; exchanges may override
     find_id_param: str = "clientOrderId"  # the name fetch_order reads to look an order up by it
     ccxt_options: dict = {}
@@ -47,14 +46,10 @@ class CcxtAdapter(ExchangeAdapter):
         self,
         settings: Settings,
         keys: ExchangeKeys | None = None,
-        testnet: bool = False,
         client=None,
         throttle: Throttle | None = None,
     ):
-        if testnet and not self.supports_testnet:
-            raise ValueError(f"{self.name} has no usable testnet; use the paper simulator")
         self.settings = settings
-        self.testnet = testnet
         self.throttle = throttle or Throttle(DEFAULT_RATES.get(self.name, 5.0))
         if client is None:
             keys = keys or ExchangeKeys()
@@ -66,13 +61,7 @@ class CcxtAdapter(ExchangeAdapter):
                     "options": {"defaultType": "spot", **self.ccxt_options},
                 }
             )
-            if testnet:
-                self._practice(client)
         self.client = client
-
-    def _practice(self, client) -> None:
-        """Point the client at the exchange's fake-money environment."""
-        client.set_sandbox_mode(True)
 
     # ---- market data -------------------------------------------------------------------------
 
@@ -108,10 +97,6 @@ class CcxtAdapter(ExchangeAdapter):
     # ---- trading -----------------------------------------------------------------------------
 
     def _check_order_allowed(self) -> None:
-        if self.testnet:
-            if self.settings.mode is not Mode.TESTNET:
-                raise RuntimeError("testnet adapter used outside AITRADER_MODE=testnet")
-            return
         assert_live_allowed(self.settings)
 
     async def place_order(self, symbol, side, amount, type=OrderType.MARKET, price=None, reason="",
@@ -211,19 +196,15 @@ class CcxtAdapter(ExchangeAdapter):
 
 
 class BybitAdapter(CcxtAdapter):
-    """Bybit spot (V5 API). Fake-money orders go to Bybit Demo Trading (api-demo.bybit.com): real
-    market prices with demo funds, keys made in the Demo Trading section of a bybit.com account."""
+    """Bybit spot (V5 API) on the real exchange. Market data needs no key; orders need the
+    real-account key and the live lock."""
 
     name = "bybit"
     ccxt_id = "bybit"
-    supports_testnet = True
     client_id_param = "orderLinkId"  # up to 36 letters, digits, - and _; ours are 32
     # Bybit accounts are Unified Trading Accounts; saying so skips ccxt's account-type lookup,
     # which needs key permissions a trade-only key doesn't have
     ccxt_options = {"enableUnifiedAccount": True, "enableUnifiedMargin": False}
-
-    def _practice(self, client) -> None:
-        client.enable_demo_trading(True)
 
     async def place_order(self, symbol, side, amount, type=OrderType.MARKET, price=None, reason="",
                           client_id=None):
@@ -314,7 +295,5 @@ class BybitAdapter(CcxtAdapter):
 ADAPTERS = {"bybit": BybitAdapter}
 
 
-def make_adapter(name: str, settings: Settings, testnet: bool = False) -> CcxtAdapter:
-    cls = ADAPTERS[name]
-    key_name = f"{name}_demo" if testnet else name
-    return cls(settings, keys=settings.keys.get(key_name), testnet=testnet)
+def make_adapter(name: str, settings: Settings) -> CcxtAdapter:
+    return ADAPTERS[name](settings, keys=settings.keys.get(name))

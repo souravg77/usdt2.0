@@ -153,7 +153,8 @@ class GoLive:
              stab_text, stab_ok),
             ("Security: keys", "trade-only, no withdrawal, IP whitelist, 2FA (aitrader golive attest keys)",
              _att_text(att.get("keys")), "keys" in att),
-            ("Security: kill switch tested", f"on testnet within {cfg.kill_test_max_age_days} days",
+            ("Security: kill switch tested", f"within {cfg.kill_test_max_age_days} days "
+             "(aitrader golive attest kill_switch)",
              kill_text, kill_ok),
         ]
         report = {"at": now, "strategies": sorted(ids), "config": asdict(cfg),
@@ -183,12 +184,13 @@ class GoLive:
     def _kill_tested(self, now: float, att: dict) -> tuple[bool, str]:
         since = int((now - self.cfg.kill_test_max_age_days * 86400) * 1000)
         kills = [e for e in self.events.read(since_ms=since, kinds={"kill"}, include_rotated=True)
-                 if e.get("service") == "executor-testnet"]
+                 if e.get("service") == "executor-live"]
         if kills:
-            return True, "flattened on testnet " + time.strftime("%Y-%m-%d", time.gmtime(kills[-1]["ts"] / 1000))
+            return True, "flattened by the live executor " + time.strftime("%Y-%m-%d",
+                                                                             time.gmtime(kills[-1]["ts"] / 1000))
         if "kill_switch" in att and att["kill_switch"]["at"] * 1000 >= since:
             return True, _att_text(att["kill_switch"])
-        return False, "no testnet kill-switch run recorded"
+        return False, "no kill-switch test recorded"
 
     # ---- approval -------------------------------------------------------------------------------
 

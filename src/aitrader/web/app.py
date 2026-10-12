@@ -6,7 +6,8 @@ pipeline as ``aitrader learn read --test``). Strategies that pass go to paper tr
 overview shows the mode and live lock, every strategy with its results, the AI trade filter,
 and recent jobs.
 
-The Trading page shows open positions (paper, testnet and live), the equity curve, the trade log
+The Trading page shows the real Bybit account's balance (read only), open positions (paper and
+live), the equity curve, the trade log
 with the AI filter's probability, the event feed and the go/no-go gate, and has pause, resume
 and kill-switch buttons. The kill switch only ever sells what the executors bought.
 
@@ -57,10 +58,14 @@ class Paths:
 
 def create_app(settings: Settings, auth: Auth, jobs: JobRunner, paths: Paths | None = None,
                secure_cookie: bool = False, users=None, keys_secret: str = "", signup: bool = False,
-               verifier=None, checkers: dict | None = None, live=None) -> FastAPI:
+               verifier=None, checkers: dict | None = None, live=None, account=None) -> FastAPI:
     """``users`` (an ``accounts.UserStore``) turns on user accounts: sign-up when ``signup`` is
     true, each user's own page, and the admin's Users page. Without it only the admin can log in."""
     paths = paths or Paths()
+    if account is None:
+        from .account import RealAccount
+
+        account = RealAccount()
     app = FastAPI(title="aitrader dashboard", docs_url=None, redoc_url=None, openapi_url=None)
 
     @app.middleware("http")
@@ -301,7 +306,7 @@ paper trading. Nothing trades real money.</p>
         return Control(os.path.join(paths.trade_dir, "control.json"))
 
     @app.get("/trading")
-    def trading(request: Request, msg: str = ""):
+    async def trading(request: Request, msg: str = ""):
         user, token, redirect = guard(request)
         if redirect:
             return redirect
@@ -309,7 +314,8 @@ paper trading. Nothing trades real money.</p>
 
         c = _control().state()
         paper = _load_json(paths.paper_state)
-        execs = {m: _load_json(os.path.join(paths.trade_dir, f"{m}_state.json")) for m in ("testnet", "live")}
+        execs = {m: _load_json(os.path.join(paths.trade_dir, f"{m}_state.json")) for m in ("live",)}
+        acct = await account.snapshot()
         if c["killed"]:
             state = f'<b class="bad">KILL SWITCH ON</b> since {_when(c.get("since"))}'
         elif c["paused"]:
@@ -324,13 +330,13 @@ paper trading. Nothing trades real money.</p>
                     f'<form method="post" action="/trading/pause">{csrf}<button>Pause new entries</button></form>'
                     f'<form method="post" action="/trading/resume">{csrf}<button class="ghost">Resume</button></form>'
                     f'</div><form method="post" action="/trading/kill" class="kill">{csrf}'
-                    '<label>Kill switch: stops entries and sells everything the testnet/live executors bought. '
+                    '<label>Kill switch: stops entries and sells everything the live executor bought. '
                     'Type KILL to confirm <input name="confirm" autocomplete="off" placeholder="KILL"></label>'
                     '<button class="danger">Pull the kill switch</button></form></div>')
         note = f'<p class="good">{_e(msg)}</p>' if msg else ""
         events = EventLog(paths.events).read(limit=600)
-        body = [note, _trading_stats(c, settings, paths, paper, events),
-                '<div class="grid">', _paper_switch_card(c, paths, events, jobs.list(), csrf),
+        body = [note, _trading_stats(c, settings, paths, paper, events, acct),
+                '<div class="grid">', _account_card(acct), _paper_switch_card(c, paths, events, jobs.list(), csrf),
                 _live_card(settings, paths, events), "</div>",
                 '<div class="grid">', controls, _gate_card(paths, csrf), "</div>",
                 "<h2>Equity</h2>", _equity_svg(paper, execs),
@@ -518,7 +524,7 @@ def _strategy_table(paths: Paths) -> str:
         return "<p class=muted>No strategies yet. Start the first-time setup on the <a href=\"/settings\">Settings</a> page, or submit a book.</p>"
     order = {"paper": 0, "oos_validated": 1, "backtested": 1, "research": 1, "under_review": 2,
              "retired": 3, "rejected": 4}
-    ev = Evidence(paths.golive_dir, paths.trade_dir, paths.registry, paths.models)
+    ev = Evidence(paths.golive_dir, paths.trade_dir, paths.registry, paths.models, paths.paper_state)
     rows = []
     for e in sorted(reg.entries.values(), key=lambda e: (order.get(e.status, 9), e.id)):
         state, note = ladder_state(e, ev)
@@ -671,7 +677,7 @@ def _service_state(events: list[dict], service: str, now_ms: int) -> tuple[str, 
     beats = [e for e in mine if e.get("kind") == "heartbeat"]
     fresh = beats and now_ms - beats[-1].get("ts", 0) < 15 * 60_000
     if last.get("kind") == "waiting":
-        return "waiting for keys", "warn", "add the testnet keys on the Settings page"
+        return "waiting", "warn", str(last.get("text", ""))[:120]
     if last.get("level") == "error":
         return "error", "bad", str(last.get("text", ""))[:120]
     if fresh:
@@ -679,17 +685,15 @@ def _service_state(events: list[dict], service: str, now_ms: int) -> tuple[str, 
     return "quiet", "warn", f"last seen {_ms(last.get('ts'))}"
 
 
-def _trading_stats(c: dict, settings, paths: Paths, paper: dict, events: list[dict]) -> str:
+def _trading_stats(c: dict, settings, paths: Paths, paper: dict, events: list[dict], acct: dict) -> str:
     from ..learn import Registry
 
-    now = int(time.time() * 1000)
     if c["killed"]:
         trading = ("Kill switch on", "bad")
     elif c["paused"]:
         trading = ("Paused", "warn")
     else:
         trading = ("Running", "good")
-    tn, tn_cls, tn_detail = _service_state(events, "executor-testnet", now)
     trades = paper.get("trades", [])
     pnl = sum(t.get("pnl_usdt", 0) for t in trades)
     try:
@@ -699,7 +703,7 @@ def _trading_stats(c: dict, settings, paths: Paths, paper: dict, events: list[di
     tiles = [
         ("Trading", trading[0], trading[1], "new entries" if not c["paused"] and not c["killed"] else ""),
         ("Mode", settings.mode.value, "", "live orders locked" if live_gate_problems(settings) else "LIVE UNLOCKED"),
-        ("Testnet trader", tn, tn_cls, tn_detail),
+        _account_tile(acct),
         ("Strategies trading", str(in_paper), "good" if in_paper else "warn", "in paper trading"),
         ("Paper P&L", f"{pnl:+,.2f}", "good" if pnl > 0 else "bad" if pnl < 0 else "",
          f"{len(paper.get('open', {}))} open · {len(trades)} closed"),
@@ -707,6 +711,42 @@ def _trading_stats(c: dict, settings, paths: Paths, paper: dict, events: list[di
     return '<div class="stats">' + "".join(
         f'<div class="stat"><span class="k">{_e(k)}</span><span class="v {cls}">{_e(v)}</span>'
         f'<span class="s">{_e(sub)}</span></div>' for k, v, cls, sub in tiles) + "</div>"
+
+
+def _usdt(v) -> str:
+    return "-" if v is None else f"{v:,.2f}"
+
+
+def _account_tile(acct: dict) -> tuple[str, str, str, str]:
+    st = acct.get("state")
+    if st == "ok":
+        return ("Bybit account", f"{acct['total_usdt']:,.2f}", "", "USDT, real balance")
+    if st == "no_key":
+        return ("Bybit account", "no key", "warn", "save it on Settings")
+    if st == "loading":
+        return ("Bybit account", "loading", "warn", "reload in a moment")
+    return ("Bybit account", "error", "bad", acct.get("note", ""))
+
+
+def _account_card(acct: dict) -> str:
+    """The real Bybit account, read only: what it holds and what that is worth in USDT."""
+    st = acct.get("state")
+    head = '<div class="card"><h3>Bybit real account (read only)</h3>'
+    if st == "no_key":
+        return (head + '<p class="small">Save your real-account key on the <a href="/settings">Settings</a> page '
+                'to see your Bybit balance here. Paper trading doesn\'t need it.</p></div>')
+    if st == "loading":
+        return head + '<p class="small muted">Asking Bybit for the balance; reload in a moment.</p></div>'
+    if st != "ok":
+        return head + f'<p class="bad small">{_e(acct.get("note", ""))}</p></div>'
+    rows = "".join(f'<tr><td>{_e(c["asset"])}</td><td class="num">{c["amount"]:,.8g}</td>'
+                   f'<td class="num">{_usdt(c["usdt"])}</td></tr>' for c in acct["coins"])
+    table = (f'<table><tr><th>Coin</th><th>Amount</th><th>USDT</th></tr>{rows}</table>' if rows
+             else '<p class="muted small">The spot account is empty.</p>')
+    return (head + f'<p>Total <b>{acct["total_usdt"]:,.2f} USDT</b> '
+            f'<span class="muted small">at {_e(time.strftime("%H:%M", time.gmtime(acct["at"])))} UTC</span></p>'
+            f'{table}<p class="small muted">Read from Bybit with your saved key, at most once a minute. This '
+            'card can\'t trade; real orders need the live lock on the server.</p></div>')
 
 
 def _paper_switch_card(c: dict, paths: Paths, events: list[dict], jobs: list[dict], csrf: str) -> str:
@@ -739,7 +779,7 @@ def _paper_switch_card(c: dict, paths: Paths, events: list[dict], jobs: list[dic
             'live prices with fake money; one that loses too much retires by itself. Each one is then backtested '
             'too: only strategies that pass both the backtest and paper trading can ever be approved for live. '
             'Off pauses new entries '
-            '(pause and resume apply to the testnet and live traders too).</p><div class="row">'
+            '(pause and resume apply to the live trader too).</p><div class="row">'
             f'<form method="post" action="/trading/paper/on">{csrf}<button>{on}</button></form>'
             f'<form method="post" action="/trading/paper/off">{csrf}<button class="ghost">Turn paper trading off</button></form>'
             '</div></div>')
@@ -782,7 +822,7 @@ def _equity_svg(paper: dict, execs: dict) -> str:
         pts.append((t.get("exit_ts", 0), total))
     if pts:
         series.append(("paper P&L (USDT)", pts, "var(--accent)"))
-    colors = {"testnet": "var(--good)", "live": "var(--bad)"}
+    colors = {"live": "var(--bad)"}
     for mode, st in execs.items():
         curve = [(a, b) for a, b in st.get("equity_curve", [])]
         if len(curve) > 1:
@@ -847,7 +887,6 @@ clip-path:polygon(50% 0,100% 50%,50% 100%,0 50%)}
 .mode{font-size:.72em;font-weight:600;text-transform:uppercase;letter-spacing:.6px;padding:3px 9px;border-radius:99px;
 border:1px solid var(--line);color:var(--muted)}
 .mode-paper{color:var(--warnc);border-color:color-mix(in srgb,var(--warnc) 45%,transparent)}
-.mode-testnet{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 45%,transparent)}
 .mode-live{color:#fff;background:var(--bad);border-color:var(--bad)}
 nav{display:flex;gap:2px;flex-wrap:wrap;margin-left:auto}
 nav a{color:var(--muted);padding:6px 11px;border-radius:8px;font-weight:500;font-size:.94em}

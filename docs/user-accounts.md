@@ -9,8 +9,7 @@ account and decide who may use real money.
 > make you an investment manager, broker or portfolio manager under your country's rules. That
 > may need a licence or registration, client agreements, KYC/AML checks and tax reporting. In
 > India, look at SEBI and FIU-IND rules and get advice from a lawyer before inviting anyone
-> beyond yourself. Until then, keep sign-up closed and use accounts only for yourself or for
-> demo-trading demos. Bybit also restricts some countries; each user must check that Bybit
+> beyond yourself. Until then, keep sign-up closed and use accounts only for yourself. Bybit also restricts some countries; each user must check that Bybit
 > serves their country.
 
 ## Turn it on
@@ -32,8 +31,9 @@ account and decide who may use real money.
 1. **Sign up** at `/signup` with an email and a password of 12+ characters, and confirm they
    understand the risk. The account starts as *waiting for approval*.
 2. After you approve it, they log in and see **My account**:
-   - **Exchange keys.** They paste a Bybit **Demo Trading** key first (bybit.com, switch to Demo
-     Trading, avatar → API → create key). A real-account key is accepted only if Bybit itself
+   - **Exchange key.** They paste a key from their real Bybit account. Nothing trades on it
+     until live trading is on for them; until then they follow the paper results. The key is
+     accepted only if Bybit itself
      reports (`/v5/user/query-api`) that it is Read-Write with SpotTrade, has **no** Wallet
      permissions (no withdrawals or transfers), **no** contract, derivatives or options rights,
      and is bound to the server's IP. Keys that fail
@@ -54,7 +54,7 @@ account and decide who may use real money.
      and types `I accept real-money risk`.
 
    Turning it **off** is one click and instant. No new real-money trades, the agent sells
-   everything it bought on the real account, then the account goes back to demo trading. The
+   everything it bought on the real account, then the account goes back to paper (no orders). The
    account's kill switch, removing the real-account key, your "Stop live" and disabling the
    account all switch it off the same way.
 
@@ -83,7 +83,7 @@ docker compose run --rm collector users add you@example.com             # create
 All of these must be true. Each one is checked before every order:
 
 1. The platform's live lock in `.env` is open (`AITRADER_MODE=live`, `AITRADER_LIVE_UNLOCKED=true`,
-   confirmation phrase). While it is closed, every user trades on Bybit Demo Trading, whatever they chose.
+   confirmation phrase). While it is closed, nothing is sent to any user's Bybit account, whatever they chose.
 2. The go/no-go gate passed and you approved the strategy (`golive approve`); approval breaks
    if the strategy or the AI model changes.
 3. You allowed live for that user.

@@ -1,4 +1,4 @@
-"""Order executor for the testnet and the live pilot (roadmap Phases 5 and 6).
+"""Order executor for the live pilot (roadmap Phase 6), on the real Bybit account.
 
 The paper service (``learn paper``) decides: it finds signals, applies the AI filter and the
 calendar, and manages each trade with the backtest's rules. The executor mirrors those decisions
@@ -15,9 +15,9 @@ with real orders on one exchange:
 
 Safety and failure handling:
 
-- Orders go through the exchange adapter, which refuses real-money orders unless the live lock
-  is open (``safety.assert_live_allowed``) and testnet orders unless ``AITRADER_MODE=testnet``.
-  Live mode also needs ``live_guard`` (the Phase 6 go/no-go approval) to pass for the strategy.
+- Orders go through the exchange adapter, which refuses every order unless the live lock is
+  open (``safety.assert_live_allowed``). The executor also needs ``live_guard`` (the Phase 6
+  go/no-go approval) to pass for the strategy.
 - Each order carries a client id derived from the signal, and is written to the state file before
   it is sent, so a timeout or a restart can't buy twice: the next tick looks the id up first.
 - Pause and kill come from ``trade.control``. Kill sells everything this executor bought.
@@ -62,9 +62,9 @@ class Executor:
                  pilot_max_usdt: float | None = None, quote: str = "USDT",
                  max_signal_age_bars: int = 2, paper_stale_s: float = 300, clock=time.time,
                  prices=None, price_max_age: float = 10.0):
-        if mode not in ("testnet", "live"):
-            raise ValueError("mode must be testnet or live (paper trading is `learn paper`)")
-        if mode == "live" and live_guard is None:
+        if mode != "live":
+            raise ValueError("mode must be live (paper trading is `learn paper`)")
+        if live_guard is None:
             raise ValueError("live mode needs the go/no-go guard")
         self.adapter, self.mode, self.exchange = adapter, mode, exchange
         self.paper_state_path = paper_state_path
@@ -191,7 +191,7 @@ class Executor:
             except Exception as exc:
                 if type(exc).__name__ != "BadSymbol":
                     raise
-                # a pair may not be listed on this exchange (or its demo): skip, don't fail the tick
+                # a pair may not be listed on this exchange: skip, don't fail the tick
                 self._skip(mark, key, f"{symbol} isn't listed on {self.exchange} {self.mode}", out)
                 continue
             price = book.best_ask

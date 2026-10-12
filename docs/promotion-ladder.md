@@ -3,7 +3,7 @@
 Every strategy the agent knows sits on one rung of this ladder (master prompt, section 11):
 
 ```
-RESEARCH -> BACKTESTED -> OUT-OF-SAMPLE VALIDATED -> PAPER/DEMO -> SHADOW MONITORED
+RESEARCH -> BACKTESTED -> OUT-OF-SAMPLE VALIDATED -> PAPER -> SHADOW MONITORED
          -> LIVE-ELIGIBLE -> LIVE ENABLED WITH EXPLICIT APPROVAL
 
 off the ladder: REJECTED, UNDER REVIEW, RETIRED
@@ -21,8 +21,8 @@ The dashboard's strategy list and `aitrader learn list` show each strategy's run
 
 | Rung | Kept in | Set by |
 |---|---|---|
-| RESEARCH, BACKTESTED, OUT-OF-SAMPLE VALIDATED, PAPER/DEMO, REJECTED, UNDER REVIEW, RETIRED | the strategy registry (`data/learn/registry.json`, field `status`) | the backtest gate (`learn test`), the paper service, `learn retire`, `learn paper-all` |
-| SHADOW MONITORED | read from `data/trade/testnet_state.json` | the demo executor (`trade run --mode testnet`) |
+| RESEARCH, BACKTESTED, OUT-OF-SAMPLE VALIDATED, PAPER, REJECTED, UNDER REVIEW, RETIRED | the strategy registry (`data/learn/registry.json`, field `status`) | the backtest gate (`learn test`), the paper service, `learn retire`, `learn paper-all` |
+| SHADOW MONITORED | counted from `data/learn/paper_state.json` | the paper service |
 | LIVE-ELIGIBLE | read from `data/golive/report.json` | the go/no-go gate (`golive check`) |
 | LIVE ENABLED | read from `data/golive/approval.json`, checked by `GoLive.guard` | only you, with `golive approve --strategy <id> --by <name>` |
 
@@ -79,7 +79,7 @@ The report also gives the 95th-percentile longest losing streak, for information
 
 Fail on any of these: REJECTED.
 
-### PAPER/DEMO (final holdout, then paper trading)
+### PAPER (final holdout, then paper trading)
 
 The final 20% of history is run only after everything above has passed, and only to confirm:
 
@@ -96,11 +96,11 @@ trades and its average is below 0R.
 
 ### SHADOW MONITORED
 
-The strategy's paper decisions are mirrored with real orders on Bybit demo trading (the executor
-in `testnet` mode), and every closed demo trade is compared with its paper twin: the R difference
-and the entry and exit slippage. The rung is shown once the strategy has a demo trade open or
-closed; the dashboard shows the average R difference against paper, and the weekly report
-(`aitrader report weekly`) shows the slippage.
+The strategy has at least 30 closed paper trades on real Bybit prices (the same count the go/no-go
+gate asks of each strategy). The dashboard shows its paper average in R next to its out-of-sample
+backtest, so a strategy whose paper results drift away from the backtest stands out. (This rung
+used to mean trades on Bybit demo trading, which was removed because it isn't offered in every
+country.)
 
 ### LIVE-ELIGIBLE
 
@@ -113,17 +113,17 @@ The Phase 6 go/no-go gate (`aitrader golive check`) passed with this strategy se
 - paper drawdown at most 10R (the live loss limit)
 - paper and backtest expectancy within 0.15R of each other
 - 14 days of paper service without a crash or a heartbeat gap over 30 minutes
-- trade-only API keys confirmed, and the kill switch tested on testnet within 30 days
+- trade-only API keys confirmed, and the kill switch tested within 30 days
 
-The gate itself does not require demo trades for each strategy. Run the demo executor first so
-the strategy reaches SHADOW MONITORED before you consider approving it.
+Paper trading fills orders on this server, so the first real orders are the live pilot's: start
+it with a small budget.
 
 ### LIVE ENABLED WITH EXPLICIT APPROVAL
 
 You run `aitrader golive approve --strategy <id> --by <name>` for one or two strategies after reading the
 gate report and the risk settings. The approval re-runs the gate and is refused if it fails. It is
 tied to the strategies' rules and the active AI model: if either changes, the strategy drops back
-to LIVE-ELIGIBLE or PAPER/DEMO on the ladder and the live executor stops entering for it. The
+to LIVE-ELIGIBLE or PAPER on the ladder and the live executor stops entering for it. The
 live monitor sends trading back to paper when live drawdown passes 10R or live results fall more
 than 0.3R per trade below paper after 20 live trades. Live trading stays off by default.
 
@@ -151,14 +151,14 @@ Older registry files used four statuses. They are read without any manual step:
 |---|---|
 | `candidate` | `research` |
 | `rejected` | `rejected` |
-| `paper` | `paper` (PAPER/DEMO) |
+| `paper` | `paper` (PAPER) |
 | `retired` | `retired` |
 
 The new name is written back the next time the registry is saved. History entries keep the names
-they were written with. A strategy that passed the old gate keeps its PAPER/DEMO status; its stored
+they were written with. A strategy that passed the old gate keeps its PAPER status; its stored
 backtest has no walk-forward, Monte Carlo or holdout result until it is tested again
 (`learn test <id>`).
 
 `learn paper-all` (the dashboard's "turn paper trading on") still moves untested, rejected and
-under-review strategies to paper so they can be watched. The ladder shows those as PAPER/DEMO
+under-review strategies to paper so they can be watched. The ladder shows those as PAPER
 with the note "did not pass the backtest gate", and they can't go further up.

@@ -1,5 +1,4 @@
 import json
-import os
 
 import numpy as np
 import pandas as pd
@@ -307,21 +306,23 @@ def test_ladder_reads_shadow_eligible_and_approval_from_evidence(tmp_path):
     reg.add(Entry(id="rv", kind="rule", name="rv", status="under_review"))
     reg.save()
 
+    paper_state = str(tmp_path / "paper_state.json")
+
     def states():
-        ev = Evidence(golive, trade, reg_path, models)
+        ev = Evidence(golive, trade, reg_path, models, paper_state)
         return {e.id: ladder_state(e, ev)[0] for e in Registry(reg_path).entries.values()}
 
     assert set(states().values()) == {"paper", "under_review"}
-    os.makedirs(trade)
-    with open(os.path.join(trade, "testnet_state.json"), "w") as fh:
-        json.dump({"closed": [{"entry_id": "s", "r": 0.5, "paper_r": 0.6}], "positions": {}}, fh)
+    with open(paper_state, "w") as fh:  # 30 paper trades put "s" on the shadow rung; 29 don't for "p"
+        json.dump({"trades": [{"entry_id": "s", "r": 0.1}] * 30 + [{"entry_id": "p", "r": 0.1}] * 29}, fh)
     gl = GoLive(root=golive, registry_path=reg_path, models_dir=models)
     gl._save("report.json", {"passed": True, "strategies": ["el", "ap"]})
     gl._save("approval.json", {"by": "me", **gl._fingerprint(["ap"])})
     got = states()
     assert got == {"p": "paper", "s": "shadow", "el": "live_eligible", "ap": "live_enabled",
                    "untested": "paper", "rv": "under_review"}
-    assert "-0.100R" in ladder_state(Registry(reg_path).get("s"), Evidence(golive, trade, reg_path, models))[1]
+    note = ladder_state(Registry(reg_path).get("s"), Evidence(golive, trade, reg_path, models, paper_state))[1]
+    assert note == "paper: 30 closed, +0.100R per trade (backtest +0.200R)"
     assert label("live_enabled").startswith("LIVE ENABLED") and label("oos_validated") == "OUT-OF-SAMPLE VALIDATED"
     # the approval stops counting once the rules change, as golive's guard says
     reg = Registry(reg_path)

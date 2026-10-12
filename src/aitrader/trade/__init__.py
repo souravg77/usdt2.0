@@ -1,4 +1,4 @@
-"""Phases 5 and 6: real orders on the testnet and, after the go/no-go gate, the live pilot.
+"""Phase 6: after the go/no-go gate, the live pilot on the real Bybit account.
 
 - ``control``: pause and kill switch shared by every service
 - ``risk``: position sizing and loss caps every order goes through
