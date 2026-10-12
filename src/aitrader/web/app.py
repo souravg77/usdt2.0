@@ -49,6 +49,7 @@ class Paths:
     events: str = "data/ops/events.jsonl"
     users_dir: str = "data/users"
     keys_store: str = "data/settings/keys.enc"
+    report: str = "data/reports/backtest.json"
 
 
 def create_app(settings: Settings, auth: Auth, jobs: JobRunner, paths: Paths | None = None,
@@ -146,9 +147,12 @@ def create_app(settings: Settings, auth: Auth, jobs: JobRunner, paths: Paths | N
         return resp
 
     from .market_pages import add_market_routes
+    from .report_pages import add_report_routes
     from .settings_pages import add_settings_routes
 
     add_market_routes(app, settings=settings, page=page, guard=guard, live=live)
+    add_report_routes(app, settings=settings, auth=auth, jobs=jobs, page=page, guard=guard,
+                      report_path=paths.report)
 
     add_settings_routes(app, settings=settings, auth=auth, paths=paths, jobs=jobs,
                         keys_secret=keys_secret, page=page, guard=guard, checkers=checkers)
@@ -364,7 +368,8 @@ paper trading. Nothing trades real money.</p>
     return app
 
 
-NAV = [("/", "Overview"), ("/markets", "Markets"), ("/trading", "Trading"), ("/books", "Submit a book"),
+NAV = [("/", "Overview"), ("/markets", "Markets"), ("/trading", "Trading"), ("/reports", "Reports"),
+       ("/books", "Submit a book"),
        ("/admin/users", "Users"), ("/settings", "Settings")]
 
 
@@ -770,13 +775,14 @@ tr:last-child td{border-bottom:none}
 pre{background:var(--card);border:1px solid var(--line);padding:14px;border-radius:var(--radius);overflow-x:auto;
 white-space:pre-wrap;word-break:break-word}
 code{background:var(--card2);border:1px solid var(--line);border-radius:5px;padding:1px 5px;font-size:.9em}
-.row{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}
+.row{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}form.row{align-items:center}
+.row select{width:auto;margin-top:0}.row>label{margin:0}
 form.kill{margin-top:14px;border-top:1px solid var(--line);padding-top:10px}ul.gate{padding-left:0;list-style:none;margin:8px 0}
 .chart svg{width:100%;height:180px;display:block}.chart svg.candles{height:auto}
 .switch{font-size:1.1em}.switch.on b{color:var(--bad)}
 .good{color:var(--good)}.bad{color:var(--bad)}.warn{color:var(--warnc)}.stack{margin:12px 0}.muted{color:var(--muted)}
 .small{font-size:.85em}.pill{border:1px solid var(--line);border-radius:99px;padding:1px 8px;font-size:.85em}
-.badge{display:inline-block;font-size:.75em;font-weight:600;padding:2px 8px;border-radius:99px;
+.badge{display:inline-block;white-space:nowrap;font-size:.75em;font-weight:600;padding:2px 8px;border-radius:99px;
 background:var(--card2);border:1px solid var(--line);color:var(--muted)}
 .badge.good{color:var(--good);border-color:color-mix(in srgb,var(--good) 40%,transparent)}
 .badge.bad{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 40%,transparent)}
