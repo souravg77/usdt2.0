@@ -194,7 +194,7 @@ def add_settings_routes(app, *, settings, auth, paths, jobs, keys_secret: str, p
                      'here. Run the installer again (it creates one), or add it by hand.</p>')
         body += "<h2>API keys</h2><p class=muted>Saved keys are encrypted on the server and never " \
                 "shown again (only dots and their last 4 characters). Leave a box empty to keep the " \
-                "saved key; \"Test saved key\" checks it again without typing it. A key saved here " \
+                "saved key; \"Check and save\" with empty boxes checks the saved key again. A key saved here " \
                 "replaces the same key in .env.</p>"
         for group, title, help_text in GROUPS:
             fields = [f for f in secrets.FIELDS if f.group == group]
