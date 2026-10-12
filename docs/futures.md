@@ -43,6 +43,31 @@ tracks spot closely and the small gap is not modelled.
 - A short is taken only when its stop is at most **halfway to the liquidation price** (with
   Bybit's 0.5% maintenance margin). At 1x that is up to +49% above the entry; at 3x up to +16%.
 
+## Mark price, index price, basis and the real liquidation price
+
+`data/derivs.py` reads the perpetual's own numbers (public data, no key):
+
+- **Last**: the perpetual's last trade. **Index**: Bybit's average of spot prices on several
+  exchanges. **Mark**: what Bybit liquidates on and values open P&L with; it follows the index,
+  so a wick on one exchange doesn't liquidate anyone.
+- **Basis** = (last - index) / index; **mark premium** = (mark - index) / index.
+- **Funding** rate, its yearly equivalent, the time to the next payment, and open interest.
+
+`aitrader context derivs` prints them for your pairs. The WebSocket version is
+`BybitLinearStream` (the public linear stream, same reconnect and staleness rules as spot).
+
+On the live executor:
+
+- A short's resting stop triggers on the **mark price** (`triggerBy: MarkPrice`), the same
+  price Bybit liquidates on, so a wick in the last price can't fire it early.
+- Every minute it reads Bybit's own liquidation price for each open short. If the mark is within
+  3% of it, or the stop is no longer at most halfway from entry to it, trading **halts** (see
+  [Safety halt](live-trading.md#safety-halt-automatic)).
+- When a short closes, the funding Bybit settled while it was open (the account's SETTLEMENT
+  rows) is taken off its P&L and shown as `funding_usdt`.
+- The account must be in **One-Way** position mode; in Hedge mode every short is skipped with
+  "switch BTC/USDT:USDT to One-Way position mode".
+
 ## What runs where
 
 | | Status |
@@ -62,8 +87,11 @@ tracks spot closely and the small gap is not modelled.
 3. Optional: `AITRADER_LEVERAGE=2` (or 3) in `.env`. The agent sets that leverage on each
    perpetual before its first order.
 
+4. Bybit app: **Derivatives → position mode → One-Way** (the default).
+
 The kill switch buys back every short as well as selling every spot coin. Funding is settled by
-Bybit on the open position and is not in the executor's per-trade P&L.
+Bybit on the open position; the executor reads it back when the short closes and takes it off
+that trade's P&L.
 
 Bybit offers derivatives only in some countries; check that your account can trade USDT
 perpetuals before relying on the live part.

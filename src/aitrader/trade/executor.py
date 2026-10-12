@@ -37,7 +37,10 @@ Safety and failure handling:
   (b) the account holds less than the ledger says (checked after a restart and every
       ``RECHECK_S``), or
   (c) the price stream for a coin with an open position has been quiet for ``feed_halt_s()``, or
-  (d) ``HALT_AFTER_FAILURES`` ticks in a row failed.
+  (d) ``HALT_AFTER_FAILURES`` ticks in a row failed, or
+  (e) a short is within ``LIQ_HALT_DISTANCE`` of Bybit's own liquidation price, or its stop is
+      no longer at most halfway from entry to that price (checked every ``LIQ_CHECK_S`` on the
+      mark price, the price Bybit liquidates on).
   Resting stops and exits are left alone: the halt only stops new risk.
 """
 
@@ -51,6 +54,7 @@ import os
 import time
 from datetime import datetime, timezone
 
+from ..data import derivs
 from ..models import TIMEFRAME_MS, OrderStatus, OrderType, Side
 from ..ops import EventLog, Heartbeat
 from . import futures
@@ -65,6 +69,8 @@ DISCONNECT_AFTER = 3  # consecutive failed ticks before a disconnect alert
 STOP_GRACE_S = 120  # an open position must have a confirmed resting stop by then
 RECHECK_S = 300  # how often the account is compared with the ledger
 HALT_AFTER_FAILURES = 5  # consecutive failed ticks that halt new entries
+LIQ_CHECK_S = 60  # how often open shorts are compared with Bybit's liquidation price
+LIQ_HALT_DISTANCE = 0.03  # a short this close (3% of the mark price) to liquidation halts
 
 
 def feed_halt_s() -> float:
@@ -416,7 +422,7 @@ class Executor:
         avg = order.average or order.price
         fee_quote = await self._fee_in_quote(order, avg)
         share = order.filled / p["amount"] if p["amount"] else 1.0
-        if _short(p):  # sold at entry, bought back at avg; funding is settled by Bybit separately
+        if _short(p):  # sold at entry, bought back at avg; funding is added when the short is done
             pnl = (p["entry"] - avg) * order.filled - fee_quote - p.get("entry_fee", 0.0) * min(share, 1.0)
         else:
             proceeds = avg * order.filled - fee_quote
@@ -432,11 +438,15 @@ class Executor:
             return
         # what is left (if anything) is dust the exchange won't take as an order: the trade is done
         pnl += p.get("realized", 0.0)
+        funding = await self._funding(p, exit_ts) if _short(p) else 0.0
+        pnl -= funding
         row = {k: p.get(k) for k in ("key", "entry_id", "symbol", "timeframe", "signal_ts", "entry",
                                       "entry_ts", "stop", "risk_usdt", "ai_prob", "exit_reason")}
         row.update(exit=avg, exit_ts=exit_ts, amount=p["amount"], pnl_usdt=round(pnl, 6),
                    r=round(pnl / p["risk_usdt"], 4) if p["risk_usdt"] else 0.0, mode=self.mode,
                    side="sell" if _short(p) else "buy")
+        if _short(p):
+            row["funding_usdt"] = round(funding, 6)
         row.update(self._twin(p, avg))
         self.state["closed"].append(row)
         del self.state["positions"][key]
@@ -624,6 +634,48 @@ class Executor:
                                  + ", ".join(quiet), out)
             elif not quiet:
                 self.state["feed_halted"] = False
+        if (getattr(self.adapter, "perp_position_info", None) is not None
+                and now - self.state.get("liq_at", 0) >= LIQ_CHECK_S):
+            self.state["liq_at"] = now
+            for key, p in list(self.state["positions"].items()):
+                if p["status"] == "open" and _short(p) and not p.get("halted_liq"):
+                    await self._check_liquidation(key, p, out)
+
+    async def _check_liquidation(self, key: str, p: dict, out: dict) -> None:
+        try:
+            info = await self.adapter.perp_position_info(_market(p))
+        except Exception as exc:  # reported; the next check tries again
+            self.events.emit("error", f"{self.mode}: couldn't read the {_market(p)} position: "
+                             f"{type(exc).__name__}: {exc}", level="warning", key=key)
+            return
+        mark, liq = info.get("mark"), info.get("liq_price")
+        if not liq:
+            return
+        p.update(mark=mark, liq_price=liq)
+        dist = derivs.liquidation_distance(mark, liq, short=True)
+        why = None
+        if dist is not None and dist < LIQ_HALT_DISTANCE:
+            why = (f"{key} is {dist:.1%} from liquidation (mark {mark:g}, Bybit liquidates at {liq:g})")
+        elif p.get("stop") and not derivs.stop_inside_liquidation(p["entry"], p["stop"], liq, short=True):
+            why = (f"{key}'s stop {p['stop']:g} is more than halfway from entry {p['entry']:g} to "
+                   f"Bybit's liquidation price {liq:g}")
+        if why:
+            p["halted_liq"] = True  # once per position
+            await self._halt(why, out)
+
+    async def _funding(self, p: dict, exit_ts: int) -> float:
+        """USDT the funding settlements cost this short while it was open (Bybit settles them in
+        the wallet, so the fill prices don't show them). 0 when the adapter can't tell."""
+        reader = getattr(self.adapter, "funding_paid", None)
+        if reader is None:
+            return 0.0
+        try:
+            paid = await reader(_market(p), int(p.get("entry_ts") or exit_ts))
+        except Exception as exc:
+            self.events.emit("error", f"{self.mode}: couldn't read funding for {p.get('key')}: "
+                             f"{type(exc).__name__}: {exc}", level="warning", key=p.get("key"))
+            return 0.0
+        return float(paid or 0.0)
 
     async def _halt(self, why: str, out: dict) -> None:
         """Stop new risk until a person resumes: pause entries, cancel entries still waiting,

@@ -76,7 +76,9 @@ it holds:
   every 5 minutes);
 - the Bybit price stream has been quiet for 2 minutes on a coin with an open position
   (`AITRADER_FEED_HALT_S`, at least 30 seconds);
-- 5 executor passes in a row failed.
+- 5 executor passes in a row failed;
+- a short is within 3% of Bybit's own liquidation price (mark price), or its stop is no longer at
+  most halfway from entry to that price (checked every minute).
 
 On a halt, entry orders still waiting are cancelled; resting stops and exits are left alone, so
 open positions stay protected. The dashboard shows **SAFETY HALT** with the reason. Check the
