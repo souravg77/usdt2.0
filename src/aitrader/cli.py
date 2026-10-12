@@ -653,11 +653,14 @@ def cmd_learn(s: Settings, args) -> int:
         reg.save()
         print(f"{e.id} retired")
         return 0
+    if cmd in ("teach", "teach-on", "teach-off"):
+        return _teach(s, args, reg, exchanges, symbols, cfg)
     if cmd == "paper":
         from .events import CalendarFilter
         from .news import NewsFilter
 
         from .ai import LiveFilter
+        from .learn.teacher import TeacherFilter
 
         from .ops import EventLog
         from .trade import Control
@@ -676,7 +679,8 @@ def cmd_learn(s: Settings, args) -> int:
                              ai_filter=None if args.no_ai else LiveFilter(args.models),
                              control=Control(os.path.join(TRADE_DIR, "control.json")),
                              context=context, events=EventLog(service="paper"),
-                             news=None if args.no_news else NewsFilter())
+                             news=None if args.no_news else NewsFilter(),
+                             teacher=None if args.no_teacher else TeacherFilter(args.teacher_dir))
         try:
             if args.once:
                 print(trader.tick())
@@ -686,6 +690,67 @@ def cmd_learn(s: Settings, args) -> int:
             store.close()
         return 0
     raise RuleError(f"unknown learn command {cmd}")
+
+
+def _teach(s: Settings, args, reg, exchanges, symbols, cfg) -> int:
+    """``learn teach`` / ``teach-on`` / ``teach-off``: the backtest teacher (learn/teacher.py)."""
+    from .learn import make_strategy
+    from .learn.teacher import Teacher, collect, describe, teach
+    from .ops import EventLog
+
+    teacher = Teacher(args.dir, events=EventLog(service="cli"))
+    if args.learn_cmd == "teach-on":
+        try:
+            t = teacher.turn_on(args.by)
+        except ValueError as exc:
+            print(f"not turned on: {exc}", file=sys.stderr)
+            return 1
+        print(f"paper trading now follows lessons {t['version']}; `learn teach-off` stops it")
+        return 0
+    if args.learn_cmd == "teach-off":
+        teacher.turn_off(args.by or "")
+        print("paper trading no longer follows the teacher's lessons")
+        return 0
+    entries = (list(reg.entries.values()) if args.all else reg.with_status("paper", "retired"))
+    strategies = []
+    for e in entries:
+        try:
+            strategies.append((e.id, make_strategy(e)))
+        except Exception as exc:  # one broken entry must not stop the lesson
+            print(f"  skipping {e.id}: {exc}", file=sys.stderr)
+    if not strategies:
+        print("no strategies to learn from: start paper trading first, or pass --all", file=sys.stderr)
+        return 1
+    store = CandleStore(s.db_path)
+    try:
+        frame = collect(store, strategies, exchanges, symbols, cfg)
+    finally:
+        store.close()
+    if frame.empty:
+        print("no backtest signals: download history first (`aitrader download`)", file=sys.stderr)
+        return 1
+    result = teach(frame)
+    teacher.save_candidate(result)
+    w, f = result["check"]["without"], result["check"]["with"]
+    c = result["counts"]
+    print(f"lessons {result['version']}: {result['signals']} backtest signals from {len(strategies)} strategies "
+          f"(learned on {result['learn_signals']}, checked on {result['check_signals']} they never saw)")
+    print(f"  {c['trade']} situations to trade, {c['avoid']} to avoid, {c['unproven']} unproven; "
+          f"1R profit-take helps in {result['exit_1r']}")
+    print(f"  unseen part without lessons: {w['trades']} trades, win rate {w['win_rate'] or 0:.0%}, "
+          f"{w['expectancy_r'] or 0:+.3f}R per trade")
+    print(f"  unseen part with lessons:    {f['trades']} trades, win rate {f['win_rate'] or 0:.0%}, "
+          f"{f['expectancy_r'] or 0:+.3f}R per trade")
+    if result["passed"]:
+        print("PASSED: turn it on from the dashboard (Trading page) or `aitrader learn teach-on --by <name>`")
+    else:
+        print(f"not usable: {result['why']}")
+    best = sorted(((sid, key, x) for sid, by in result["lessons"].items() for key, x in by.items()
+                   if x["verdict"] == "trade"), key=lambda t: -t[2]["own"]["shrunk_r"])[:10]
+    for sid, key, x in best:
+        print(f"  {sid:36} {describe(key):42} {x['own']['trades']:4d} trades "
+              f"{x['own']['expectancy_r']:+.3f}R" + ("  (take profit at 1R)" if x["exit_1r"] else ""))
+    return 0
 
 
 def _filter_strategies(reg, use_all: bool) -> list:
@@ -1405,6 +1470,17 @@ def build_parser() -> argparse.ArgumentParser:
     lx = le_sub.add_parser("retire", help="stop paper-trading a strategy")
     lx.add_argument("id")
     lx.add_argument("--reason")
+    lte = le_sub.add_parser("teach", help="backtest teacher: learn which market situations (trend, volatility, "
+                                          "volume) each strategy wins and loses in, check it on unseen data")
+    lte.add_argument("--all", action="store_true", help="every strategy in the registry, not only the ones "
+                                                       "paper trading or retired after paper")
+    lte.add_argument("--dir", default="data/learn/teacher")
+    lton = le_sub.add_parser("teach-on", help="paper trading follows the newest lessons (they must pass the check)")
+    lton.add_argument("--by", required=True)
+    lton.add_argument("--dir", default="data/learn/teacher")
+    ltoff = le_sub.add_parser("teach-off", help="paper trading stops following the lessons")
+    ltoff.add_argument("--by")
+    ltoff.add_argument("--dir", default="data/learn/teacher")
     lp = le_sub.add_parser("paper", help="service: paper-trade every strategy that passed")
     lp.add_argument("--interval", type=float, default=60)
     lp.add_argument("--once", action="store_true")
@@ -1413,6 +1489,8 @@ def build_parser() -> argparse.ArgumentParser:
     lp.add_argument("--no-ai", action="store_true", help="ignore the active AI trade filter")
     lp.add_argument("--models", default="data/ai/models", help="trade-filter model registry folder")
     lp.add_argument("--no-context", action="store_true", help="ignore the market-context filter")
+    lp.add_argument("--no-teacher", action="store_true", help="ignore the backtest teacher's lessons")
+    lp.add_argument("--teacher-dir", default="data/learn/teacher")
 
     sub.add_parser("migrate", help="bring the database schema up to date")
     bk = sub.add_parser("backup", help="copy the database and registries into a folder")

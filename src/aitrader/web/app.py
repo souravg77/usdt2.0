@@ -55,6 +55,7 @@ class Paths:
     pairs: str = "data/pairs/ranking.json"
     changes: str = "data/changes"
     feed: str = "data/ops/feed.json"
+    teacher: str = "data/learn/teacher"
 
 
 def create_app(settings: Settings, auth: Auth, jobs: JobRunner, paths: Paths | None = None,
@@ -313,6 +314,11 @@ paper trading. Nothing trades real money.</p>
     add_monitor_routes(app, settings=settings, page=page, guard=guard, auth=auth, paths=paths,
                        csrf=lambda token: _csrf(auth, token), control=_control, **(monitor or {}))
 
+    from .teacher_pages import add_teacher_routes
+
+    add_teacher_routes(app, settings=settings, page=page, guard=guard, auth=auth, paths=paths,
+                       csrf=lambda token: _csrf(auth, token), jobs=jobs, exchange=EXCHANGE)
+
     @app.get("/trading")
     async def trading(request: Request, msg: str = ""):
         user, token, redirect = guard(request)
@@ -503,7 +509,7 @@ paper trading. Nothing trades real money.</p>
 
 
 NAV = [("/", "Overview"), ("/markets", "Markets"), ("/pairs", "Pairs"), ("/trading", "Trading"), ("/monitor", "Monitor"),
-       ("/replay", "Replay"),
+       ("/replay", "Replay"), ("/teacher", "Teacher"),
        ("/news", "News"), ("/research", "Research"), ("/reports", "Reports"), ("/books", "Submit a book"), ("/changes", "Change requests"), ("/admin/users", "Users"),
        ("/settings", "Settings")]
 
