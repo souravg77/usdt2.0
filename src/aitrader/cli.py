@@ -283,6 +283,44 @@ async def cmd_context(s: Settings, args) -> int:
         ctx.close()
 
 
+def cmd_news(s: Settings, args) -> int:
+    """News and web search: free feeds plus Claude's web-search brief (see aitrader.news)."""
+    import time
+
+    from .news import NewsFilter, load_latest, update
+    from .ops import EventLog
+    from .ops.secrets import apply_to_env
+
+    symbols = args.symbol or s.symbols
+    if args.news_cmd in ("update", "run"):
+        events = EventLog(service="news")
+        hours = args.every_hours or float(os.environ.get("AITRADER_NEWS_EVERY_HOURS", "4") or 4)
+        while True:
+            apply_to_env()  # a key saved on the Settings page is used from the next run on
+            out = update(symbols, events=events, max_searches=args.max_searches)
+            b = out["brief"]
+            print(f"news: market risk {b['market_risk']}, {b['searches']} web searches" if b
+                  else f"news: feeds saved, no AI brief ({out['brief_error']})", flush=True)
+            if args.news_cmd == "update":
+                return 0 if b else 1
+            time.sleep(max(0.5, hours) * 3600)
+    latest = load_latest()
+    if not latest:
+        print("no news yet: run `aitrader news update`")
+        return 1
+    b = latest.get("brief")
+    if not b:
+        print(f"no AI brief: {latest.get('brief_error')}")
+    else:
+        print(f"market risk {b['market_risk']}: {b['market_risk_why']}\n{b['summary']}")
+        for p in b["pairs"]:
+            print(f"  {p['symbol']:10} risk {p['risk']:8} demand {p['demand']:7} sentiment {p['sentiment']:+.2f}  {p['why']}")
+    for sym in symbols:
+        d = NewsFilter().decide(sym)
+        print(f"{sym}: new buys {'allowed' if d.allow_entries else 'PAUSED'}, size x{d.size_multiplier:g}")
+    return 0
+
+
 def cmd_kb(_s: Settings, args) -> int:
     from .knowledge import DEFAULT_INDEX, KnowledgeBase, build_index
 
@@ -441,6 +479,7 @@ def cmd_learn(s: Settings, args) -> int:
         return 0
     if cmd == "paper":
         from .events import CalendarFilter
+        from .news import NewsFilter
 
         from .ai import LiveFilter
 
@@ -459,7 +498,8 @@ def cmd_learn(s: Settings, args) -> int:
                              calendar=None if args.no_calendar else CalendarFilter(),
                              ai_filter=None if args.no_ai else LiveFilter(args.models),
                              control=Control(os.path.join(TRADE_DIR, "control.json")),
-                             context=context, events=EventLog(service="paper"))
+                             context=context, events=EventLog(service="paper"),
+                             news=None if args.no_news else NewsFilter())
         try:
             if args.once:
                 print(trader.tick())
@@ -1034,6 +1074,13 @@ def build_parser() -> argparse.ArgumentParser:
     bt.add_argument("--months", type=int, default=12, help="months of the results calendar to print")
     bt.add_argument("--final", action="store_true", help="also run the untouched final test period")
 
+    nw = sub.add_parser("news", help="world and crypto news: feeds plus the AI's web-search brief")
+    nw.add_argument("news_cmd", choices=["update", "run", "show"])
+    nw.add_argument("--symbol", action="append")
+    nw.add_argument("--every-hours", type=float, default=None,
+                    help="for run: hours between briefs (default AITRADER_NEWS_EVERY_HOURS or 4)")
+    nw.add_argument("--max-searches", type=int, default=None, help="web searches per brief (default 6)")
+
     ca = sub.add_parser("calendar", help="show upcoming high-impact events and the current decision")
     ca.add_argument("--hours", type=float, default=72)
 
@@ -1090,6 +1137,7 @@ def build_parser() -> argparse.ArgumentParser:
     lp.add_argument("--interval", type=float, default=60)
     lp.add_argument("--once", action="store_true")
     lp.add_argument("--no-calendar", action="store_true", help="ignore the economic calendar filter")
+    lp.add_argument("--no-news", action="store_true", help="ignore the AI news filter")
     lp.add_argument("--no-ai", action="store_true", help="ignore the active AI trade filter")
     lp.add_argument("--models", default="data/ai/models", help="trade-filter model registry folder")
     lp.add_argument("--no-context", action="store_true", help="ignore the market-context filter")
@@ -1220,6 +1268,7 @@ def main(argv: list[str] | None = None) -> int:
         "backtest": cmd_backtest,
         "calendar": cmd_calendar,
         "context": cmd_context,
+        "news": cmd_news,
         "kb": cmd_kb,
         "learn": cmd_learn,
         "ai": cmd_ai,

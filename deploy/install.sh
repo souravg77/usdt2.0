@@ -139,7 +139,7 @@ grep -q '^AITRADER_LIVE_UNLOCKED=true' .env && echo "NOTE: live trading is unloc
 say "Building and starting (the first build takes a few minutes)"
 $DOCKER compose build
 $DOCKER compose run --rm -T collector migrate
-$DOCKER compose up -d collector context paper web
+$DOCKER compose up -d collector context news paper web
 # The testnet trader (fake money) runs too: it waits until testnet keys are saved on the Settings
 # page. Telegram and user accounts are restarted on the new code only if they were running.
 # The live pilot (real money) is never started or restarted from here.

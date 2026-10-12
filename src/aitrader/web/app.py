@@ -50,6 +50,7 @@ class Paths:
     users_dir: str = "data/users"
     keys_store: str = "data/settings/keys.enc"
     report: str = "data/reports/backtest.json"
+    news: str = "data/news"
 
 
 def create_app(settings: Settings, auth: Auth, jobs: JobRunner, paths: Paths | None = None,
@@ -147,12 +148,14 @@ def create_app(settings: Settings, auth: Auth, jobs: JobRunner, paths: Paths | N
         return resp
 
     from .market_pages import add_market_routes
+    from .news_pages import add_news_routes
     from .report_pages import add_report_routes
     from .settings_pages import add_settings_routes
 
     add_market_routes(app, settings=settings, page=page, guard=guard, live=live)
     add_report_routes(app, settings=settings, auth=auth, jobs=jobs, page=page, guard=guard,
                       report_path=paths.report)
+    add_news_routes(app, settings=settings, auth=auth, jobs=jobs, page=page, guard=guard, news_dir=paths.news)
 
     add_settings_routes(app, settings=settings, auth=auth, paths=paths, jobs=jobs,
                         keys_secret=keys_secret, page=page, guard=guard, checkers=checkers)
@@ -368,9 +371,8 @@ paper trading. Nothing trades real money.</p>
     return app
 
 
-NAV = [("/", "Overview"), ("/markets", "Markets"), ("/trading", "Trading"), ("/reports", "Reports"),
-       ("/books", "Submit a book"),
-       ("/admin/users", "Users"), ("/settings", "Settings")]
+NAV = [("/", "Overview"), ("/markets", "Markets"), ("/trading", "Trading"), ("/news", "News"),
+       ("/reports", "Reports"), ("/books", "Submit a book"), ("/admin/users", "Users"), ("/settings", "Settings")]
 
 
 def max_val(v) -> int:
