@@ -32,7 +32,14 @@ in-sample part. `--final` runs the final period; treat that result as the one th
 
 Walk-forward (`aitrader.backtest.walk_forward`) optimises on a training window, tests on the next
 window and rolls forward. `sensitivity` moves every parameter by ±20% to show whether a result
-depends on exact values.
+depends on exact values. `monte_carlo` redraws a trade sequence many times with a fixed seed and
+gives the 95th-percentile drawdown and the chance a run of trades ends below zero. The backtest
+gate for agent-drafted strategies uses all three steps, plus the final holdout, in the order and
+with the thresholds in [promotion-ladder.md](promotion-ladder.md).
+
+Besides expectancy, win rate, profit factor and drawdown, `metrics` reports per-trade Sharpe and
+Sortino (in R, not annualised: trades are irregular in time), the trades it took to recover from
+the worst drawdown, and the costs per trade split into fees, slippage and funding.
 
 ## Rejection rules (from the roadmap)
 

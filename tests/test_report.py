@@ -94,10 +94,14 @@ def test_reports_page_shows_saved_report(tmp_path, monkeypatch):
     client, _runner, paths = app_client(tmp_path, monkeypatch)
     store, last = store_with_history(tmp_path)
     good = Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR))
-    save_report(backtest_report([good], store, ["binance"], ["BTC/USDT"], years=5, now_ms=last), paths.report)
+    rep = backtest_report([good], store, ["binance"], ["BTC/USDT"], years=5, now_ms=last)
+    save_report(rep, paths.report)
     store.close()
     client.post("/login", data={"user": "admin", "password": PW})
     page = client.get("/reports").text
     assert "Strategies tested" in page and "up_bar" in page and "<th>2023</th>" in page
+    a = rep["strategies"][0]["all"]  # the robust numbers sit next to the old ones
+    assert "Sharpe / Sortino" in page and f'{a["sharpe"]:+.2f} / {a["sortino"]:+.2f}' in page
+    assert f'{a["fee_r"]:.3f} / {a["slippage_r"]:.3f}' in page and a["fee_r"] > 0 and a["slippage_r"] > 0
     r = client.get("/reports/backtest.json")
     assert r.status_code == 200 and r.json()["strategies"][0]["id"] == "up"

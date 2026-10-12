@@ -16,11 +16,17 @@ book (PDF) ──read──> draft strategies ──backtest gate──> paper t
    trade, and anything else is rejected. Broken specs get one repair round, then are dropped.
 3. **Backtest.** `aitrader learn test` runs each new strategy on every stored market for its
    timeframes, with fees and slippage, on the in-sample (first 60%) and out-of-sample (next 20%)
-   periods. The last 20% stays untouched. To pass, a strategy needs at least 50 in-sample and
+   periods. To pass, a strategy needs at least 50 in-sample and
    30 out-of-sample trades, a positive in-sample result, at least +0.05R per trade out of sample,
    an out-of-sample average at least 2 standard errors above zero (t >= 2: dozens of strategies
    are tested, so some look good by luck), a profit factor of at least 1.1 and a drawdown under
-   15R. Failures are kept with the reasons. "Turn paper trading on" on the dashboard (or
+   15R. It must also hold up walk-forward (most of 6 rolling unseen windows above 0R after costs)
+   and in a Monte Carlo stress test of its out-of-sample trades (95th-percentile drawdown over 100
+   trades at most 15R, at most a 15% chance those 100 trades end below zero). Only then is the
+   untouched last 20% run, once, as a final holdout (at least 20 trades, above 0R); a strategy
+   that fails only the holdout goes to "under review" instead of paper. Every number, and the
+   rung each test leads to, is in [promotion-ladder.md](promotion-ladder.md). Failures are kept
+   with the reasons. "Turn paper trading on" on the dashboard (or
    `learn paper-all`) also paper-trades the ones that failed, but only strategies that passed
    this gate can be approved for live, and each one needs its own paper record (at least 30
    trades, above 0R) on top of the combined go/no-go numbers.
@@ -33,7 +39,8 @@ book (PDF) ──read──> draft strategies ──backtest gate──> paper t
    history.
 
 There is no automatic step to real money. The registry has no "live" status; going live stays
-behind the Phase 6 go/no-go gate and the three-setting live lock.
+behind the Phase 6 go/no-go gate, your approval and the three-setting live lock. Where each
+strategy stands on the way there is its rung on the [promotion ladder](promotion-ladder.md).
 
 ## Strategies already read from the books
 
@@ -54,7 +61,7 @@ aitrader learn read data/books/my-book.pdf --test   # draft strategies, then bac
 aitrader learn add-library --test                   # the 54 strategies already read from Shawn's books
 aitrader learn add-builtin                          # also run the hand-coded strategies through the gate
 aitrader learn test                                 # backtest anything still untested
-aitrader learn list                                 # every strategy: status, backtest and paper results
+aitrader learn list                                 # every strategy: ladder rung, backtest and paper results
 aitrader learn show <id>                            # full rules, sources, results and history
 aitrader learn retire <id>                          # stop paper-trading one by hand
 aitrader learn paper --once                         # one paper pass (the service runs this every minute)

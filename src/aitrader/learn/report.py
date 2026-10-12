@@ -2,8 +2,9 @@
 
 Unlike the backtest gate (``lab.evaluate``), which keeps the last 20% of history untouched to
 judge a strategy, this report runs each strategy over the whole window to show its track record:
-trades, win rate, average result per trade (R), profit factor, worst drawdown, and the same for
-each calendar year, pair and timeframe. Costs (fees and slippage) are included.
+trades, win rate, average result per trade (R), profit factor, worst drawdown and the trades it
+took to recover, per-trade Sharpe and Sortino, and the same for each calendar year, pair and
+timeframe. Costs (fees and slippage) are included, and their share per trade is shown apart.
 
 Results are in R, the amount risked per trade. "At 1% risk" turns R into USDT for a 10,000 USDT
 account risking 1% (100 USDT) per trade, without compounding.
@@ -124,7 +125,10 @@ def _m(trades: list) -> dict:
     return {"trades": out["trades"], "wins": int(round(out["win_rate"] * out["trades"])),
             "win_rate": round(out["win_rate"] * 100, 1), "expectancy_r": round(out["expectancy_r"], 3),
             "profit_factor": None if pf == float("inf") else round(pf, 2),
-            "max_drawdown_r": round(out["max_drawdown_r"], 1), "total_r": round(out["total_r"], 1)}
+            "max_drawdown_r": round(out["max_drawdown_r"], 1), "total_r": round(out["total_r"], 1),
+            "sharpe": round(out["sharpe"], 3), "sortino": round(out["sortino"], 3),
+            "recovery_trades": out["recovery_trades"], "fee_r": round(out["fee_r_per_trade"], 4),
+            "slippage_r": round(out["slippage_r_per_trade"], 4)}
 
 
 def _verdict(m: dict, good_years: int, years: int) -> str:
