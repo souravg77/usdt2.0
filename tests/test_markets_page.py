@@ -86,6 +86,7 @@ def test_markets_page_loads_the_live_chart(world):
     js = client.get("/static/market.js")
     assert js.status_code == 200 and js.headers["content-type"].startswith("text/javascript")
     assert "POLL_MS = 1500" in js.text
+    assert "FETCH_MS" in js.text and "STUCK_MS" in js.text  # a request that never answers can't stop updates
     r = client.get("/markets?symbol=<script>&tf=9y")  # unknown values fall back, never echoed
     assert "<script>" not in r.text.replace('<script src="/static/market.js" defer></script>', "")
 

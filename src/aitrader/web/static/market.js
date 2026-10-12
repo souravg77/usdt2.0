@@ -7,7 +7,7 @@
   var root = document.getElementById("market");
   if (!root) return;
   var state = { symbol: root.dataset.symbol, tf: root.dataset.tf, candles: [], hover: null,
-                last: null, lastOk: 0, busy: false, source: "", studies: null, polls: 0 };
+                last: null, lastOk: 0, busy: false, busySince: 0, source: "", studies: null, polls: 0 };
   var POLL_MS = 1500, STUDY_EVERY = 2;  // indicators refresh every 2nd poll (3 seconds)
   var PANEL_H = 84;
   var COLORS = { ema20: "#f5c542", ema50: "#4cc3ff", ema200: "#c084fc", bb: "#94a3b8", vwap: "#f472b6",
@@ -72,37 +72,72 @@
 
   // ---- data -----------------------------------------------------------------------------------
 
+  // A request that never answers (the phone slept, the network switched) must not stop the updates:
+  // each one gives up after FETCH_MS, and a poll stuck longer than STUCK_MS is let go.
+  var FETCH_MS = 6000, STUCK_MS = 15000, RELOAD_AFTER_MS = 60000;
+
   function get(url) {
-    return fetch(url, { credentials: "same-origin", cache: "no-store" }).then(function (r) {
-      if (r.status === 401) { location.href = "/login"; throw new Error("signed out"); }
-      if (!r.ok) throw new Error("HTTP " + r.status);
-      return r.json();
+    var ctl = window.AbortController ? new AbortController() : null;
+    var timer;
+    var timeout = new Promise(function (_ok, fail) {
+      timer = setTimeout(function () { if (ctl) ctl.abort(); fail(new Error("timed out")); }, FETCH_MS);
     });
+    var req = fetch(url, { credentials: "same-origin", cache: "no-store", signal: ctl ? ctl.signal : undefined })
+      .then(function (r) {
+        if (r.status === 401) { location.href = "/login"; throw new Error("signed out"); }
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.json();
+      });
+    return Promise.race([req, timeout]).then(
+      function (v) { clearTimeout(timer); return v; },
+      function (e) { clearTimeout(timer); throw e; });
   }
 
   function poll() {
-    if (state.busy || document.hidden) return;
+    if (document.hidden) return;
+    if (state.busy && Date.now() - state.busySince < STUCK_MS) return;
     state.busy = true;
+    state.busySince = Date.now();
     var sym = state.symbol, tf = state.tf, q = "?symbol=" + encodeURIComponent(sym) + "&tf=" + encodeURIComponent(tf);
     var wantStudies = !state.studies || state.polls % STUDY_EVERY === 0;
     state.polls += 1;
-    Promise.all([
+    var started = state.busySince;
+    // the price cards and the chart update on their own: one failing doesn't hold up the other
+    var cards = get("/api/market/tickers").then(function (res) {
+      renderTickers(res.tickers || []);
+      state.tickerSource = res.source;
+      state.lastOk = Date.now();
+    });
+    var chart = Promise.all([
       get("/api/market/candles" + q),
-      get("/api/market/tickers"),
       wantStudies ? get("/api/market/studies" + q).catch(function () { return null; }) : null
     ]).then(function (res) {
       if (sym === state.symbol && tf === state.tf) {
         state.candles = res[0].candles || [];
         state.source = res[0].source;
         state.note = res[0].note || "";
-        if (res[2]) state.studies = res[2];
+        if (res[1]) state.studies = res[1];
+        state.lastOk = Date.now();
+        draw();
       }
-      renderTickers(res[1].tickers || []);
-      state.tickerSource = res[1].source;
-      state.lastOk = Date.now();
-      draw();
-    }).catch(function () { /* status line shows the age of the last good update */ })
-      .then(function () { state.busy = false; status(); });
+    });
+    function done() {
+      if (state.busySince === started) state.busy = false;  // a newer poll may have taken over
+      status();
+    }
+    Promise.all([cards.catch(function () {}), chart.catch(function () {})]).then(done, done);
+  }
+
+  // last resort: nothing good for a minute while the page is open and online, so start the page
+  // afresh (at most every 2 minutes, so a server that is down isn't reloaded over and over)
+  function selfHeal() {
+    if (document.hidden || !state.lastOk || navigator.onLine === false) return;
+    if (Date.now() - state.lastOk < RELOAD_AFTER_MS) return;
+    var last = 0;
+    try { last = +sessionStorage.getItem("aitrader.marketReload") || 0; } catch (e) { last = 0; }
+    if (Date.now() - last < 2 * RELOAD_AFTER_MS) return;
+    try { sessionStorage.setItem("aitrader.marketReload", String(Date.now())); } catch (e) { /* private window */ }
+    location.reload();
   }
 
   function status() {
@@ -501,11 +536,16 @@
   canvas.addEventListener("touchmove", pointer, { passive: true });
   canvas.addEventListener("mouseleave", function () { state.hover = null; draw(); });
   window.addEventListener("resize", resize);
-  document.addEventListener("visibilitychange", function () { if (!document.hidden) poll(); });
+  function wake() { state.busy = false; poll(); }  // back from sleep or another tab: poll at once
+  document.addEventListener("visibilitychange", function () { if (!document.hidden) wake(); });
+  window.addEventListener("pageshow", wake);
+  window.addEventListener("online", wake);
+  window.addEventListener("focus", wake);
 
   root.classList.add("js");
   resize();
   poll();
   setInterval(poll, POLL_MS);
   setInterval(status, 1000);
+  setInterval(selfHeal, 5000);
 })();
