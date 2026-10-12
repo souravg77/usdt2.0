@@ -47,7 +47,7 @@ def world(tmp_path, monkeypatch):
     env = tmp_path / ".env"
     env.write_text("x=1\n")
     env.chmod(0o600)
-    settings = Settings(db_path=str(data / "aitrader.db"))
+    settings = Settings(db_path=str(data / "aitrader.db"), symbols=["BTC/USDT"])
 
     def check(**kw):
         return run_checks(kw.pop("settings", settings), root=str(tmp_path), env_file=str(env), now=NOW)
@@ -67,6 +67,18 @@ def test_doctor_healthy_install_passes(world):
     lv = _levels(checks)
     assert lv["live lock"] == PASS and lv["database schema"] == PASS and lv["candles"] == PASS
     assert lv["service paper"] == PASS and lv["strategies"] == PASS and lv["backups"] == PASS
+    assert "pairs without prices" not in lv
+
+
+def test_doctor_names_pairs_without_prices_and_ignores_retired_services(world):
+    check, root, _env = world
+    with open(root / "data" / "ops" / "events.jsonl", "a") as fh:  # demo trading's last beat, long ago
+        fh.write(json.dumps({"kind": "heartbeat", "service": "executor-testnet", "ts": int(NOW * 1000) - 9 * 3_600_000}) + "\n")
+    checks = check(settings=Settings(db_path=str(root / "data" / "aitrader.db"), symbols=["BTC/USDT", "XYZ/USDT"]))
+    msgs = {name: (level, msg) for level, name, msg in checks}
+    assert msgs["pairs without prices"][0] == WARN and "XYZ/USDT" in msgs["pairs without prices"][1]
+    assert "BTC/USDT" not in msgs["pairs without prices"][1]
+    assert "service executor-testnet" not in msgs and msgs["service paper"][0] == PASS
 
 
 def test_doctor_flags_unsafe_and_broken_setups(world, monkeypatch):

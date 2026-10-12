@@ -17,6 +17,7 @@ import time
 
 PASS, WARN, FAIL = "PASS", "WARN", "FAIL"
 HEARTBEAT_STALE_MIN = 15
+RETIRED_SERVICES = {"executor-testnet"}  # Bybit demo trading was removed
 
 
 def _env(name: str) -> str:
@@ -113,6 +114,7 @@ def run_checks(settings, root: str = ".", env_file: str = ".env", now: float | N
             add(PASS if version == SCHEMA_VERSION else FAIL, "database schema",
                 f"v{version}" if version == SCHEMA_VERSION else f"v{version}, code expects v{SCHEMA_VERSION}: run aitrader migrate")
             row = con.execute("SELECT MAX(ts), COUNT(DISTINCT symbol) FROM candles").fetchone()
+            have = {r[0] for r in con.execute("SELECT DISTINCT symbol FROM candles")}
             con.close()
             if row[0] is None:
                 add(WARN, "candles", "no candles yet: run aitrader download (see the guide)")
@@ -120,6 +122,10 @@ def run_checks(settings, root: str = ".", env_file: str = ".env", now: float | N
                 age_h = (now * 1000 - row[0]) / 3_600_000
                 add(PASS if age_h < 3 else WARN, "candles",
                     f"{row[1]} symbols, newest {age_h:.1f} h old" + ("" if age_h < 3 else ": is the collector running?"))
+                missing = [sym for sym in settings.symbols if sym not in have]
+                if missing:
+                    add(WARN, "pairs without prices", f"{', '.join(missing)}: probably not listed on Bybit spot; "
+                        "remove them from AITRADER_SYMBOLS in .env or replace them")
         except sqlite3.Error as exc:
             add(FAIL, "database", f"can't read {db}: {exc}")
 
@@ -146,6 +152,8 @@ def run_checks(settings, root: str = ".", env_file: str = ".env", now: float | N
     if not last:
         add(WARN, "services", "no heartbeats yet: is the paper service running?")
     for svc, ts in sorted(last.items()):
+        if svc in RETIRED_SERVICES:
+            continue  # its old heartbeats stay in the log; it isn't meant to run any more
         mins = (now - ts) / 60
         add(PASS if mins <= HEARTBEAT_STALE_MIN else WARN, f"service {svc}",
             f"alive {mins:.0f} min ago" if mins <= HEARTBEAT_STALE_MIN else f"last heartbeat {mins:.0f} min ago: stopped?")
