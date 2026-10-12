@@ -124,3 +124,61 @@ def test_live_market_shares_one_request(tmp_path):
 
     out = asyncio.run(many())
     assert len(fake.calls) == 1 and all(o is out[0] for o in out)
+
+
+def test_market_studies_line_up_with_the_candles_and_show_paper_trades(world, monkeypatch):
+    import aitrader.web.market_pages as mp
+    from aitrader.web.studies import compute
+
+    client, fake, clock = world
+    assert client.get("/api/market/studies?symbol=BTC/USDT").status_code == 401
+    login(client)
+    r = client.get("/api/market/studies?symbol=BTC/USDT&tf=1m").json()
+    assert r["ts"] == [c[0] for c in client.get("/api/market/candles?symbol=BTC/USDT&tf=1m").json()["candles"]]
+    assert set(r["overlays"]) >= {"ema20", "ema200", "bb_upper", "vwap", "supertrend", "span_a", "psar"}
+    assert set(r["panels"]) >= {"rsi", "macd", "macd_hist", "adx", "stoch_k"}
+    assert all(len(v) == len(r["ts"]) for v in [*r["overlays"].values(), *r["panels"].values()])
+    assert r["overlays"]["ema20"] == [None, None, None]  # warming up: no made-up values
+    assert r["trades"] == {"open": [], "closed": []}  # no paper trader yet
+
+    calls = []
+    monkeypatch.setattr(mp, "compute", lambda rows, tail=0: calls.append(1) or compute(rows, tail))
+    client.get("/api/market/studies?symbol=BTC/USDT&tf=1h")
+    client.get("/api/market/studies?symbol=BTC/USDT&tf=1h")
+    assert len(calls) == 1  # recomputed only when a candle changes
+
+    # same formulas as the strategies, on enough candles to warm up
+    rows = [[i * 60_000, 100 + i % 7, 102 + i % 7, 98 + i % 7, 101 + i % 5, 10] for i in range(300)]
+    s = compute(rows, tail=50)
+    assert len(s["overlays"]["ema200"]) == 50 and s["overlays"]["ema200"][-1] is not None
+    assert 0 <= s["panels"]["rsi"][-1] <= 100 and s["levels"]
+
+
+def test_paper_trades_for_one_pair(tmp_path):
+    import json
+
+    from aitrader.web.studies import paper_trades
+
+    path = tmp_path / "paper.json"
+    path.write_text(json.dumps({
+        "open": {"a|bybit|BTC/USDT|1h": {"entry_id": "a", "filled": True, "entry_ts": 5, "entry": 100,
+                                         "signal": {"side": "buy", "stop": 95, "target": 110}},
+                 "b|bybit|BTC/USDT|1h": {"entry_id": "b", "filled": False, "signal": {"stop": 1}},
+                 "c|bybit|ETH/USDT|1h": {"entry_id": "c", "filled": True, "signal": {}}},
+        "trades": [{"key": "short-a|bybit|BTC/USDT|15m", "entry_id": "short-a", "side": "sell", "entry_ts": 1,
+                    "entry": 100, "exit_ts": 2, "exit": 98, "r": 0.4},
+                   {"key": "c|bybit|ETH/USDT|1h", "entry_id": "c", "entry_ts": 1, "exit_ts": 2, "r": 1}]}))
+    out = paper_trades(str(path), "BTC/USDT")
+    assert out["open"] == [{"strategy": "a", "side": "buy", "entry_ts": 5, "entry": 100, "stop": 95,
+                            "target": 110, "mark_r": None}]
+    assert [t["strategy"] for t in out["closed"]] == ["short-a"] and out["closed"][0]["side"] == "sell"
+    assert paper_trades(str(tmp_path / "missing.json"), "BTC/USDT") == {"open": [], "closed": []}
+
+
+def test_markets_page_has_indicator_switches(world):
+    client, _, _ = world
+    login(client)
+    r = client.get("/markets?symbol=BTC/USDT&tf=1h")
+    for key in ("ema", "bb", "vwap", "st", "ich", "psar", "sr", "trades", "vol", "rsi", "macd", "adx", "stoch"):
+        assert f'data-study="{key}"' in r.text
+    assert "place orders" in r.text

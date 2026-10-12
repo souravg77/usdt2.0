@@ -18,18 +18,21 @@ from ..config import EXCHANGE
 from ..data.store import CandleStore
 from .app import _e, _q
 from .live import LiveMarket
+from .studies import compute, paper_trades
 
 CHART_TIMEFRAMES = ["1m", "5m", "15m", "1h", "4h", "1d"]
 TF_MS = {"1m": 60_000, "5m": 300_000, "15m": 900_000, "30m": 1_800_000, "1h": 3_600_000,
          "4h": 14_400_000, "1d": 86_400_000}
 BARS = 120
+STUDY_BARS = 250  # indicator values sent to the chart (it shows at most ~200 candles)
 DAY_MS = 86_400_000
 STATIC = os.path.join(os.path.dirname(__file__), "static")
 
 
 def add_market_routes(app, *, settings, page, guard, exchange: str = EXCHANGE, clock=None,
-                      live: LiveMarket | None = None) -> None:
+                      live: LiveMarket | None = None, paper_state: str = "") -> None:
     live = live or LiveMarket(settings.db_path, exchange)
+    memo: dict[tuple, tuple[tuple, dict]] = {}  # (symbol, tf) -> (candle fingerprint, studies)
     symbols = list(settings.symbols)
     tfs = CHART_TIMEFRAMES
 
@@ -48,6 +51,23 @@ def add_market_routes(app, *, settings, page, guard, exchange: str = EXCHANGE, c
             return bad
         symbol, tf = pick(symbol, tf)
         return JSONResponse({"symbol": symbol, "tf": tf, **await live.candles(symbol, tf)})
+
+    @app.get("/api/market/studies")
+    async def api_studies(request: Request, symbol: str = "", tf: str = "15m"):
+        """Indicators for the same candles /api/market/candles returns, plus the paper trader's
+        trades on this pair. Recomputed only when a candle changed."""
+        bad = api_guard(request)
+        if bad:
+            return bad
+        symbol, tf = pick(symbol, tf)
+        data = await live.candles(symbol, tf)
+        rows = data.get("candles") or []
+        mark = (len(rows), tuple(rows[0]) if rows else (), tuple(rows[-1]) if rows else ())
+        hit = memo.get((symbol, tf))
+        if hit is None or hit[0] != mark:
+            hit = memo[(symbol, tf)] = (mark, compute(rows, tail=STUDY_BARS))
+        return JSONResponse({"symbol": symbol, "tf": tf, "ts": [r[0] for r in rows[-STUDY_BARS:]], **hit[1],
+                             "trades": paper_trades(paper_state, symbol) if paper_state else {"open": [], "closed": []}})
 
     @app.get("/api/market/tickers")
     async def api_tickers(request: Request):
@@ -86,15 +106,44 @@ def add_market_routes(app, *, settings, page, guard, exchange: str = EXCHANGE, c
             f'<div id="tickers" class="tickers">{_ticker_buttons(rows, symbol)}</div>'
             f'<div class="card chart-card"><div class="chart-head"><h2 id="chart-title">{_e(symbol)}</h2>'
             f'<div class="segs js-only">{tabs}</div></div>'
+            f'<div id="studies" class="studies js-only" aria-label="indicators">{_study_chips()}</div>'
             f'<div id="ohlc" class="ohlc small"></div>'
+            f'<div id="legend" class="legend js-only"></div>'
             f'<canvas id="chart" class="js-only" aria-label="live price chart"></canvas>'
             f'<noscript>{_fallback(symbol, tf, bars)}</noscript></div>'
             '<p class="muted small">Prices and candles come from Bybit\'s public market data '
             '(no key needed) and refresh every 1.5 seconds while this page is open. Times are UTC. '
-            'Hover or touch the chart to read a candle.</p></div>'
+            'Hover or touch the chart to read a candle and its indicators. Indicators use the same '
+            'formulas as the strategies. Triangles are the paper trader\'s entries (up: buy, down: '
+            'short), dots its exits (green: profit, red: loss); an open trade shows its entry, stop '
+            'and target lines. The chart only shows: it can\'t place orders.</p></div>'
             '<script src="/static/market.js" defer></script>')
         status = '<span id="live-status" class="live-status"><span class="dot"></span> Connecting…</span>'
         return page("Markets", body, user, token, head_extra=status)
+
+
+# key, label, colour, panel (drawn below the price) or overlay, on by default
+STUDIES = [
+    ("ema", "EMA 20/50/200", "#f5c542", False, True),
+    ("bb", "Bollinger", "#94a3b8", False, False),
+    ("vwap", "VWAP", "#f472b6", False, False),
+    ("st", "Supertrend", "#22c55e", False, True),
+    ("ich", "Ichimoku", "#38bdf8", False, False),
+    ("psar", "Parabolic SAR", "#fb923c", False, False),
+    ("sr", "Support/resistance", "#a3a3a3", False, False),
+    ("trades", "Agent's trades", "#7aa2ff", False, True),
+    ("vol", "Volume", "#64748b", True, True),
+    ("rsi", "RSI", "#c084fc", True, True),
+    ("macd", "MACD", "#4cc3ff", True, True),
+    ("adx", "ADX", "#f5c542", True, False),
+    ("stoch", "Stoch RSI", "#2dd4bf", True, False),
+]
+
+
+def _study_chips() -> str:
+    return "".join(f'<button type="button" class="chip" data-study="{k}" data-on="{int(on)}" '
+                   f'aria-pressed="{str(on).lower()}"><i style="background:{c}"></i>{_e(label)}</button>'
+                   for k, label, c, _panel, on in STUDIES)
 
 
 def _ticker(db: CandleStore, exchange: str, symbol: str, now: int) -> dict:
