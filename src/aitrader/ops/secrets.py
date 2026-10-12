@@ -45,6 +45,8 @@ FIELDS = [
     Field("TELEGRAM_BOT_TOKEN", "Bot token", "telegram"),
     Field("TELEGRAM_CHAT_ID", "Chat ID", "telegram", secret=False),
     Field("X_BEARER_TOKEN", "Bearer token", "x"),
+    Field("GITHUB_TOKEN", "Fine-grained token (Contents + Pull requests, this repository only)", "github"),
+    Field("GITHUB_REPO", "Repository (owner/name)", "github", secret=False),
 ]
 NAMES = {f.name for f in FIELDS}
 FORBIDDEN = {"AITRADER_MODE", "AITRADER_LIVE_UNLOCKED", "AITRADER_LIVE_CONFIRM"}

@@ -38,6 +38,9 @@ GROUPS = [
      "coin. Read-only: it never posts, likes or follows. At console.x.com create an app, add credits, "
      "then copy the app's Bearer token. X charges per post read; the daily cap is "
      "AITRADER_X_DAILY_READS (800 posts, about 4 USD)."),
+    ("github", "GitHub (change requests)", "Lets the Change requests page open pull requests. On github.com: "
+     "Settings, Developer settings, Fine-grained tokens: only this repository, permissions Contents and "
+     "Pull requests set to Read and write, nothing else. Nothing changes until you merge a pull request."),
 ]
 
 
@@ -105,10 +108,31 @@ def check_x(token: str, opener=urllib.request.urlopen) -> None:
         raise KeyUnverified(f"X didn't confirm the token ({what})") from None
 
 
+def check_github(token: str, repo: str, opener=urllib.request.urlopen) -> None:
+    from ..ops.changes import DEFAULT_REPO
+
+    repo = repo or DEFAULT_REPO
+    req = urllib.request.Request(f"https://api.github.com/repos/{repo}",
+                                 headers={"authorization": f"Bearer {token}", "user-agent": "aitrader",
+                                          "accept": "application/vnd.github+json"})
+    try:
+        with opener(req, timeout=15) as resp:
+            json.loads(resp.read())
+    except Exception as exc:
+        code = getattr(exc, "code", None)
+        if code == 401:
+            raise KeyRejected("GitHub says this token is invalid or expired; create a new fine-grained "
+                              "token") from None
+        if code == 404:
+            raise KeyRejected(f"this token can't see {repo}: give it access to that repository") from None
+        what = f"HTTP {code}" if code else type(exc).__name__
+        raise KeyUnverified(f"GitHub didn't confirm the token ({what})") from None
+
+
 def add_settings_routes(app, *, settings, auth, paths, jobs, keys_secret: str, page, guard,
                         checkers: dict | None = None) -> None:
     checkers = {"anthropic": check_anthropic, "telegram": check_telegram, "bybit": verify_keys, "x": check_x,
-                **(checkers or {})}
+                "github": check_github, **(checkers or {})}
     store_path = getattr(paths, "keys_store", secrets.DEFAULT_PATH)
 
     def store():
@@ -157,6 +181,10 @@ def add_settings_routes(app, *, settings, auth, paths, jobs, keys_secret: str, p
                 if not values["X_BEARER_TOKEN"]:
                     raise ValueError("paste the X Bearer token")
                 await asyncio.to_thread(checkers["x"], values["X_BEARER_TOKEN"])
+            elif group == "github":
+                if not values["GITHUB_TOKEN"]:
+                    raise ValueError("paste the GitHub token")
+                await asyncio.to_thread(checkers["github"], values["GITHUB_TOKEN"], values["GITHUB_REPO"])
             else:
                 testnet = group == "bybit_demo"
                 prefix = "BYBIT_DEMO_API" if testnet else "BYBIT_API"

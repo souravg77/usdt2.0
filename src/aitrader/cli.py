@@ -349,6 +349,19 @@ def cmd_news(s: Settings, args) -> int:
     return 0
 
 
+def cmd_change(s: Settings, args) -> int:
+    """Change requests from the dashboard: Claude writes the change and opens a pull request."""
+    from .ops import changes
+
+    if args.change_cmd == "list":
+        for r in changes.list_requests():
+            print(f"{r['id']} {r['status']:9} {r['pr_url'] or r['error'] or ''}\n    {r['text'][:120]}")
+        return 0
+    req = changes.run_saved(args.id)
+    print(f"change {req['id']}: {req['status']} {req['pr_url'] or req['summary'] or req['error']}")
+    return 0 if req["status"] in ("pr_open", "declined") else 1
+
+
 def cmd_research(s: Settings, args) -> int:
     """Trader-research log (aitrader.news.research). Research input only: never changes trading."""
     import time
@@ -1202,6 +1215,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help="for run: hours between briefs (default AITRADER_NEWS_EVERY_HOURS or 4)")
     nw.add_argument("--max-searches", type=int, default=None, help="web searches per brief (default 6)")
 
+    ch = sub.add_parser("change", help="change requests: Claude writes a change and opens a GitHub pull request")
+    ch_sub = ch.add_subparsers(dest="change_cmd", required=True)
+    ch_sub.add_parser("list", help="every change request with its status")
+    chr_ = ch_sub.add_parser("run", help="run one saved request (the dashboard does this)")
+    chr_.add_argument("id")
+
     rs = sub.add_parser("research", help="trader-research log: public reports on our strategy families "
                                          "(research only, never changes trading)")
     rs.add_argument("research_cmd", choices=["update", "run", "show"])
@@ -1416,6 +1435,7 @@ def main(argv: list[str] | None = None) -> int:
         "context": cmd_context,
         "news": cmd_news,
         "research": cmd_research,
+        "change": cmd_change,
         "kb": cmd_kb,
         "learn": cmd_learn,
         "ai": cmd_ai,
