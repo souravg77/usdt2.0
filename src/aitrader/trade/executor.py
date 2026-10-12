@@ -23,6 +23,8 @@ Safety and failure handling:
 - Pause and kill come from ``trade.control``. Kill sells everything this executor bought.
 - Stale paper signals, exchange errors and disconnects are reported to the event log; new entries
   stop while either is unhealthy, exits keep being tried.
+- With a live price stream (``prices``, the Bybit WebSocket), stops are checked every second
+  between ticks on streamed prices, and a coin whose stream has gone quiet gets no new entry.
 """
 
 from __future__ import annotations
@@ -58,7 +60,8 @@ class Executor:
                  control: Control | None = None, risk: RiskEngine | None = None,
                  events: EventLog | None = None, live_guard=None, monitor=None,
                  pilot_max_usdt: float | None = None, quote: str = "USDT",
-                 max_signal_age_bars: int = 2, paper_stale_s: float = 300, clock=time.time):
+                 max_signal_age_bars: int = 2, paper_stale_s: float = 300, clock=time.time,
+                 prices=None, price_max_age: float = 10.0):
         if mode not in ("testnet", "live"):
             raise ValueError("mode must be testnet or live (paper trading is `learn paper`)")
         if mode == "live" and live_guard is None:
@@ -74,6 +77,7 @@ class Executor:
         self.pilot_max_usdt, self.quote = pilot_max_usdt, quote
         self.max_signal_age_bars, self.paper_stale_s, self.clock = max_signal_age_bars, paper_stale_s, clock
         self.heartbeat = Heartbeat(self.events)
+        self.prices, self.price_max_age = prices, price_max_age
         self.state = {"positions": {}, "closed": [], "orders": [], "skipped": {}, "failures": 0,
                       "disconnected": False, "paper_stale": False, "flattened": False, "checked": False}
         if os.path.exists(self.state_path):
@@ -123,12 +127,41 @@ class Executor:
                 await self.tick()
                 n += 1
                 if stop_after is None or n < stop_after:
-                    await asyncio.sleep(interval)
+                    await self._wait(interval)
         except asyncio.CancelledError:
             raise
         except BaseException as exc:
             self.events.emit("crash", f"{self.mode} executor stopped: {exc!r}", level="error")
             raise
+
+    async def _wait(self, interval: float) -> None:
+        """Sleep until the next tick, waking early when a streamed price reaches a stop."""
+        if self.prices is None:
+            await asyncio.sleep(interval)
+            return
+        end = time.monotonic() + interval
+        while time.monotonic() < end and not self._stop_hit():
+            await asyncio.sleep(min(1.0, max(0.0, end - time.monotonic())))
+
+    def _stop_hit(self) -> bool:
+        for p in self._open():
+            if p["status"] == "open" and not self.prices.stale(p["symbol"], self.price_max_age):
+                bid = self.prices.best_bid(p["symbol"])
+                if bid is not None and bid <= p["stop"]:
+                    return True
+        return False
+
+    def _price_stale(self, symbol: str) -> bool:
+        """The stream covers ``symbol`` but has said nothing for a while: don't trust prices."""
+        return (self.prices is not None and symbol in self.prices.symbols
+                and self.prices.stale(symbol, 3 * self.price_max_age))
+
+    async def _bid(self, symbol: str) -> float | None:
+        if self.prices is not None and not self.prices.stale(symbol, self.price_max_age):
+            bid = self.prices.best_bid(symbol)
+            if bid is not None:
+                return bid
+        return (await self.adapter.get_orderbook(symbol, 5)).best_bid
 
     # ---- entries --------------------------------------------------------------------------------
 
@@ -145,6 +178,9 @@ class Executor:
             if now_ms - sig["ts"] > self.max_signal_age_bars * TIMEFRAME_MS[tf]:
                 self._skip(mark, key, "signal is too old to enter now", out)
                 continue
+            if self._price_stale(symbol):
+                log.info("%s: no fresh streamed price for %s; entry waits", self.mode, symbol)
+                continue  # not a skip: it may still enter once prices flow again
             if self.live_guard is not None:
                 problems = self.live_guard(entry_id)
                 if problems:
@@ -223,7 +259,7 @@ class Executor:
             if paper is not None and (twin is None or twin["signal"]["ts"] != p["signal_ts"]):
                 reason = "paper twin closed"
             else:
-                bid = (await self.adapter.get_orderbook(p["symbol"], 5)).best_bid
+                bid = await self._bid(p["symbol"])
                 if bid is not None and bid <= p["stop"]:
                     reason = f"live price {bid:g} at or below the stop"
             if reason:

@@ -898,12 +898,22 @@ async def _trade_run(s: Settings, args, control) -> int:
                   state_path=os.path.join(TRADE_DIR, f"{mode}_state.json"), strategies=strategies,
                   control=control, risk=RiskEngine(RiskLimits.from_env()), events=events,
                   live_guard=guard, monitor=monitor, pilot_max_usdt=pilot)
+    stream = None
+    if not args.once and args.exchange == "bybit":
+        from .data.bybit_ws import BybitSpotStream
+
+        # streamed prices: stops checked every second, quiet coins get no new entries
+        ex.prices = BybitSpotStream(s.symbols)
+        stream = asyncio.create_task(ex.prices.run())
     try:
         if args.once:
             print(json.dumps(await ex.tick(), indent=1))
         else:
             await ex.run(args.interval)
     finally:
+        if stream is not None:
+            ex.prices.stop()
+            stream.cancel()
         await adapter.close()
     return 0
 

@@ -782,3 +782,32 @@ def test_kill_switch_cancels_resting_stops_and_sells(sx):
     out = run(e.tick())
     assert out["closed"] == [KEY] and e.state["flattened"] and len(adapter.cancels) == 1
     assert all(o.status is not OrderStatus.OPEN for o in adapter.stops.values())
+
+
+# ---- streamed prices (Bybit WebSocket) ----------------------------------------------------------
+
+
+class FakePrices:
+    def __init__(self, symbols=("BTC/USDT",)):
+        self.symbols, self.bid, self.age = list(symbols), {}, {}
+
+    def stale(self, symbol, max_age):
+        return self.age.get(symbol, float("inf")) > max_age
+
+    def best_bid(self, symbol):
+        return self.bid.get(symbol)
+
+
+def test_streamed_price_triggers_the_stop_and_quiet_stream_blocks_entries(ex):
+    make, adapter, *_ = ex
+    prices = FakePrices()
+    e = make(prices=prices)
+    assert run(e.tick())["opened"] == []  # BTC is streamed but nothing has arrived: wait
+    assert not adapter.sent and not e.state["skipped"]  # waiting, not skipped for good
+    prices.age["BTC/USDT"], prices.bid["BTC/USDT"] = 1.0, 100.0
+    assert run(e.tick())["opened"] == [KEY]
+    assert not e._stop_hit()
+    prices.bid["BTC/USDT"] = 94.0  # the order book still says 100: the stream is ahead
+    assert e._stop_hit()
+    out = run(e.tick())
+    assert out["closed"] == [KEY]
