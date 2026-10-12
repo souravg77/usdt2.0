@@ -55,6 +55,7 @@ class TrendPullback(Strategy):
             "Long only. Downtrend (short) signals are off until futures are allowed.",
         ),
     )
+    eligible_regimes = ("trend-up", "uncertain")
 
     @classmethod
     def default_params(cls):
@@ -101,7 +102,7 @@ class TrendPullback(Strategy):
                           "stoch_rsi": float(srsi.iloc[i]),
                           "atr_pct": float(a_pct.iloc[i]) if pd.notna(a_pct.iloc[i]) else float("nan")},
             ))
-        return out
+        return self.regime_filter(df, timeframe, out)
 
 
 class MomentumBreakout(Strategy):
@@ -125,6 +126,7 @@ class MomentumBreakout(Strategy):
             "Day trading's \"quick turnover\" = a time stop of 24 bars in the backtest.",
         ),
     )
+    eligible_regimes = ("trend-up", "range", "uncertain")
 
     @classmethod
     def default_params(cls):
@@ -160,7 +162,7 @@ class MomentumBreakout(Strategy):
                 features={"rsi": float(r.iloc[i]),
                           "vol_ratio": float(df["volume"].iloc[i] / vol_avg.iloc[i])},
             ))
-        return out
+        return self.regime_filter(df, timeframe, out)
 
 
 class BuyTheDip(Strategy):
@@ -185,6 +187,7 @@ class BuyTheDip(Strategy):
             "belongs to the event filter.",
         ),
     )
+    eligible_regimes = ("trend-up", "range", "uncertain")
 
     @classmethod
     def default_params(cls):
@@ -220,7 +223,7 @@ class BuyTheDip(Strategy):
                 features={"rsi": float(r.iloc[i]), "stoch_rsi": float(srsi.iloc[i]),
                           "dip": float(1 - close.iloc[i] / hi.iloc[i])},
             ))
-        return out
+        return self.regime_filter(df, timeframe, out)
 
 
 class BollingerSqueeze(Strategy):
@@ -245,7 +248,10 @@ class BollingerSqueeze(Strategy):
             '"Parabolic SAR as a trailing stop-loss" = exit on a close below the SAR.',
             "Downside breakouts are ignored until shorting is allowed after the pilot.",
         ),
+        regime="Compression in a range or an uptrend, before an expansion (not in a downtrend "
+        "or a high-volatility spike).",
     )
+    eligible_regimes = ("trend-up", "range", "uncertain")
 
     @classmethod
     def default_params(cls):
@@ -288,7 +294,7 @@ class BollingerSqueeze(Strategy):
                           "vol_ratio": float(df["volume"].iloc[i] / vol_avg.iloc[i]),
                           "sar": float(sar.iloc[i])},
             ))
-        return out
+        return self.regime_filter(df, timeframe, out)
 
 
 STRATEGIES: dict[str, type[Strategy]] = {
@@ -299,9 +305,10 @@ STRATEGIES: dict[str, type[Strategy]] = {
 def _register_more() -> None:
     from .divergence import CciDivergence
     from .families import FAMILY_STRATEGIES
+    from .master import MASTER_STRATEGIES
 
     STRATEGIES[CciDivergence.spec.name] = CciDivergence
-    for cls in FAMILY_STRATEGIES:
+    for cls in (*FAMILY_STRATEGIES, *MASTER_STRATEGIES):
         STRATEGIES[cls.spec.name] = cls
 
 

@@ -114,15 +114,102 @@ Notes:
 - `ensemble_vote` gives every family one equal vote. It does not weight members by past results,
   because that would leak the test period into the rule.
 
-### Skipped families and why
+## All 40 master-prompt strategies
 
-| Family (prompt #) | Why it is not coded |
+`strategies/catalog.py` maps every strategy in the master prompt's list to the class that
+implements it. New ones are in `strategies/master.py` (long rules; the short twins trade the
+bearish side) and `strategies/quant.py` (the two-leg ones). Every class answers the same
+interface, defined in `strategies/base.py`:
+
+| Method | What it answers |
 |---|---|
-| Spot/perpetual basis trading (#35) | Needs a short perpetual leg (futures, shorting) |
-| Cross-exchange spread arbitrage (#36) | Needs a second exchange, transfers between venues, and selling inventory on one venue |
-| Pairs trading and cointegration (#37) | Needs a short leg on the other coin |
-| Funding very positive (short side of #33) | Shorting; very positive funding already only cuts or blocks longs in the context filter |
-| Bearish sides of every family above | Covered by the short twins ([futures.md](futures.md)): each long strategy run on the flipped chart (owner decision 2026-10-12, later the same day: add futures) |
+| `generate(df, ...)` | every signal over closed candles (backtest, paper and live all use it) |
+| `entry_signal(df, ...)` | the signal on the newest closed bar, or none |
+| `exit_signal(df, signal)` | "stop", "target", "exit rule: ..." or none, on the newest bar |
+| `invalidation_condition(df, signal)` | the close is through the stop, or the regime is no longer eligible |
+| `calculate_stop_loss(entry, df)` | the strategy's stop for that entry |
+| `eligible_regimes` | the market regimes it may open trades in; signals on other bars are dropped |
+| `no_trade_conditions(df, tf)` | plain-language reasons it must not trade now (missing candles, disorderly ATR, wrong regime, no funding data) |
+
+Regimes come from `market/regime.py` (trend-up, trend-down, range, high-volatility, uncertain).
+Liquidity is judged by the pair ranking and the liquidity check with real order books, so the
+strategy gate never labels a bar low-liquidity. A short twin trades the mirror regimes: a long
+strategy for trend-up becomes a short for trend-down.
+
+Every one of these is an untested candidate until it passes `learn test`; the keep-top step
+(`learn keep-top`) still paper-trades only the best 10-20.
+
+**Trend following**
+
+| # | Strategy | Class | Status | Regimes |
+|---|---|---|---|---|
+| 1 | EMA crossover | `ema_crossover` | trades | trend-up, uncertain |
+| 2 | SMA crossover | `sma_crossover` | trades | trend-up, uncertain |
+| 3 | MACD trend following | `macd_trend` | trades | trend-up, uncertain |
+| 4 | ADX-filtered trend following | `adx_trend` | trades | trend-up, uncertain |
+| 5 | Supertrend following | `supertrend_trend` | trades | trend-up, uncertain |
+| 6 | Ichimoku trend confirmation | `ichimoku_trend` | trades | trend-up, range, uncertain |
+| 7 | Multi-timeframe trend alignment | `mtf_trend_alignment` | trades | trend-up, uncertain |
+| 8 | Donchian trend following | `donchian_trend` | trades | trend-up, range, uncertain |
+
+**Breakout and volatility**
+
+| # | Strategy | Class | Status | Regimes |
+|---|---|---|---|---|
+| 9 | Donchian channel breakout | `donchian_breakout` | trades | trend-up, range, uncertain |
+| 10 | Bollinger Band squeeze breakout | `bollinger_squeeze` | trades | trend-up, range, uncertain |
+| 11 | Keltner Channel breakout | `keltner_breakout` | trades | trend-up, range, uncertain |
+| 12 | Opening-range breakout | `opening_range_breakout` | trades | trend-up, range, uncertain |
+| 13 | Volume-confirmed breakout | `volume_breakout` | trades | trend-up, range, uncertain |
+| 14 | ATR expansion breakout | `atr_expansion_breakout` | trades | trend-up, range, uncertain |
+| 15 | VWAP reclaim or breakdown | `vwap_reclaim` | trades (breakdowns are the short twin) | trend-up, range, uncertain |
+| 16 | Support/resistance breakout and retest | `breakout_retest` | trades | trend-up, range, uncertain |
+
+**Mean reversion**
+
+| # | Strategy | Class | Status | Regimes |
+|---|---|---|---|---|
+| 17 | RSI reversal | `rsi_reversal` | trades | trend-up, range, uncertain |
+| 18 | Stochastic RSI reversal | `stoch_rsi_reversal` | trades | trend-up, range, uncertain |
+| 19 | Bollinger Band mean reversion | `bollinger_mean_reversion` | trades | range, uncertain |
+| 20 | VWAP mean reversion | `vwap_mean_reversion` | trades | range, uncertain |
+| 21 | Moving-average deviation reversion | `ma_deviation_reversion` | trades | trend-up, range, uncertain |
+| 22 | Fibonacci retracement reaction | `fibonacci_reaction` | trades | trend-up, range, uncertain |
+| 23 | Volume-profile value-area reversion | `value_area_reversion` | trades | range, uncertain |
+| 24 | Range-bound support/resistance | `range_support_bounce` | trades | range |
+
+**Momentum and price action**
+
+| # | Strategy | Class | Status | Regimes |
+|---|---|---|---|---|
+| 25 | MACD histogram momentum | `macd_histogram_momentum` | trades | trend-up, range, uncertain |
+| 26 | RSI divergence | `rsi_divergence` | trades | trend-up, range, uncertain |
+| 27 | OBV breakout confirmation | `obv_breakout` | trades | trend-up, range, uncertain |
+| 28 | MFI momentum confirmation | `mfi_momentum` | trades | trend-up, range, uncertain |
+| 29 | CMF buying/selling pressure | `cmf_pressure` | trades | trend-up, range, uncertain |
+| 30 | Candlestick reversal patterns | `candlestick_reversal` | trades | trend-up, range, uncertain |
+| 31 | Market structure | `structure_break` | trades | trend-up, range, uncertain |
+| 32 | Liquidity-sweep reversal | `liquidity_sweep` | trades | trend-up, range, uncertain |
+
+**Crypto-specific and quantitative**
+
+| # | Strategy | Class | Status | Regimes |
+|---|---|---|---|---|
+| 33 | Funding-rate extreme reversal | `funding_extreme_long` | trades (crowded longs (funding very positive) is the short twin) | trend-up, trend-down, range, uncertain |
+| 34 | Funding-rate trend filter | `funding_trend_filter` | trades | trend-up, uncertain |
+| 35 | Spot/perpetual basis trading | `basis_carry` | research only (two legs (spot and perp) must open together) | - |
+| 36 | Cross-exchange spread arbitrage | `cross_exchange_arbitrage` | not possible (needs a second exchange; the platform is Bybit only) | - |
+| 37 | Pairs trading and cointegration | `pairs_trading` | research only (two coins must open together) | - |
+| 38 | Volatility-regime switching | `volatility_regime_switch` | trades | trend-up, trend-down, range, high-volatility, low-liquidity, uncertain |
+| 39 | ML signal classification | `ml_classifier` | trades | trend-up, range, uncertain |
+| 40 | Ensemble voting | `ensemble_vote` | trades | trend-up, range, uncertain |
+
+
+Research only means the class measures the opportunity after all costs (`BasisCarry.evaluate`,
+`BasisCarry.opportunities`, `PairsTrading.analyse` with an Engle-Granger test and an
+Ornstein-Uhlenbeck half-life) but never makes a signal: both legs would have to open and close
+together, and the executor trades one leg at a time with its own stop. Cross-exchange
+arbitrage is recorded as not possible because the platform trades on Bybit only (owner decision).
 
 ## New indicators
 
