@@ -2,7 +2,9 @@
 
 Any service (paper, executor) reads this every tick; the CLI, the dashboard and the Telegram
 bot write it. ``paused`` stops new entries; ``kill`` also tells the executor to cancel every open
-order and sell every position it opened. Both stay set until a person resumes.
+order and sell every position it opened. ``halted`` is a pause the executor sets itself when
+safety can't be checked (a position without its resting stop, the account not matching the
+ledger, the price feed gone quiet); stops stay in place. All stay set until a person resumes.
 """
 
 from __future__ import annotations
@@ -21,9 +23,9 @@ class Control:
     def state(self) -> dict:
         try:
             with open(self.path, encoding="utf-8") as fh:
-                return {"paused": False, "killed": False, "reason": "", **json.load(fh)}
+                return {"paused": False, "killed": False, "halted": False, "reason": "", **json.load(fh)}
         except (OSError, ValueError):
-            return {"paused": False, "killed": False, "reason": "", "since": None, "by": ""}
+            return {"paused": False, "killed": False, "halted": False, "reason": "", "since": None, "by": ""}
 
     @property
     def paused(self) -> bool:
@@ -40,11 +42,24 @@ class Control:
             return s  # keep the first reason
         return self._write({"paused": True, "killed": False, "reason": reason, "by": by})
 
+    @property
+    def halted(self) -> bool:
+        return bool(self.state().get("halted"))
+
+    def halt(self, reason: str, by: str = "") -> dict:
+        """Hard pause: no new entries until a person resumes. A kill already set stays a kill."""
+        s = self.state()
+        if s["killed"]:
+            return s
+        if s.get("halted"):
+            return s  # keep the first reason
+        return self._write({"paused": True, "killed": False, "halted": True, "reason": reason, "by": by})
+
     def kill(self, reason: str = "kill switch", by: str = "") -> dict:
         return self._write({"paused": True, "killed": True, "reason": reason, "by": by})
 
     def resume(self, by: str = "") -> dict:
-        return self._write({"paused": False, "killed": False, "reason": "", "by": by})
+        return self._write({"paused": False, "killed": False, "halted": False, "reason": "", "by": by})
 
     def mark_flattened(self) -> None:
         s = self.state()

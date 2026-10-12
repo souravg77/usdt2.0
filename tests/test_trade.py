@@ -1031,7 +1031,8 @@ def test_bybit_adapter_perp_orders_stops_and_margin_check():
     run(ad.place_stop(PERP, 0.5, 105.04, "ait3", side=Side.BUY))
     args = client.calls[-1]
     assert args[2] == "buy" and args[5] == {"positionIdx": 0, "reduceOnly": True, "triggerPrice": 105.0,
-                                             "triggerDirection": "ascending", "orderLinkId": "ait3"}
+                                             "triggerDirection": "ascending", "triggerBy": "MarkPrice",
+                                             "orderLinkId": "ait3"}
     with pytest.raises(ValueError):  # a spot stop never buys
         run(ad.place_stop("BTC/USDT", 0.5, 105.0, "ait4", side=Side.BUY))
     assert run(ad.perp_position(PERP)) == 0.5

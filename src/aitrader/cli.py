@@ -313,6 +313,8 @@ async def cmd_context(s: Settings, args) -> int:
                 if args.once:
                     return 0
                 await asyncio.sleep(args.interval)
+        if args.context_cmd == "derivs":
+            return await _print_derivs(args.symbol or s.symbols)
         now, symbol = int(time.time() * 1000), (args.symbol or ["BTC/USDT"])[0]
         for ex, sym in dict.fromkeys([(args.exchange, symbol), ("global", "*")]):
             for metric in ("funding_rate", "open_interest", "long_short_ratio", "btc_dominance",
@@ -328,6 +330,35 @@ async def cmd_context(s: Settings, args) -> int:
         return 0
     finally:
         ctx.close()
+
+
+async def _print_derivs(symbols: list[str]) -> int:
+    """Live perpetual readings from Bybit (public data, no key): last, mark and index price,
+    basis, funding and open interest."""
+    from .data.context import make_client
+    from .data.derivs import fetch_snapshot
+
+    client = make_client()
+    try:
+        print(f"{'pair':10} {'last':>12} {'mark':>12} {'index':>12} {'basis':>8} {'funding':>9} "
+              f"{'per year':>9} {'next in':>8} {'open interest':>14}")
+        for sym in symbols:
+            try:
+                d = await fetch_snapshot(client, sym)
+            except Exception as exc:
+                print(f"{sym:10} unavailable: {type(exc).__name__}: {exc}")
+                continue
+
+            def pct(v, digits=3):
+                return "-" if v is None else f"{v * 100:+.{digits}f}%"
+
+            nxt = d.funding_in_s()
+            print(f"{sym:10} {d.last or 0:>12g} {d.mark or 0:>12g} {d.index or 0:>12g} {pct(d.basis):>8} "
+                  f"{pct(d.funding_rate, 4):>9} {pct(d.funding_annualized, 1):>9} "
+                  f"{'-' if nxt is None else f'{nxt / 3600:.1f}h':>8} {d.open_interest or 0:>14g}")
+        return 0
+    finally:
+        await client.close()
 
 
 def cmd_news(s: Settings, args) -> int:
@@ -1281,8 +1312,9 @@ def build_parser() -> argparse.ArgumentParser:
     ca = sub.add_parser("calendar", help="show upcoming high-impact events and the current decision")
     ca.add_argument("--hours", type=float, default=72)
 
-    cx = sub.add_parser("context", help="market context: funding, open interest, total market cap")
-    cx.add_argument("context_cmd", choices=["collect", "show"])
+    cx = sub.add_parser("context", help="market context: funding, open interest, total market cap; "
+                        "derivs: live mark/index price, basis and funding of the perpetuals")
+    cx.add_argument("context_cmd", choices=["collect", "show", "derivs"])
     cx.add_argument("--symbol", action="append")
     cx.add_argument("--exchange", default=EXCHANGE, choices=EXCHANGES, help="for show")
     cx.add_argument("--once", action="store_true", help="collect: one top-up, then exit")
@@ -1465,6 +1497,9 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    from .ops.redact import install
+
+    install()  # no key, signature or signed URL is ever written to a log
     if args.env_file:
         from dotenv import load_dotenv
 

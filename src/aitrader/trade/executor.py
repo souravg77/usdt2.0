@@ -30,6 +30,18 @@ Safety and failure handling:
   stop while either is unhealthy, exits keep being tried.
 - With a live price stream (``prices``, the Bybit WebSocket), stops are checked every second
   between ticks on streamed prices, and a coin whose stream has gone quiet gets no new entry.
+- Safety halt (``Control.halt``): new entries stop, entry orders still waiting are cancelled and
+  an alert goes out, until a person resumes, when
+  (a) an open position has no confirmed stop resting on the exchange ``STOP_GRACE_S`` after it
+      filled,
+  (b) the account holds less than the ledger says (checked after a restart and every
+      ``RECHECK_S``), or
+  (c) the price stream for a coin with an open position has been quiet for ``feed_halt_s()``, or
+  (d) ``HALT_AFTER_FAILURES`` ticks in a row failed, or
+  (e) a short is within ``LIQ_HALT_DISTANCE`` of Bybit's own liquidation price, or its stop is
+      no longer at most halfway from entry to that price (checked every ``LIQ_CHECK_S`` on the
+      mark price, the price Bybit liquidates on).
+  Resting stops and exits are left alone: the halt only stops new risk.
 """
 
 from __future__ import annotations
@@ -42,6 +54,7 @@ import os
 import time
 from datetime import datetime, timezone
 
+from ..data import derivs
 from ..models import TIMEFRAME_MS, OrderStatus, OrderType, Side
 from ..ops import EventLog, Heartbeat
 from . import futures
@@ -53,6 +66,19 @@ log = logging.getLogger(__name__)
 NETWORK_ERRORS = ("NetworkError", "ExchangeNotAvailable", "RequestTimeout", "DDoSProtection",
                   "OnMaintenance", "ConnectionError", "TimeoutError")
 DISCONNECT_AFTER = 3  # consecutive failed ticks before a disconnect alert
+STOP_GRACE_S = 120  # an open position must have a confirmed resting stop by then
+RECHECK_S = 300  # how often the account is compared with the ledger
+HALT_AFTER_FAILURES = 5  # consecutive failed ticks that halt new entries
+LIQ_CHECK_S = 60  # how often open shorts are compared with Bybit's liquidation price
+LIQ_HALT_DISTANCE = 0.03  # a short this close (3% of the mark price) to liquidation halts
+
+
+def feed_halt_s() -> float:
+    """How long the price stream may be quiet on a coin with an open position (AITRADER_FEED_HALT_S)."""
+    try:
+        return max(30.0, float(os.environ.get("AITRADER_FEED_HALT_S", "120")))
+    except ValueError:
+        return 120.0
 
 
 def client_id(mode: str, key: str, signal_ts: int, leg: str) -> str:
@@ -101,7 +127,7 @@ class Executor:
         out = {"opened": [], "closed": [], "skipped": []}
         ctl = self.control.state()
         try:
-            if not self.state["checked"]:
+            if not self.state["checked"] or self.clock() - self.state.get("holdings_at", 0) >= RECHECK_S:
                 await self._check_holdings(out)
             await self._reconcile_pending(out)
             if ctl["killed"]:
@@ -116,6 +142,7 @@ class Executor:
                 if paper is not None and not ctl["paused"]:
                     await self._enter_new(paper, out)
                 await self._arm_stops(out)
+                await self._safety_checks(out)
             await self.record_equity()
             self._check_risk()
             self._healthy()
@@ -395,7 +422,7 @@ class Executor:
         avg = order.average or order.price
         fee_quote = await self._fee_in_quote(order, avg)
         share = order.filled / p["amount"] if p["amount"] else 1.0
-        if _short(p):  # sold at entry, bought back at avg; funding is settled by Bybit separately
+        if _short(p):  # sold at entry, bought back at avg; funding is added when the short is done
             pnl = (p["entry"] - avg) * order.filled - fee_quote - p.get("entry_fee", 0.0) * min(share, 1.0)
         else:
             proceeds = avg * order.filled - fee_quote
@@ -411,11 +438,15 @@ class Executor:
             return
         # what is left (if anything) is dust the exchange won't take as an order: the trade is done
         pnl += p.get("realized", 0.0)
+        funding = await self._funding(p, exit_ts) if _short(p) else 0.0
+        pnl -= funding
         row = {k: p.get(k) for k in ("key", "entry_id", "symbol", "timeframe", "signal_ts", "entry",
                                       "entry_ts", "stop", "risk_usdt", "ai_prob", "exit_reason")}
         row.update(exit=avg, exit_ts=exit_ts, amount=p["amount"], pnl_usdt=round(pnl, 6),
                    r=round(pnl / p["risk_usdt"], 4) if p["risk_usdt"] else 0.0, mode=self.mode,
                    side="sell" if _short(p) else "buy")
+        if _short(p):
+            row["funding_usdt"] = round(funding, 6)
         row.update(self._twin(p, avg))
         self.state["closed"].append(row)
         del self.state["positions"][key]
@@ -556,23 +587,120 @@ class Executor:
                     await self._apply_exit(key, order, out)
 
     async def _check_holdings(self, out: dict) -> None:
-        """After a restart: every open position must still be in the account."""
+        """After a restart and every ``RECHECK_S``: every open position must still be in the
+        account. A shortfall halts trading."""
+        missing: list[str] = []
         for key, p in list(self.state["positions"].items()):
             if p["status"] == "open" and p.get("stop_cid"):
                 await self._stop_fired(key, out, force=True)  # it may have sold while the server was down
         bal = await self.adapter.balance()
+        # positions on the same coin (or the same perpetual) share one balance: compare the totals
+        groups: dict[tuple, list[str]] = {}
         for key, p in self.state["positions"].items():
-            if p["status"] != "open":
+            if p["status"] == "open":
+                groups.setdefault((_short(p), _market(p)), []).append(key)
+        for (short, market), keys in groups.items():
+            held = await self.adapter.perp_position(market) if short else bal.total(market.split("/")[0])
+            expected = sum(self.state["positions"][k]["amount"] for k in keys)
+            if held < expected * 0.98:
+                for key in keys:
+                    self.state["positions"][key]["status"] = "missing"
+                    self.events.emit("error", f"{self.mode}: {key} is in the ledger but the account holds "
+                                     f"{held:g} of the {expected:g} expected on {market}; not managing it "
+                                     "until checked", level="error", key=key)
+                missing.append(f"{market} (ledger {expected:g}, account {held:g})")
+        self.state["checked"], self.state["holdings_at"] = True, self.clock()
+        if missing:
+            await self._halt("the account doesn't match the ledger: " + "; ".join(missing), out)
+
+    # ---- safety halt ----------------------------------------------------------------------------
+
+    async def _safety_checks(self, out: dict) -> None:
+        now = self.clock()
+        if getattr(self.adapter, "place_stop", None) is not None:
+            for key, p in self.state["positions"].items():
+                if (p["status"] == "open" and not p.get("stop_armed") and not p.get("halted_stop")
+                        and now - p.get("entry_ts", now * 1000) / 1000 >= STOP_GRACE_S):
+                    p["halted_stop"] = True  # once per position, so a resume isn't undone at once
+                    await self._halt(f"{key} has no confirmed stop resting on {self.exchange} "
+                                     f"{STOP_GRACE_S}s after it filled", out)
+        if self.prices is not None:
+            quiet = sorted({p["symbol"] for p in self._open() if p["status"] == "open"
+                            and p["symbol"] in self.prices.symbols
+                            and self.prices.stale(p["symbol"], feed_halt_s())})
+            if quiet and not self.state.get("feed_halted"):
+                self.state["feed_halted"] = True  # once per quiet spell
+                await self._halt(f"the price stream has been quiet for over {feed_halt_s():g}s on "
+                                 + ", ".join(quiet), out)
+            elif not quiet:
+                self.state["feed_halted"] = False
+        if (getattr(self.adapter, "perp_position_info", None) is not None
+                and now - self.state.get("liq_at", 0) >= LIQ_CHECK_S):
+            self.state["liq_at"] = now
+            for key, p in list(self.state["positions"].items()):
+                if p["status"] == "open" and _short(p) and not p.get("halted_liq"):
+                    await self._check_liquidation(key, p, out)
+
+    async def _check_liquidation(self, key: str, p: dict, out: dict) -> None:
+        try:
+            info = await self.adapter.perp_position_info(_market(p))
+        except Exception as exc:  # reported; the next check tries again
+            self.events.emit("error", f"{self.mode}: couldn't read the {_market(p)} position: "
+                             f"{type(exc).__name__}: {exc}", level="warning", key=key)
+            return
+        mark, liq = info.get("mark"), info.get("liq_price")
+        if not liq:
+            return
+        p.update(mark=mark, liq_price=liq)
+        dist = derivs.liquidation_distance(mark, liq, short=True)
+        why = None
+        if dist is not None and dist < LIQ_HALT_DISTANCE:
+            why = (f"{key} is {dist:.1%} from liquidation (mark {mark:g}, Bybit liquidates at {liq:g})")
+        elif p.get("stop") and not derivs.stop_inside_liquidation(p["entry"], p["stop"], liq, short=True):
+            why = (f"{key}'s stop {p['stop']:g} is more than halfway from entry {p['entry']:g} to "
+                   f"Bybit's liquidation price {liq:g}")
+        if why:
+            p["halted_liq"] = True  # once per position
+            await self._halt(why, out)
+
+    async def _funding(self, p: dict, exit_ts: int) -> float:
+        """USDT the funding settlements cost this short while it was open (Bybit settles them in
+        the wallet, so the fill prices don't show them). 0 when the adapter can't tell."""
+        reader = getattr(self.adapter, "funding_paid", None)
+        if reader is None:
+            return 0.0
+        try:
+            paid = await reader(_market(p), int(p.get("entry_ts") or exit_ts))
+        except Exception as exc:
+            self.events.emit("error", f"{self.mode}: couldn't read funding for {p.get('key')}: "
+                             f"{type(exc).__name__}: {exc}", level="warning", key=p.get("key"))
+            return 0.0
+        return float(paid or 0.0)
+
+    async def _halt(self, why: str, out: dict) -> None:
+        """Stop new risk until a person resumes: pause entries, cancel entries still waiting,
+        leave resting stops and exits alone, and alert."""
+        self.control.halt(why, by=f"safety halt ({self.mode})")
+        cancelled = await self._cancel_waiting_entries()
+        out.setdefault("halted", []).append(why)
+        self.events.emit("halt", f"{self.mode} HALTED: {why}. New entries are blocked until you press "
+                         f"Resume{f'; {cancelled} waiting entry order(s) cancelled' if cancelled else ''}. "
+                         "Resting stops stay in place.", level="error")
+
+    async def _cancel_waiting_entries(self) -> int:
+        n = 0
+        for key, p in self.state["positions"].items():
+            if p["status"] != "pending_entry":
                 continue
-            if _short(p):
-                held = await self.adapter.perp_position(_market(p))
-            else:
-                held = bal.total(p["symbol"].split("/")[0])
-            if held < p["amount"] * 0.98:
-                p["status"] = "missing"
-                self.events.emit("error", f"{self.mode}: {key} expects {p['amount']:g} but the account "
-                                 f"holds {held:g}; not managing it until checked", level="error", key=key)
-        self.state["checked"] = True
+            try:
+                order = await self.adapter.find_order(p["entry_cid"], _market(p))
+                if order is not None and order.status is OrderStatus.OPEN and not order.filled:
+                    await self.adapter.cancel_order(order.id, _market(p))
+                    n += 1
+            except Exception as exc:  # the halt still stands; the next tick reconciles the order
+                self.events.emit("error", f"{self.mode}: couldn't cancel the waiting entry {key}: "
+                                 f"{type(exc).__name__}: {exc}", level="error", key=key)
+        return n
 
     # ---- helpers --------------------------------------------------------------------------------
 
@@ -643,6 +771,11 @@ class Executor:
                                  f"({self.state['failures']} tries): {exc}", level="error")
         else:
             self.events.emit("error", f"{self.mode} executor: {name}: {exc}", level="error")
+        if self.state["failures"] == HALT_AFTER_FAILURES and not self.control.halted:
+            why = f"{HALT_AFTER_FAILURES} executor passes in a row failed (last: {name}: {exc})"
+            self.control.halt(why, by=f"safety halt ({self.mode})")
+            self.events.emit("halt", f"{self.mode} HALTED: {why}. New entries are blocked until you press "
+                             "Resume. Resting stops stay in place.", level="error")
 
     def _log_order(self, order, p: dict, leg: str) -> None:
         self.state["orders"].append({
