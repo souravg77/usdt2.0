@@ -9,6 +9,7 @@
 #   cron: 30 3 * * * cd ~/AI_crypto_trader && ./deploy/backup.sh >> data/backup.log 2>&1
 #   (install.sh adds this cron line for you)
 set -euo pipefail
+umask 077  # backups hold password hashes and encrypted keys: readable by you only
 cd "$(dirname "$0")/.."
 fromenv() { [ -f .env ] && grep -E "^$1=" .env | tail -n1 | cut -d= -f2- || true; }
 : "${AITRADER_BACKUP_KEEP:=$(fromenv AITRADER_BACKUP_KEEP)}"
@@ -17,6 +18,7 @@ KEEP="${AITRADER_BACKUP_KEEP:-14}"
 STAMP="$(date -u +%Y%m%d-%H%M%S)"
 DEST="data/backups/$STAMP"
 mkdir -p "$DEST"
+chmod 700 data/backups
 ${DOCKER:-docker} compose run --rm -T collector backup "$DEST" >/dev/null
 echo "$(date -u +%FT%TZ) backup written to $DEST"
 ls -1d data/backups/*/ 2>/dev/null | sort | head -n "-$KEEP" | xargs -r rm -rf

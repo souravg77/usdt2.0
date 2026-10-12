@@ -169,16 +169,16 @@ class Executor:
             order = await self.adapter.place_order(symbol, Side.BUY, sizing.units, OrderType.MARKET,
                                                    reason=f"{entry_id}: paper signal {sig['ts']}",
                                                    client_id=cid)
-            self._apply_entry(key, order, out)
+            await self._apply_entry(key, order, out)
 
-    def _apply_entry(self, key: str, order, out: dict) -> None:
+    async def _apply_entry(self, key: str, order, out: dict) -> None:
         p = self.state["positions"][key]
         self._log_order(order, p, "entry")
         if order.filled > 0:
             base = p["symbol"].split("/")[0]
             amount = order.filled - (order.fee if order.fee_currency == base else 0.0)
-            fee_quote = order.fee if order.fee_currency == self.quote else 0.0
             avg = order.average or order.price
+            fee_quote = 0.0 if order.fee_currency == base else await self._fee_in_quote(order, avg)
             p.update(status="open", amount=amount, entry=avg, entry_fee=fee_quote,
                      entry_ts=order.ts or int(self.clock() * 1000), cost=avg * order.filled + fee_quote)
             if order.filled < p["planned_units"] * 0.999:
@@ -216,7 +216,16 @@ class Executor:
                 if bid is not None and bid <= p["stop"]:
                     reason = f"live price {bid:g} at or below the stop"
             if reason:
-                await self._exit(key, reason, out)
+                await self._guarded_exit(key, reason, out)
+
+    async def _guarded_exit(self, key: str, reason: str, out: dict) -> None:
+        """One position's failed sell must not stop the others (or the kill switch) from selling."""
+        try:
+            await self._exit(key, reason, out)
+        except Exception as exc:
+            # a sell that may have reached the exchange stays pending_exit: the next tick looks it up
+            self.events.emit("error", f"{self.mode} exit for {key} failed: {type(exc).__name__}: {exc}",
+                             level="error", key=key)
 
     async def _exit(self, key: str, reason: str, out: dict) -> None:
         p = self.state["positions"][key]
@@ -227,14 +236,20 @@ class Executor:
             p["status"] = "missing"
             self.events.emit("error", f"{self.mode}: no {base} left to sell for {key}", level="error", key=key)
             return
+        price = (await self.adapter.get_orderbook(p["symbol"], 5)).best_bid or p["entry"]
+        if await self._sellable(p["symbol"], amount, price) <= 0:
+            p["status"] = "dust"  # below the exchange's minimum order: can't be sold, stop managing it
+            self.events.emit("error", f"{self.mode}: {amount:g} {base} left for {key} is below the exchange's "
+                             "minimum order; left in the account as dust", level="warning", key=key)
+            return
         cid = client_id(self.mode, key, p["signal_ts"], f"exit{len(p.get('exits', []))}")
         p.update(status="pending_exit", exit_cid=cid, exit_reason=reason)
         self.save()
         order = await self.adapter.place_order(p["symbol"], Side.SELL, amount, OrderType.MARKET,
                                                reason=f"{p['entry_id']}: {reason}", client_id=cid)
-        self._apply_exit(key, order, out)
+        await self._apply_exit(key, order, out)
 
-    def _apply_exit(self, key: str, order, out: dict) -> None:
+    async def _apply_exit(self, key: str, order, out: dict) -> None:
         p = self.state["positions"][key]
         self._log_order(order, p, "exit")
         if order.filled <= 0:
@@ -245,17 +260,18 @@ class Executor:
                                  level="error", key=key)
             return
         avg = order.average or order.price
-        fee_quote = order.fee if order.fee_currency == self.quote else order.fee * avg
+        fee_quote = await self._fee_in_quote(order, avg)
         proceeds = avg * order.filled - fee_quote
         share = order.filled / p["amount"] if p["amount"] else 1.0
         pnl = proceeds - p["cost"] * min(share, 1.0)
         remaining = p["amount"] - order.filled
         exit_ts = order.ts or int(self.clock() * 1000)
-        if remaining > p["amount"] * 0.001:
+        if remaining > p["amount"] * 0.001 and await self._sellable(p["symbol"], remaining, avg) > 0:
             p.update(status="open", amount=remaining, cost=p["cost"] * (1 - share),
                      realized=p.get("realized", 0.0) + pnl)
             p.setdefault("exits", []).append({"filled": order.filled, "avg": avg})
             return
+        # what is left (if anything) is dust the exchange won't take as an order: the trade is done
         pnl += p.get("realized", 0.0)
         row = {k: p.get(k) for k in ("key", "entry_id", "symbol", "timeframe", "signal_ts", "entry",
                                       "entry_ts", "stop", "risk_usdt", "ai_prob", "exit_reason")}
@@ -284,7 +300,7 @@ class Executor:
         targets = [k for k, p in self.state["positions"].items() if p["status"] in ("open", "pending_exit")]
         for key in targets:
             if self.state["positions"][key]["status"] == "open":
-                await self._exit(key, "kill switch", out)
+                await self._guarded_exit(key, "kill switch", out)
         left = [k for k, p in self.state["positions"].items() if p["status"] in ("open", "pending_exit")]
         if not left:
             self.state["flattened"] = True
@@ -292,6 +308,26 @@ class Executor:
             self.control.mark_flattened()
             self.events.emit("kill", f"{self.mode}: kill switch done, {len(targets)} position(s) sold",
                              level="warning")
+
+    async def _sellable(self, symbol: str, amount: float, price: float) -> float:
+        check = getattr(self.adapter, "sellable", None)
+        return amount if check is None else await check(symbol, amount, price)
+
+    async def _fee_in_quote(self, order, avg: float) -> float:
+        """The order's fee in the quote currency (USDT), whatever coin it was paid in."""
+        cur, fee = order.fee_currency, order.fee or 0.0
+        if not fee or cur in (None, self.quote):
+            return fee
+        if cur == order.symbol.split("/")[0]:
+            return fee * avg
+        try:  # e.g. paid in BNB: value it at BNB's own price
+            bid = (await self.adapter.get_orderbook(f"{cur}/{self.quote}", 5)).best_bid
+        except Exception:
+            bid = None
+        if not bid:
+            self.events.emit("error", f"{self.mode}: can't price a {fee:g} {cur} fee; counted as 0", level="warning")
+            return 0.0
+        return fee * bid
 
     # ---- recovery -------------------------------------------------------------------------------
 
@@ -303,13 +339,13 @@ class Executor:
                     del self.state["positions"][key]  # never reached the exchange
                     log.info("entry %s was never placed; dropped", key)
                 else:
-                    self._apply_entry(key, order, out)
+                    await self._apply_entry(key, order, out)
             elif p["status"] == "pending_exit":
                 order = await self.adapter.find_order(p["exit_cid"], p["symbol"])
                 if order is None:
                     p["status"] = "open"  # the sell never arrived; exits retry it
                 else:
-                    self._apply_exit(key, order, out)
+                    await self._apply_exit(key, order, out)
 
     async def _check_holdings(self) -> None:
         """After a restart: every open position must still be in the account."""

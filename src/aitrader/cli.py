@@ -749,7 +749,7 @@ def cmd_web(s: Settings, args) -> int:
     e = os.environ.get
     try:
         auth = Auth(e("AITRADER_WEB_USER", "admin"), e("AITRADER_WEB_PASSWORD", ""),
-                    e("AITRADER_WEB_SECRET", ""))
+                    e("AITRADER_WEB_SECRET", ""), revoked_path="data/web/revoked.json")
     except AuthError as exc:
         print(exc, file=sys.stderr)
         return 1

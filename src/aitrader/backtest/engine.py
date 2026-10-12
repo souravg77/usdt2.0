@@ -76,6 +76,8 @@ def _one_trailing_exit(rule: str, df: pd.DataFrame):
         return rsi(df["close"]) > float(rule[4:])
     if rule == "close<psar":
         return df["close"] < parabolic_sar(df)["sar"]
+    if rule.startswith("when:"):  # a strategy's own exit rule that was never registered
+        raise KeyError(f"exit rule {rule} is not registered (build the strategy first)")
     return None
 
 

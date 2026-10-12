@@ -126,7 +126,9 @@ def _top(auth, token, latest: dict, job, flt: NewsFilter, symbols: list[str]) ->
 
 
 def _link(url: str, text: str = "source") -> str:
-    return f'<a href="{_e(url)}" rel="noopener noreferrer" target="_blank">{_e(text)}</a>' if url else ""
+    if not str(url or "").lower().startswith(("https://", "http://")):  # no javascript: or data: links
+        return ""
+    return f'<a href="{_e(url)}" rel="noopener noreferrer" target="_blank">{_e(text)}</a>'
 
 
 def _brief(b: dict | None) -> str:

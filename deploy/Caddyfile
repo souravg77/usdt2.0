@@ -14,6 +14,11 @@
 {$AITRADER_SITE} {
 	tls {$AITRADER_TLS}
 	encode zstd gzip
+	# Books (PDFs) may be up to 60 MB; every other request is a small form, so cap it at 1 MB.
+	@not_upload not path /books
+	request_body @not_upload {
+		max_size 1MB
+	}
 	request_body {
 		max_size 60MB
 	}

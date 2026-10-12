@@ -32,6 +32,7 @@ DAY_MS = 86_400_000
 @dataclass(frozen=True)
 class GateConfig:
     min_paper_trades: int = 100
+    min_paper_trades_each: int = 30  # and every selected strategy must stand on its own
     max_paper_drawdown_r: float = 10.0  # your live loss limit, in R
     max_gap_r: float = 0.15  # |paper expectancy - backtest expectancy|
     stable_days: int = 14
@@ -123,7 +124,13 @@ class GoLive:
         bt = [(e.backtest.get("out_of_sample") or {}) for e in entries]
         bt_n = sum(b.get("trades", 0) for b in bt)
         bt_exp = (sum(b.get("expectancy_r", 0) * b.get("trades", 0) for b in bt) / bt_n) if bt_n else 0.0
-        bt_ok = bool(entries) and all(b.get("trades", 0) and b.get("expectancy_r", 0) > 0 for b in bt)
+        bt_ok = bool(entries) and all(passed_backtest(e) and (e.backtest.get("out_of_sample") or {})
+                                      .get("expectancy_r", 0) > 0 for e in entries)
+        each = {}
+        for t in trades:
+            each.setdefault(t["entry_id"], []).append(t["r"])
+        weak = [i for i in sorted(ids) if len(each.get(i, [])) < cfg.min_paper_trades_each
+                or sum(each[i]) <= 0]
         gap = abs(m["expectancy_r"] - bt_exp)
         stab_ok, stab_text = self._stability(now)
         att = self._load("attestations.json")
@@ -134,7 +141,10 @@ class GoLive:
             ("Paper trades completed", f">= {cfg.min_paper_trades}", str(m["trades"]),
              m["trades"] >= cfg.min_paper_trades),
             ("Expectancy after costs (paper)", "> 0", f"{m['expectancy_r']:+.3f}R", m["expectancy_r"] > 0),
-            ("Expectancy after costs (backtest, out of sample)", "> 0 for every strategy",
+            ("Every strategy profitable on paper by itself",
+             f">= {cfg.min_paper_trades_each} paper trades and > 0R each",
+             "all" if not weak else "not yet: " + ", ".join(weak), bool(entries) and not weak),
+            ("Expectancy after costs (backtest, out of sample)", "passed the backtest gate and > 0 for every strategy",
              f"{bt_exp:+.3f}R over {bt_n} trades", bt_ok),
             ("Max drawdown in paper", f"<= {cfg.max_paper_drawdown_r:g}R (your live loss limit)",
              f"{m['max_drawdown_r']:.1f}R", m["trades"] > 0 and m["max_drawdown_r"] <= cfg.max_paper_drawdown_r),

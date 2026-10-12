@@ -144,6 +144,18 @@ class CcxtAdapter(ExchangeAdapter):
             await self.client.load_markets()
         return float(self.client.amount_to_precision(symbol, amount))
 
+    async def sellable(self, symbol: str, amount: float, price: float) -> float:
+        """The amount the exchange would accept in a sell order: rounded to its step size, or 0
+        when that is below its minimum amount or minimum order value (dust)."""
+        amount = await self._precise(symbol, amount)
+        market = (getattr(self.client, "markets", None) or {}).get(symbol) or {}
+        limits = market.get("limits") or {}
+        min_amount = (limits.get("amount") or {}).get("min") or 0.0
+        min_cost = (limits.get("cost") or {}).get("min") or 0.0
+        if amount <= 0 or amount < min_amount or amount * price < min_cost:
+            return 0.0
+        return amount
+
     async def cancel_order(self, order_id, symbol):
         self._check_order_allowed()
         await self.throttle.acquire()

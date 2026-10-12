@@ -222,3 +222,27 @@ def test_paper_switch_and_live_card(web, monkeypatch):
 
     EventLog(paths.events, service="paper").emit("heartbeat", "alive")
     assert "Paper trading <b class=\"good\">ON</b>" in client.get("/trading").text
+
+
+def test_logout_survives_restart(tmp_path):
+    path = str(tmp_path / "revoked.json")
+    a = Auth("admin", PW, "fixed", revoked_path=path)
+    tok = a.login("1.1.1.1", "admin", PW)
+    keep = a.login("1.1.1.1", "admin", PW)
+    a.revoke(tok)
+    b = Auth("admin", PW, "fixed", revoked_path=path)  # the dashboard restarted
+    assert b.verify(tok) is None and b.verify(keep) == "admin"
+
+
+def test_uploads_need_a_login_before_the_body_is_read(web):
+    client, *_ = web
+    r = client.post("/books", files={"book": ("a.txt", b"x" * 1000)}, follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == "/login"
+    assert not os.path.exists("data/books")
+
+
+def test_news_links_are_http_only():
+    from aitrader.web.news_pages import _link
+
+    assert _link("javascript:alert(1)") == "" and _link("data:text/html,x") == ""
+    assert 'href="https://x.com/a"' in _link("https://x.com/a")

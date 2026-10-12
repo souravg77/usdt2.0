@@ -266,6 +266,9 @@ def add_settings_routes(app, *, settings, auth, paths, jobs, keys_secret: str, p
 
     @app.post("/settings/keys/{group}")
     async def save_keys(request: Request, group: str):
+        _user, _token, redirect = guard(request)  # the login first, before reading the body
+        if redirect:
+            return redirect
         form = await request.form()
         bad = post_guard(request, str(form.get("csrf", "")))
         if bad:

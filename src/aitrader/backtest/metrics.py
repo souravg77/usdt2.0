@@ -16,7 +16,7 @@ def metrics(trades: list[Trade]) -> dict:
     if n == 0:
         return {"trades": 0, "expectancy_r": 0.0, "win_rate": 0.0, "avg_win_r": 0.0,
                 "avg_loss_r": 0.0, "profit_factor": 0.0, "max_drawdown_r": 0.0,
-                "total_r": 0.0, "cost_r_per_trade": 0.0, "reliable": False}
+                "total_r": 0.0, "cost_r_per_trade": 0.0, "t_stat": 0.0, "reliable": False}
     wins, losses = r[r > 0], r[r <= 0]
     equity = np.cumsum(r)
     dd = np.maximum.accumulate(np.r_[0.0, equity])[1:] - equity
@@ -31,6 +31,8 @@ def metrics(trades: list[Trade]) -> dict:
         "max_drawdown_r": float(dd.max()),
         "total_r": float(r.sum()),
         "cost_r_per_trade": float(np.mean([t.cost_r for t in trades])),
+        # how many standard errors the average R is above zero (luck rarely gets past 2)
+        "t_stat": float(r.mean() / r.std(ddof=1) * np.sqrt(n)) if n > 1 and r.std(ddof=1) > 0 else 0.0,
         "reliable": n >= MIN_RELIABLE_TRADES,
     }
 
