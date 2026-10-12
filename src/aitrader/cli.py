@@ -448,21 +448,11 @@ def cmd_learn(s: Settings, args) -> int:
         run_tests(entries)
         return 0
     if cmd == "report":
-        from .learn.library import library_specs
-        from .learn.report import backtest_report, report_text, save_report
+        from .learn.report import backtest_report, known_entries, report_text, save_report
 
-        # every strategy the agent knows: the registry, the book library and the built-ins
-        entries = dict(reg.entries)
-        for spec in library_specs()[0]:
-            entries.setdefault(spec_id(spec), Entry(id=spec_id(spec), kind="rule", name=spec["name"], spec=spec,
-                                                    source=f"{spec['source']['book']} {spec['source']['pages']}".strip()))
-        if not args.no_builtins:
-            for name in STRATEGIES:
-                entries.setdefault(f"builtin-{name}", Entry(id=f"builtin-{name}", kind="builtin", name=name,
-                                                           source=STRATEGIES[name].spec.source))
         store = CandleStore(s.db_path)
         try:
-            rep = backtest_report(list(entries.values()), store, args.exchange or ["binance"], symbols,
+            rep = backtest_report(known_entries(reg.entries, builtins=not args.no_builtins), store, args.exchange or ["binance"], symbols,
                                   years=args.years, cfg=cfg,
                                   progress=lambda n, total, sid, k: print(f"  [{n}/{total}] {sid}: {k} trades",
                                                                           flush=True))

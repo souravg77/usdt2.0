@@ -149,6 +149,7 @@ def create_app(settings: Settings, auth: Auth, jobs: JobRunner, paths: Paths | N
 
     from .market_pages import add_market_routes
     from .news_pages import add_news_routes
+    from .replay_pages import add_replay_routes
     from .report_pages import add_report_routes
     from .settings_pages import add_settings_routes
 
@@ -156,6 +157,8 @@ def create_app(settings: Settings, auth: Auth, jobs: JobRunner, paths: Paths | N
     add_report_routes(app, settings=settings, auth=auth, jobs=jobs, page=page, guard=guard,
                       report_path=paths.report)
     add_news_routes(app, settings=settings, auth=auth, jobs=jobs, page=page, guard=guard, news_dir=paths.news)
+    add_replay_routes(app, settings=settings, auth=auth, jobs=jobs, page=page, guard=guard,
+                      registry_path=paths.registry, report_path=paths.report)
 
     add_settings_routes(app, settings=settings, auth=auth, paths=paths, jobs=jobs,
                         keys_secret=keys_secret, page=page, guard=guard, checkers=checkers)
@@ -371,8 +374,8 @@ paper trading. Nothing trades real money.</p>
     return app
 
 
-NAV = [("/", "Overview"), ("/markets", "Markets"), ("/trading", "Trading"), ("/news", "News"),
-       ("/reports", "Reports"), ("/books", "Submit a book"), ("/admin/users", "Users"), ("/settings", "Settings")]
+NAV = [("/", "Overview"), ("/markets", "Markets"), ("/trading", "Trading"), ("/replay", "Replay"),
+       ("/news", "News"), ("/reports", "Reports"), ("/books", "Submit a book"), ("/admin/users", "Users"), ("/settings", "Settings")]
 
 
 def max_val(v) -> int:
@@ -758,7 +761,7 @@ h1{font-size:1.5em;margin:0;letter-spacing:-.2px}h2{font-size:1.12em;margin:28px
 .stat .v{display:block;font-size:1.25em;font-weight:650;margin-top:2px}
 .stat .s{display:block;font-size:.82em;color:var(--muted)}
 label{display:block;margin:10px 0;font-size:.94em}label.row{display:flex;gap:8px;align-items:center}
-input[type=text],input[type=password],input:not([type]),input[type=number],input[type=email],input[type=file],select{
+input[type=text],input[type=password],input:not([type]),input[type=number],input[type=email],input[type=file],input[type=month],select{
 display:block;width:100%;max-width:420px;margin-top:4px;padding:9px 11px;border:1px solid var(--line);border-radius:8px;
 background:var(--bg2);color:var(--fg);font:inherit}
 input:focus,select:focus{outline:2px solid color-mix(in srgb,var(--accent) 55%,transparent);outline-offset:1px;border-color:var(--accent)}
@@ -778,7 +781,11 @@ pre{background:var(--card);border:1px solid var(--line);padding:14px;border-radi
 white-space:pre-wrap;word-break:break-word}
 code{background:var(--card2);border:1px solid var(--line);border-radius:5px;padding:1px 5px;font-size:.9em}
 .row{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}form.row{align-items:center}
-.row select{width:auto;margin-top:0}form.inline{display:inline;margin:0}
+.row select{width:auto;margin-top:0}form.inline{display:inline;margin:0}.hidden{display:none}
+.replay-form{display:flex;flex-wrap:wrap;gap:10px 14px;align-items:flex-end}.replay-form label{margin:0}
+.replay-form label.wide{flex:1 1 260px}.replay-form select,.replay-form input{margin-top:4px}.replay-form label:not(.wide) select{width:auto}
+.replay-controls{align-items:center}.replay-controls input[type=range]{flex:1 1 160px;max-width:none;padding:0;margin:0}
+.trade-log{list-style:none;padding:0;margin:0;max-height:320px;overflow:auto}.trade-log li{padding:6px 0;border-bottom:1px solid var(--line)}
 .chips{display:flex;flex-wrap:wrap;gap:8px}.tick-chip{display:inline-flex;align-items:center;gap:6px;padding:4px 6px 4px 12px;
 border:1px solid var(--line);border-radius:99px;font-size:.9em}button.small{padding:2px 8px;font-size:.8em}
 .posts{list-style:none;padding:0}.posts li{padding:10px 0;border-bottom:1px solid var(--line)}.row>label{margin:0}

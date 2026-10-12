@@ -29,6 +29,23 @@ ACCOUNT_USDT = 10_000.0
 RISK_PCT = 1.0
 
 
+def known_entries(registry_entries: dict, builtins: bool = True) -> list[Entry]:
+    """Every strategy the agent knows: the registry, the book library and the built-ins."""
+    from ..strategies import STRATEGIES
+    from .library import library_specs
+    from .rules import spec_id
+
+    entries = dict(registry_entries)
+    for spec in library_specs()[0]:
+        entries.setdefault(spec_id(spec), Entry(id=spec_id(spec), kind="rule", name=spec["name"], spec=spec,
+                                                source=f"{spec['source']['book']} {spec['source']['pages']}".strip()))
+    if builtins:
+        for name in STRATEGIES:
+            entries.setdefault(f"builtin-{name}", Entry(id=f"builtin-{name}", kind="builtin", name=name,
+                                                       source=STRATEGIES[name].spec.source))
+    return list(entries.values())
+
+
 def backtest_report(entries: list[Entry], store: CandleStore, exchanges: list[str], symbols: list[str],
                     years: int = 5, cfg: BacktestConfig | None = None, now_ms: int | None = None,
                     progress=None) -> dict:
