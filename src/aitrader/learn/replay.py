@@ -30,7 +30,8 @@ def replay(entries: list[Entry], store: CandleStore, exchange: str, symbol: str,
     shown = [c for c in rows if c.ts >= start_ms]
     out = {"symbol": symbol, "timeframe": timeframe, "start": start_ms, "end": end_ms,
            "candles": [[c.ts, c.open, c.high, c.low, c.close, c.volume] for c in shown],
-           "trades": [], "strategies": [], "skipped": []}
+           "trades": [], "strategies": [], "skipped": [], "fee_skipped": 0,
+           "max_cost_r": (cfg or BacktestConfig()).max_cost_r}
     if not shown:
         return out
     if len(rows) < MIN_BARS:
@@ -53,12 +54,14 @@ def replay(entries: list[Entry], store: CandleStore, exchange: str, symbol: str,
         if timeframe not in strat.spec.timeframes:
             continue
         out["strategies"].append({"id": entry.id, "name": entry.name, "source": entry.source})
-        for t in run_backtest(strat, df, exchange, symbol, timeframe, cfg or BacktestConfig()):
+        costly: list = []
+        for t in run_backtest(strat, df, exchange, symbol, timeframe, cfg or BacktestConfig(), costly=costly):
             if t.entry_ts < start_ms:
                 continue
             side = "sell" if t.stop > t.entry else "buy"  # a short's stop sits above its entry
             out["trades"].append({"strategy": entry.id, "side": side, "entry_ts": t.entry_ts, "entry": t.entry, "stop": t.stop,
                                   "target": t.target, "exit_ts": t.exit_ts, "exit": t.exit,
                                   "reason": t.exit_reason, "r": round(t.r, 3)})
+        out["fee_skipped"] += sum(1 for s in costly if s.ts >= start_ms)
     out["trades"].sort(key=lambda t: t["entry_ts"])
     return out

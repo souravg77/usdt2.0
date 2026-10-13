@@ -29,7 +29,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 
 from ..backtest import BacktestConfig, metrics
-from ..backtest.engine import Trade, simulate_signal
+from ..backtest.engine import Trade, cost_r, simulate_signal, too_costly
 from ..data.store import CandleStore
 from ..indicators import candles_to_frame
 from ..market.regime import breakdown, classify
@@ -134,6 +134,11 @@ class PaperTrader:
                             events["filtered"].append(key)
                             log.info("paper short %s skipped: stop %.6g too close to liquidation at %gx",
                                      key, sig.stop, self._lev())
+                            continue
+                        if too_costly(sig, self.cfg.backtest):  # fees would eat too much of the risk
+                            events["filtered"].append(key)
+                            log.info("paper signal %s skipped: fees and slippage are %.2fR of the risk "
+                                     "(limit %.2fR)", key, cost_r(sig, self.cfg.backtest), self.cfg.backtest.max_cost_r)
                             continue
                         ctx_mult = self._context(ex, sym, now_ms)
                         if ctx_mult <= 0:
