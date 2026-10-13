@@ -80,3 +80,71 @@ def test_replay_api_and_page(client):
     job = [j for j in runner.list() if j["meta"].get("kind") == "download"][0]
     assert job["steps"] == [["download", "--since", "2025-02-16", "--until", "2025-04-01", "--exchange", "bybit",
                              "--symbol", "ETH/USDT", "--timeframe", "1h"]]
+
+
+RSI_UP = dict(EVERY_UP_BAR, name="rsi_up", entry=[{"left": "close", "op": ">", "right": "open"},
+                                                  {"left": "rsi(14)", "op": ">", "right": 50}])
+
+
+def test_replay_runs_a_ranked_list_and_marks_shorts(tmp_path):
+    from aitrader.learn.registry import short_twin
+
+    store = make_store(tmp_path / "c.db")
+    up = Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR))
+    rsi = Entry(id="rsi", kind="rule", name="rsi_up", spec=validate_spec(RSI_UP))
+    daily = Entry(id="d", kind="rule", name="daily", spec=validate_spec(dict(EVERY_UP_BAR, name="d", timeframes=["1d"])))
+    short = short_twin(up)
+    # best first; the daily one can't trade 1h, so the best 2 that can are rsi and up
+    res = replay([up, rsi, daily, short], store, "bybit", "BTC/USDT", "1h", START, END,
+                 only=["d", "rsi", "up", short.id], top=2)
+    assert [s["id"] for s in res["strategies"]] == ["rsi", "up"]
+    assert res["trades"] and all(t["side"] == "buy" and t["stop"] < t["entry"] for t in res["trades"])
+    shorts = replay([up, short], store, "bybit", "BTC/USDT", "1h", START, END, only=short.id)
+    assert shorts["trades"] and all(t["side"] == "sell" and t["stop"] > t["entry"] for t in shorts["trades"])
+    store.close()
+
+
+def test_replay_page_offers_the_best_strategies_with_their_indicators(client, monkeypatch):
+    import aitrader.web.replay_pages as rp
+
+    c, _runner = client
+    up = Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR))
+    rsi = Entry(id="rsi", kind="rule", name="rsi_up", spec=validate_spec(RSI_UP))
+    monkeypatch.setattr(rp, "known_entries", lambda *a, **k: [up, rsi])
+    c.post("/login", data={"user": "admin", "password": PW})
+    page = c.get("/replay").text
+    for n in (10, 20, 30):
+        assert f'<option value="top:{n}">Top {n} strategies (best ranked)</option>' in page
+    assert 'data-study="rsi"' in page and 'data-study="trades"' not in page
+    assert page.index("/static/chartstudies.js") < page.index("/static/replay.js")
+    assert 'id="legend"' in page and 'id="read"' in page
+    r = c.get("/api/replay?symbol=BTC/USDT&tf=1h&month=2025-03&strategy=top:10").json()
+    assert r["top"] == 10 and {s["id"] for s in r["strategies"]} == {"up", "rsi"}
+    assert r["indicators"] == {"ema": 1, "rsi": 1}  # up_bar uses sma(20), drawn with the EMAs
+    assert [s["indicators"] for s in r["strategies"] if s["id"] == "rsi"] == [["rsi"]]
+    st = r["studies"]
+    n = len(r["candles"])
+    assert len(st["overlays"]["ema20"]) == n and len(st["panels"]["rsi"]) == n and len(st["patterns"]) == n
+    assert st["overlays"]["ema200"][0] is not None  # warmed up on the candles before the month
+    # levels, Fibonacci and the volume profile would come from the whole month: the page works them out
+    assert not {"levels", "fib", "profile"} & set(st)
+    one = c.get("/api/replay?symbol=BTC/USDT&tf=1h&month=2025-03&strategy=rsi").json()
+    assert [s["id"] for s in one["strategies"]] == ["rsi"] and one["top"] == 0
+    assert c.get("/api/replay?symbol=BTC/USDT&tf=1h&month=2025-03&strategy=top:7").json()["top"] == 0
+
+
+def test_replay_studies_match_the_markets_formulas(tmp_path):
+    """The replay's indicator at a candle equals the indicator worked out from candles up to it."""
+    from aitrader.web import studies
+    from aitrader.web.replay_pages import replay_studies
+
+    store = make_store(tmp_path / "c.db")
+    res = replay([], store, "bybit", "BTC/USDT", "1h", START, END)
+    st = replay_studies(store, "bybit", res)
+    rows = store.load("bybit", "BTC/USDT", "1h", start=START - 300 * HOUR, end=END)
+    k = 100  # the 101st shown candle, from only the candles up to it
+    upto = [[c.ts, c.open, c.high, c.low, c.close, c.volume] for c in rows if c.ts <= res["candles"][k][0]]
+    alone = studies.compute(upto, tail=1)
+    assert st["overlays"]["ema50"][k] == pytest.approx(alone["overlays"]["ema50"][0])
+    assert st["panels"]["rsi"][k] == pytest.approx(alone["panels"]["rsi"][0])
+    store.close()

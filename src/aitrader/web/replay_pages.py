@@ -1,9 +1,11 @@
 """The Replay page: watch a backtest play out candle by candle from a chosen month.
 
-Pick a pair, a timeframe, a start month and a strategy (or all of them). The server runs the
-strategies over that window (``learn.replay``); the page's script (``static/replay.js``) then
-plays the candles one at a time at 1x to 200x speed, marks each buy and sell as its candle
-appears, and keeps a live win-rate table per strategy.
+Pick a pair, a timeframe, a start month and a strategy (all of them, the best 10, 20 or 30, or
+one). The server runs the strategies over that window (``learn.replay``) and works out the
+chart indicators for every candle; the page's script (``static/replay.js``) then plays the
+candles one at a time at 1x to 200x speed, draws the indicators those strategies use, marks each
+buy and short as its candle appears, reads the market at the current candle in plain words and
+keeps a live win-rate table per strategy. Nothing on the chart looks past the current candle.
 
 Prices come from the database. A month that hasn't been downloaded yet can be fetched from
 Bybit with one button (a ``download`` job).
@@ -23,16 +25,42 @@ from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse,
 from ..config import EXCHANGE
 from ..backtest import BacktestConfig
 from ..data.store import CandleStore
+from ..learn import keep
 from ..learn.registry import Registry
 from ..learn.replay import WARMUP_BARS, replay
 from ..learn.report import known_entries
 from ..models import TIMEFRAME_MS
+from . import studies
 from .app import _csrf, _e, _q
-from .market_pages import STATIC
+from .market_pages import STATIC, _study_chips
 
 REPLAY_TIMEFRAMES = ["5m", "15m", "30m", "1h", "4h", "1d"]
 SPEEDS = [1, 2, 5, 10, 50, 200]
 CACHE_SIZE = 6
+TOPS = [10, 20, 30]
+
+
+def _top(strategy: str) -> int:
+    """10, 20 or 30 for a "top:N" choice, else 0."""
+    try:
+        n = int(strategy.split(":", 1)[1]) if strategy.startswith("top:") else 0
+    except ValueError:
+        return 0
+    return n if n in TOPS else 0
+
+
+def replay_studies(store: CandleStore, exchange: str, res: dict) -> dict:
+    """The chart indicators for each shown candle, warmed up on the candles before it. Only the
+    per-candle series: support/resistance, Fibonacci and the volume profile are worked out by the
+    page from the candles up to the current one, so the chart never shows a level from the future."""
+    if not res["candles"]:
+        return {}
+    step = TIMEFRAME_MS[res["timeframe"]]
+    rows = store.load(exchange, res["symbol"], res["timeframe"], start=res["start"] - WARMUP_BARS * step,
+                      end=res["end"])
+    candles = [[c.ts, c.open, c.high, c.low, c.close, c.volume] for c in rows]
+    out = studies.compute(candles, tail=len(res["candles"]))
+    return {"overlays": out["overlays"], "panels": out["panels"], "patterns": out["patterns"]}
 
 
 def _month(text: str) -> datetime | None:
@@ -70,6 +98,16 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
             out = [(e.id, e.name) for e in known_entries(Registry(registry_path).entries)]
         return out
 
+    def best_ids(entries) -> list[str]:
+        """Every strategy id, best first: the paper-trading ranking (``keep.rank``), then the
+        backtest report's win rate, then the rest."""
+        try:
+            ranked = [e.id for e, _s in keep.rank(Registry(registry_path))]
+        except Exception:
+            ranked = []
+        ids = ranked + [i for i, _label in ranked_strategies()] + [e.id for e in entries]
+        return list(dict.fromkeys(ids))
+
     def compute(symbol: str, tf: str, start: datetime, months: int, strategy: str) -> dict:
         key = (symbol, tf, start, months, strategy)
         if key in cache:
@@ -80,7 +118,22 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
         try:
             start_ms = int(start.timestamp() * 1000)
             end_ms = int(_add_months(start, months).timestamp() * 1000)
-            res = replay(entries, store, exchange, symbol, tf, start_ms, end_ms, only=strategy, cfg=cfg())
+            n = _top(strategy)
+            only = best_ids(entries) if n else ("" if strategy.startswith("top:") else strategy)
+            res = replay(entries, store, exchange, symbol, tf, start_ms, end_ms, only=only, cfg=cfg(), top=n)
+            res["top"] = n
+            res["studies"] = replay_studies(store, exchange, res)
+            by_id = {e.id: e for e in entries}
+            used: dict[str, int] = {}
+            for s in res["strategies"]:
+                try:
+                    keys = keep.indicators(by_id[s["id"]])
+                except Exception:
+                    keys = set()
+                s["indicators"] = sorted(keys)
+                for k in keys:
+                    used[k] = used.get(k, 0) + 1
+            res["indicators"] = dict(sorted(used.items(), key=lambda kv: (-kv[1], kv[0])))
         finally:
             store.close()
         cache[key] = res
@@ -147,7 +200,8 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
             return "".join(f'<option value="{_e(v)}"{" selected" if v == current else ""}>{_e(label)}</option>'
                            for v, label in items)
 
-        strat_opts = options([("", "All strategies (books and built-in)"), *ranked_strategies()], strategy)
+        tops = [(f"top:{n}", f"Top {n} strategies (best ranked)") for n in TOPS]
+        strat_opts = options([("", "All strategies (books and built-in)"), *tops, *ranked_strategies()], strategy)
         speeds = "".join(f'<button type="button" class="seg{" active" if s == 1 else ""}" data-speed="{s}">{s}x</button>'
                          for s in SPEEDS)
         body = (f'<p class="good">{_e(msg)}</p>' if msg else "") + (f'<p class="bad">{_e(error)}</p>' if error else "")
@@ -173,13 +227,22 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
             '<button type="button" class="ghost" id="restart" disabled>Restart</button>'
             '<input type="range" id="seek" min="0" max="0" value="0" aria-label="position" disabled>'
             '<span id="clock" class="small muted"></span></div>'
+            f'<div id="studies" class="studies" aria-label="indicators">{_study_chips(skip={"trades"})}</div>'
+            '<p id="studies-used" class="small muted"></p>'
             '<div id="ohlc" class="ohlc small"></div>'
-            '<canvas id="chart" aria-label="replay chart"></canvas></div>'
+            '<div id="legend" class="legend"></div>'
+            '<canvas id="chart" aria-label="replay chart"></canvas>'
+            '<p id="read" class="small market-read"></p></div>'
             '<div class="stats" id="replay-stats"></div>'
             '<h2>Strategies so far</h2><p class="muted small">Closed trades up to the current candle, best first. '
             'Win % is the share of trades that made money after fees and slippage; R is the amount risked per '
             'trade.</p><div id="board"></div>'
             '<h2>Trades</h2><div id="log"></div></div>'
             '<noscript><p class="bad">The replay needs JavaScript.</p></noscript>'
-            '<script src="/static/replay.js" defer></script>')
+            '<p class="muted small">After Load, the indicators the chosen strategies use switch on (the number on '
+            'a switch is how many of them use it); tap a switch to show or hide one. Indicators use the strategies\' '
+            'own formulas and only the candles up to the current one: support/resistance from the last 300, '
+            'Fibonacci and the volume profile from the last 100. Triangles mark entries (up: buy, down: short), '
+            'dots the exits (green: profit, red: loss).</p>'
+            '<script src="/static/chartstudies.js" defer></script><script src="/static/replay.js" defer></script>')
         return page("Replay backtest", body, user, token)

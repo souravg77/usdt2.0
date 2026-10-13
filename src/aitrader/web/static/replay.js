@@ -1,6 +1,9 @@
-// Replay backtest: loads candles and the strategies' trades for a past period from
-// /api/replay, then plays the candles one at a time (1x = one candle per second) and shows each
-// buy and sell when its candle appears, with a live win-rate table per strategy.
+// Replay backtest: loads candles, the strategies' trades and the indicator values for a past
+// period from /api/replay, then plays the candles one at a time (1x = one candle per second). It
+// draws the indicators the chosen strategies use (ChartStudies, shared with the Markets chart),
+// shows each buy and short when its candle appears, reads the market at the current candle in
+// plain words, and keeps a live win-rate table per strategy. Nothing drawn looks past the
+// current candle.
 (function () {
   "use strict";
   var root = document.getElementById("replay");
@@ -20,6 +23,11 @@
   var statsEl = document.getElementById("replay-stats");
   var boardEl = document.getElementById("board");
   var logEl = document.getElementById("log");
+  var legendEl = document.getElementById("legend");
+  var readEl = document.getElementById("read");
+  var usedEl = document.getElementById("studies-used");
+  var CS = window.ChartStudies, PANEL_H = CS.PANEL_H;
+  var sw = CS.switches("aitrader.replay.studies", function () { resize(); });
 
   var S = { data: null, pos: 0, playing: false, speed: 1, timer: null, names: {}, hover: null, tf: "1h" };
 
@@ -53,6 +61,7 @@
     var p = params();
     history.replaceState(null, "", "/replay?" + p.toString());
     msgEl.textContent = "Running the strategies over that period…";
+    usedEl.textContent = "";
     dlForm.classList.add("hidden");
     setEnabled(false);
     fetch("/api/replay?" + p.toString(), { credentials: "same-origin" }).then(function (res) {
@@ -72,15 +81,39 @@
       }
       S.data = d; S.names = {};
       d.strategies.forEach(function (s) { S.names[s.id] = s.name; });
-      msgEl.textContent = d.strategies.length + " strateg" + (d.strategies.length === 1 ? "y" : "ies") +
-        " trade " + d.timeframe + " · " + d.candles.length + " candles · " + d.trades.length + " trades in this period." +
+      msgEl.textContent = (d.top && d.strategies.length ? "The best " + d.strategies.length + " ranked strategies that trade " + d.timeframe :
+        d.strategies.length + " strateg" + (d.strategies.length === 1 ? "y" : "ies") + " trade " + d.timeframe) +
+        " · " + d.candles.length + " candles · " + d.trades.length + " trades in this period." +
         (d.strategies.length ? "" : " No strategy uses this timeframe: try 1h or 4h.");
       titleEl.textContent = d.symbol + " · " + d.timeframe + " · from " + when(d.start).slice(0, 7);
       seek.max = String(d.candles.length);
       S.pos = Math.min(60, d.candles.length);
       setEnabled(true);
+      showUsed(d);
       update();
-    }).catch(function () { msgEl.textContent = "Couldn't reach the server."; });
+    }).catch(function (e) { msgEl.textContent = "Couldn't reach the server."; if (window.console) console.error(e); });
+  }
+
+  // switch on the indicators the loaded strategies use, with how many use each on its switch
+  // (for "All strategies" that would be nearly every indicator, so the switches stay as they are)
+  var AUTO_MAX = 30;
+  function showUsed(d) {
+    var used = d.indicators || {}, keys = Object.keys(used);
+    if (!keys.length) { usedEl.textContent = ""; return; }
+    if (d.strategies.length <= AUTO_MAX) sw.set(keys, ["vol"]);
+    else document.querySelectorAll(".chip[data-study] small").forEach(function (x) { x.remove(); });
+    var names = [];
+    document.querySelectorAll(".chip[data-study]").forEach(function (b) {
+      var k = b.dataset.study;
+      if (!(k in used)) return;
+      var badge = document.createElement("small");
+      badge.textContent = used[k];
+      b.appendChild(document.createTextNode(" ")); b.appendChild(badge);
+      names.push(b.textContent.replace(/\s+\d+$/, "").trim() + " (" + used[k] + ")");
+    });
+    usedEl.textContent = "Indicators these " + d.strategies.length + " strategies use (how many use each): " +
+      names.join(", ") + ".";
+    resize();
   }
 
   function setEnabled(on) {
@@ -174,10 +207,12 @@
     }).slice(0, 40);
     logEl.innerHTML = recent.length ? '<ul class="trade-log">' + recent.map(function (t) {
       var done = t.exit_ts && t.exit_ts <= now();
-      return "<li><b>" + esc(S.names[t.strategy] || t.strategy) + '</b> <span class="muted small">bought ' +
+      var short = t.side === "sell";
+      return "<li><b>" + esc(S.names[t.strategy] || t.strategy) + '</b> <span class="muted small">' +
+        (short ? "sold short " : "bought ") +
         when(t.entry_ts) + " at " + fmt(t.entry) + " · stop " + fmt(t.stop) +
         (t.target ? " · target " + fmt(t.target) : "") + "</span><br>" +
-        (done ? 'sold ' + when(t.exit_ts) + " at " + fmt(t.exit) + ' (' + esc(t.reason) + ') <b class="' +
+        (done ? (short ? "bought back " : "sold ") + when(t.exit_ts) + " at " + fmt(t.exit) + ' (' + esc(t.reason) + ') <b class="' +
           (t.r > 0 ? "good" : "bad") + '">' + r(t.r) + "</b>" : '<span class="warn">open</span>') + "</li>";
     }).join("") + "</ul>" : "";
   }
@@ -186,6 +221,8 @@
 
   function resize() {
     var dpr = window.devicePixelRatio || 1;
+    var base = window.innerWidth <= 640 ? 340 : 440;
+    canvas.style.height = (base + CS.panels(sw.on).length * PANEL_H) + "px";
     canvas.width = Math.round(canvas.clientWidth * dpr);
     canvas.height = Math.round(canvas.clientHeight * dpr);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -197,23 +234,50 @@
     return (q < 1.5 ? 1 : q < 3 ? 2 : q < 7 ? 5 : 10) * mag;
   }
 
+  // indicator value for visible candle ``i`` (the series cover every loaded candle)
+  function getter(first) {
+    var st = S.data && S.data.studies;
+    if (!st || !st.overlays) return null;
+    return function (group, key, i) {
+      var arr = key === null ? st[group] : (st[group] || {})[key];
+      var v = arr ? arr[first + i] : null;
+      return v === undefined ? null : v;
+    };
+  }
+
   function draw() {
     var w = canvas.clientWidth, h = canvas.clientHeight;
     ctx.clearRect(0, 0, w, h);
     var up = css("--good") || "#22c55e", down = css("--bad") || "#ef4444", line = css("--line") || "#333";
     var muted = css("--muted") || "#888", accent = css("--accent") || "#7aa2ff";
     ctx.font = "12px system-ui, sans-serif";
-    if (!S.data) { ctx.fillStyle = muted; ctx.fillText("Pick a period and press Load.", 12, 24); ohlcEl.innerHTML = ""; return; }
+    if (!S.data || !S.pos) {
+      ctx.fillStyle = muted; ctx.fillText("Pick a period and press Load.", 12, 24);
+      ohlcEl.innerHTML = ""; legendEl.innerHTML = ""; readEl.innerHTML = ""; return;
+    }
+    var on = sw.on, nPanels = CS.panels(on).length;
     var all = S.data.candles.slice(0, S.pos);
-    var axisW = 74, axisH = 22, plotW = w - axisW, priceH = (h - axisH) * 0.8, volTop = priceH + 6, volH = h - axisH - volTop;
+    var axisW = 74, axisH = 22, plotW = w - axisW, priceH = h - axisH - nPanels * PANEL_H;
     var barW = w < 500 ? 6 : 8, n = Math.max(20, Math.floor(plotW / barW));
     var first = Math.max(0, all.length - n), bars = all.slice(first), step = plotW / n;
-    var hi = -Infinity, lo = Infinity, vmax = 0;
-    bars.forEach(function (b) { hi = Math.max(hi, b[2]); lo = Math.min(lo, b[3]); vmax = Math.max(vmax, b[5] || 0); });
+    var get = getter(first);
+    // levels, Fibonacci and the volume profile from the candles up to now only
+    var levels = on.sr ? CS.levelsOf(all.slice(-300)) : null;
+    var fib = on.fib ? CS.fibOf(all.slice(-100)) : null;
+    var prof = on.vp ? CS.profileOf(all.slice(-100)) : null;
+    var O = { ctx: ctx, on: on, get: get, n: bars.length, step: step, plotW: plotW, priceH: priceH, bars: bars,
+              levels: levels, fib: fib, prof: prof, fmt: fmt };
+    var hi = -Infinity, lo = Infinity;
+    var room = function (v) { if (v !== null && v !== undefined && isFinite(v)) { hi = Math.max(hi, v); lo = Math.min(lo, v); } };
+    bars.forEach(function (b) { room(b[2]); room(b[3]); });
+    var blo = lo, bhi = hi, span = bhi - blo;
+    // indicators widen the scale, but not so far that the candles get squashed
+    CS.widen(O, function (v) { if (v !== null && v !== undefined && v > blo - span && v < bhi + span) room(v); });
     var s = seen();
-    s.open.forEach(function (t) { hi = Math.max(hi, t.target || hi); lo = Math.min(lo, t.stop); });
+    s.open.forEach(function (t) { room(t.target); room(t.stop); });
     var pad = (hi - lo) * 0.06 || hi * 0.001 || 1; hi += pad; lo -= pad;
     var y = function (v) { return 8 + (hi - v) / (hi - lo) * (priceH - 8); };
+    O.y = y; O.lo = lo; O.hi = hi;
     var xOf = function (ts) {
       var i = Math.round((ts - bars[0][0]) / (bars.length > 1 ? bars[1][0] - bars[0][0] : 1));
       return (i + 0.5) * step;
@@ -234,18 +298,16 @@
       ctx.fillText(when(bars[i][0]).slice(5, S.tf === "1d" || S.tf === "4h" ? 10 : 16), tx, h - 6);
     }
 
+    CS.drawUnder(O);  // Ichimoku cloud, Bollinger fill, levels, volume profile, Fibonacci lines
     var bw = Math.max(1, step * 0.66);
     bars.forEach(function (b, k) {
       var x = (k + 0.5) * step, c = b[4] >= b[1] ? up : down;
-      if (vmax) {
-        var vh = (b[5] || 0) / vmax * volH;
-        ctx.globalAlpha = 0.3; ctx.fillStyle = c; ctx.fillRect(x - bw / 2, volTop + volH - vh, bw, vh); ctx.globalAlpha = 1;
-      }
       ctx.strokeStyle = c; ctx.beginPath();
       ctx.moveTo(Math.round(x) + 0.5, y(b[2])); ctx.lineTo(Math.round(x) + 0.5, y(b[3])); ctx.stroke();
       var top = y(Math.max(b[1], b[4])), bot = y(Math.min(b[1], b[4]));
       ctx.fillStyle = c; ctx.fillRect(x - bw / 2, top, bw, Math.max(1, bot - top));
     });
+    CS.drawOver(O);  // indicator lines, SAR dots, pattern letters, Fibonacci labels
 
     // trades: open ones with their stop and target, closed ones as entry-to-exit lines
     var t0 = bars[0][0], tEnd = now();
@@ -265,9 +327,10 @@
         ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(xe, ye); ctx.lineTo(xx, yx); ctx.stroke();
         ctx.lineWidth = 1; ctx.fillStyle = col; ctx.beginPath(); ctx.arc(xx, yx, 4, 0, 6.3); ctx.fill();
       }
-      if (xe >= 0) {  // buy marker: a triangle under the entry
-        ctx.fillStyle = accent; ctx.beginPath();
-        ctx.moveTo(xe, ye + 4); ctx.lineTo(xe - 6, ye + 14); ctx.lineTo(xe + 6, ye + 14); ctx.closePath(); ctx.fill();
+      if (xe >= 0) {  // entry marker: a triangle pointing up under a buy, down over a short
+        var sh = t.side === "sell", d = sh ? -1 : 1;
+        ctx.fillStyle = sh ? down : accent; ctx.beginPath();
+        ctx.moveTo(xe, ye + 4 * d); ctx.lineTo(xe - 6, ye + 14 * d); ctx.lineTo(xe + 6, ye + 14 * d); ctx.closePath(); ctx.fill();
       }
     });
 
@@ -276,8 +339,11 @@
     ctx.setLineDash([]); ctx.fillStyle = lc; ctx.fillRect(plotW + 1, ly - 10, axisW - 2, 20);
     ctx.fillStyle = "#fff"; ctx.textAlign = "left"; ctx.font = "600 12px system-ui, sans-serif";
     ctx.fillText(fmt(last[4]), plotW + 5, ly + 4);
+    ctx.font = "12px system-ui, sans-serif";
 
-    var hb = S.hover !== null && bars[S.hover] ? bars[S.hover] : last;
+    var hIdx = S.hover !== null && bars[S.hover] ? S.hover : bars.length - 1, hb = bars[hIdx];
+    O.top = priceH; O.w = w; O.bw = bw; O.hIdx = hIdx;
+    var panelLegend = CS.drawPanels(O);  // volume, RSI, MACD, ADX, Stoch RSI, ATR, CCI, Williams %R
     if (S.hover !== null && bars[S.hover]) {
       var hx = Math.round((S.hover + 0.5) * step) + 0.5;
       ctx.strokeStyle = accent; ctx.globalAlpha = 0.6; ctx.beginPath(); ctx.moveTo(hx, 0); ctx.lineTo(hx, h - axisH); ctx.stroke();
@@ -287,6 +353,9 @@
     ohlcEl.innerHTML = '<span class="muted">' + when(hb[0]) + " " + TZ + "</span> O <b>" + fmt(hb[1]) + "</b> H <b>" + fmt(hb[2]) +
       "</b> L <b>" + fmt(hb[3]) + "</b> C <b>" + fmt(hb[4]) + '</b> <span class="' + (chg >= 0 ? "good" : "bad") + '">' +
       (chg >= 0 ? "+" : "") + chg.toFixed(2) + "%</span>";
+    legendEl.innerHTML = CS.overlayLegend(O, hIdx).concat(panelLegend).join("");
+    var said = CS.read(get, bars, hIdx);
+    readEl.innerHTML = said ? "<b>Market " + (S.hover !== null ? "at this candle" : "now") + ":</b> " + said : "";
     S.layout = { step: step, plotW: plotW, count: bars.length };
   }
 
@@ -297,9 +366,11 @@
     draw();
   }
   canvas.addEventListener("mousemove", pointer);
-  canvas.addEventListener("touchstart", pointer, { passive: true });
+  // a phone sends a mouseleave right after each tap: keep the tapped candle's values on screen
+  var touchedAt = 0;
+  canvas.addEventListener("touchstart", function (ev) { touchedAt = Date.now(); pointer(ev); }, { passive: true });
   canvas.addEventListener("touchmove", pointer, { passive: true });
-  canvas.addEventListener("mouseleave", function () { S.hover = null; draw(); });
+  canvas.addEventListener("mouseleave", function () { if (Date.now() - touchedAt < 1500) return; S.hover = null; draw(); });
   window.addEventListener("resize", resize);
   resize();
   if (new URLSearchParams(location.search).get("month")) load();

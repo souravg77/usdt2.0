@@ -1277,6 +1277,7 @@ padding:4px 10px;border-radius:999px;font-weight:600;font-size:.8em}
 .chip i{width:10px;height:3px;border-radius:2px;display:inline-block}
 .chip small{color:var(--muted);font-size:11px}.linkish{background:none;border:0;padding:0;color:var(--accent);cursor:pointer;font:inherit;text-decoration:underline}
 .legend{display:flex;flex-wrap:wrap;gap:2px 12px;font-size:.8em;min-height:1.3em}.legend b{font-weight:600}
+.market-read{margin:.5em 0 0;line-height:1.5;min-height:1.5em}
 details.health summary{cursor:pointer;font-weight:600}details.health table{margin-top:12px}
 @media (max-width:640px){header{padding:8px 12px}main{padding:14px 12px}nav{margin-left:0;width:100%}
 nav a{white-space:nowrap}.who{margin-left:auto}#chart{height:340px}.segs{margin-left:0}h1{font-size:1.3em}}

@@ -9,14 +9,7 @@
   var state = { symbol: root.dataset.symbol, tf: root.dataset.tf, candles: [], hover: null,
                 last: null, lastOk: 0, busy: false, busySince: 0, source: "", studies: null, polls: 0 };
   var POLL_MS = 1500, STUDY_EVERY = 2;  // indicators refresh every 2nd poll (3 seconds)
-  var PANEL_H = 84;
-  var COLORS = { ema20: "#f5c542", ema50: "#4cc3ff", ema200: "#c084fc", bb: "#94a3b8", vwap: "#f472b6",
-                 tenkan: "#38bdf8", kijun: "#fb923c", psar: "#fb923c", rsi: "#c084fc", macd: "#4cc3ff",
-                 signal: "#fb923c", adx: "#f5c542", k: "#2dd4bf", d: "#f472b6", sr: "#a3a3a3",
-                 kc: "#a78bfa", fib: "#eab308", vp: "#64748b", atr: "#f97316", cci: "#22d3ee", willr: "#e879f9" };
-  var PANELS = ["vol", "rsi", "macd", "adx", "stoch", "atr", "cci", "willr"];
-  var PATTERN_NAMES = { E: "engulfing", H: "hammer", D: "doji", I: "inside bar" };
-  var on = {};
+  var CS = window.ChartStudies, PANEL_H = CS.PANEL_H;
   var canvas = document.getElementById("chart");
   var ctx = canvas.getContext("2d");
   var tickersEl = document.getElementById("tickers");
@@ -28,29 +21,10 @@
 
   // ---- indicator switches (remembered in this browser) ---------------------------------------
 
-  var chips = document.querySelectorAll(".chip[data-study]");
-  var saved = null;
-  try { saved = JSON.parse(localStorage.getItem("aitrader.studies") || "null"); } catch (e) { saved = null; }
-  chips.forEach(function (b) {
-    on[b.dataset.study] = saved && b.dataset.study in saved ? !!saved[b.dataset.study] : b.dataset.on === "1";
-    b.setAttribute("aria-pressed", on[b.dataset.study] ? "true" : "false");
-    b.addEventListener("click", function () {
-      on[b.dataset.study] = !on[b.dataset.study];
-      b.setAttribute("aria-pressed", on[b.dataset.study] ? "true" : "false");
-      try { localStorage.setItem("aitrader.studies", JSON.stringify(on)); } catch (e) { /* private window */ }
-      resize();
-    });
-  });
+  var sw = CS.switches("aitrader.studies", function () { resize(); }), on = sw.on;
   var resetBtn = document.getElementById("studies-reset");
-  if (resetBtn) resetBtn.addEventListener("click", function () {
-    try { localStorage.removeItem("aitrader.studies"); } catch (e) { /* private window */ }
-    chips.forEach(function (b) {
-      on[b.dataset.study] = b.dataset.on === "1";
-      b.setAttribute("aria-pressed", on[b.dataset.study] ? "true" : "false");
-    });
-    resize();
-  });
-  function panels() { return PANELS.filter(function (k) { return on[k]; }); }
+  if (resetBtn) resetBtn.addEventListener("click", function () { sw.reset(); resize(); });
+  function panels() { return CS.panels(on); }
 
   function css(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
 
@@ -228,25 +202,6 @@
     return out;
   }
 
-  function polyline(n, val, y, step, color, width, dash) {
-    ctx.strokeStyle = color; ctx.lineWidth = width || 1.5; ctx.setLineDash(dash || []);
-    ctx.beginPath();
-    var started = false;
-    for (var i = 0; i < n; i++) {
-      var v = val(i);
-      if (v === null || v === undefined) { started = false; continue; }
-      var x = (i + 0.5) * step, yy = y(v);
-      if (started) ctx.lineTo(x, yy); else { ctx.moveTo(x, yy); started = true; }
-    }
-    ctx.stroke(); ctx.setLineDash([]); ctx.lineWidth = 1;
-  }
-
-  // 0% at the end of the move, 100% at its start
-  function fibLevels(f) {
-    return [{ ratio: 0, price: f.leg === "up" ? f.high : f.low }].concat(f.levels,
-            [{ ratio: 1, price: f.leg === "up" ? f.low : f.high }]);
-  }
-
   function barIndex(bars, ts) {
     if (!ts || !bars.length || ts < bars[0][0]) return -1;
     var lo = 0, hi = bars.length - 1;
@@ -274,20 +229,11 @@
     var span0 = hi - lo || hi * 0.01, room = function (v) {
       if (v !== null && v !== undefined && v > lo - span0 * 0.6 && v < hi + span0 * 0.6) { hi = Math.max(hi, v); lo = Math.min(lo, v); }
     };
-    var overlayKeys = [];
-    if (A) {
-      if (on.ema) overlayKeys.push("ema20", "ema50", "ema200");
-      if (on.bb) overlayKeys.push("bb_upper", "bb_lower");
-      if (on.vwap) overlayKeys.push("vwap");
-      if (on.st) overlayKeys.push("supertrend");
-      if (on.ich) overlayKeys.push("tenkan", "kijun", "span_a", "span_b");
-      if (on.psar) overlayKeys.push("psar");
-      if (on.kc) overlayKeys.push("kc_upper", "kc_mid", "kc_lower");
-      overlayKeys.forEach(function (k) { for (var i = 0; i < n; i++) room(A.get("overlays", k, i)); });
-    }
-    trades.open.forEach(function (t) { room(t.stop); room(t.target); room(t.entry); });
     var fib = A && on.fib ? A.S.fib : null, prof = A && on.vp ? A.S.profile : null;
-    if (fib) { room(fib.high); room(fib.low); }
+    var O = { ctx: ctx, on: on, get: A ? A.get : null, n: n, step: L.step, plotW: L.plotW, bars: bars, fmt: fmt,
+              levels: A ? A.S.levels : null, fib: fib, prof: prof };
+    CS.widen(O, room);
+    trades.open.forEach(function (t) { room(t.stop); room(t.target); room(t.entry); });
     var pad = (hi - lo) * 0.06 || hi * 0.001 || 1;
     hi += pad; lo -= pad;
     var top = 8, bottom = L.priceH - 4;
@@ -312,71 +258,8 @@
 
     ctx.save();
     ctx.beginPath(); ctx.rect(0, 0, L.plotW, L.priceH); ctx.clip();
-    // Ichimoku cloud under everything: green where span A is above span B, red below
-    if (A && on.ich) {
-      for (var c = 0; c + 1 < n; c++) {
-        var a0 = A.get("overlays", "span_a", c), b0 = A.get("overlays", "span_b", c);
-        var a1 = A.get("overlays", "span_a", c + 1), b1 = A.get("overlays", "span_b", c + 1);
-        if ([a0, b0, a1, b1].some(function (q) { return q === null; })) continue;
-        var x0 = (c + 0.5) * L.step, x1 = (c + 1.5) * L.step;
-        ctx.fillStyle = a0 >= b0 ? up : down; ctx.globalAlpha = 0.12;
-        ctx.beginPath(); ctx.moveTo(x0, y(a0)); ctx.lineTo(x1, y(a1)); ctx.lineTo(x1, y(b1)); ctx.lineTo(x0, y(b0));
-        ctx.closePath(); ctx.fill(); ctx.globalAlpha = 1;
-      }
-    }
-    if (A && on.bb) {  // Bollinger band shaded
-      ctx.fillStyle = COLORS.bb; ctx.globalAlpha = 0.08; ctx.beginPath();
-      var first = true;
-      for (var u = 0; u < n; u++) { var bu = A.get("overlays", "bb_upper", u); if (bu === null) continue;
-        if (first) { ctx.moveTo((u + 0.5) * L.step, y(bu)); first = false; } else ctx.lineTo((u + 0.5) * L.step, y(bu)); }
-      for (var l = n - 1; l >= 0; l--) { var bl = A.get("overlays", "bb_lower", l); if (bl !== null) ctx.lineTo((l + 0.5) * L.step, y(bl)); }
-      if (!first) ctx.fill();
-      ctx.globalAlpha = 1;
-    }
-    // support / resistance
-    if (A && on.sr) {
-      (A.S.levels || []).forEach(function (lv) {
-        if (lv.price < lo || lv.price > hi) return;
-        var ly0 = Math.round(y(lv.price)) + 0.5;
-        ctx.strokeStyle = COLORS.sr; ctx.globalAlpha = 0.7; ctx.setLineDash([2, 4]);
-        ctx.beginPath(); ctx.moveTo(0, ly0); ctx.lineTo(L.plotW, ly0); ctx.stroke(); ctx.setLineDash([]);
-        ctx.globalAlpha = 1; ctx.fillStyle = muted; ctx.textAlign = "left";
-        ctx.fillText(lv.touches + "×", 4, ly0 - 3);
-      });
-    }
-
-    // volume profile of the last 100 candles: bars from the right edge, busiest bucket (POC) brighter
-    if (prof) {
-      var vmax = 0;
-      prof.bins.forEach(function (bn) { vmax = Math.max(vmax, bn.volume); });
-      prof.bins.forEach(function (bn) {
-        if (!vmax || bn.high < lo || bn.low > hi) return;
-        var y0 = y(bn.high), y1 = y(bn.low), wd = bn.volume / vmax * L.plotW * 0.25;
-        var poc = prof.poc >= bn.low && prof.poc <= bn.high;
-        ctx.fillStyle = poc ? COLORS.fib : COLORS.vp; ctx.globalAlpha = poc ? 0.35 : 0.25;
-        ctx.fillRect(L.plotW - wd, y0 + 0.5, wd, Math.max(1, y1 - y0 - 1));
-      });
-      ctx.globalAlpha = 1;
-      [["vah", "VAH"], ["poc", "POC"], ["val", "VAL"]].forEach(function (k) {
-        var pv0 = prof[k[0]];
-        if (pv0 === null || pv0 === undefined || pv0 < lo || pv0 > hi) return;
-        var vy = Math.round(y(pv0)) + 0.5;
-        ctx.strokeStyle = k[0] === "poc" ? COLORS.fib : muted; ctx.globalAlpha = 0.7; ctx.setLineDash(k[0] === "poc" ? [] : [3, 3]);
-        ctx.beginPath(); ctx.moveTo(L.plotW * 0.75, vy); ctx.lineTo(L.plotW, vy); ctx.stroke(); ctx.setLineDash([]);
-        ctx.globalAlpha = 1; ctx.fillStyle = muted; ctx.textAlign = "right";
-        ctx.fillText(k[1], L.plotW * 0.75 - 4, vy + 4);
-      });
-    }
-    // Fibonacci retracements of the last 100 candles' swing (0% at the end of the move)
-    if (fib) {
-      fibLevels(fib).forEach(function (lv) {
-        if (lv.price < lo || lv.price > hi) return;
-        var fy = Math.round(y(lv.price)) + 0.5;
-        ctx.strokeStyle = COLORS.fib; ctx.globalAlpha = lv.ratio === 0 || lv.ratio === 1 ? 0.4 : 0.75;
-        ctx.setLineDash([6, 4]); ctx.beginPath(); ctx.moveTo(0, fy); ctx.lineTo(L.plotW, fy); ctx.stroke();
-        ctx.setLineDash([]); ctx.globalAlpha = 1;
-      });
-    }
+    O.y = y; O.lo = lo; O.hi = hi;
+    CS.drawUnder(O);  // Ichimoku cloud, Bollinger fill, levels, volume profile, Fibonacci lines
 
     // candles (volume moved to its own panel)
     var bw = Math.max(1, L.step * 0.66);
@@ -388,53 +271,7 @@
       ctx.fillStyle = col; ctx.fillRect(x - bw / 2, t0, bw, Math.max(1, b0 - t0));
     });
 
-    // overlay lines
-    if (A) {
-      var ov = function (k) { return function (i) { return A.get("overlays", k, i); }; };
-      if (on.bb) { polyline(n, ov("bb_upper"), y, L.step, COLORS.bb, 1); polyline(n, ov("bb_lower"), y, L.step, COLORS.bb, 1);
-                   polyline(n, ov("bb_mid"), y, L.step, COLORS.bb, 1, [4, 4]); }
-      if (on.ema) { polyline(n, ov("ema20"), y, L.step, COLORS.ema20); polyline(n, ov("ema50"), y, L.step, COLORS.ema50);
-                    polyline(n, ov("ema200"), y, L.step, COLORS.ema200, 2); }
-      if (on.vwap) polyline(n, ov("vwap"), y, L.step, COLORS.vwap, 1.5, [6, 3]);
-      if (on.ich) { polyline(n, ov("tenkan"), y, L.step, COLORS.tenkan, 1); polyline(n, ov("kijun"), y, L.step, COLORS.kijun, 1); }
-      if (on.st) {  // green under price in an uptrend, red above it in a downtrend
-        [1, -1].forEach(function (dir) {
-          polyline(n, function (i) { return A.get("overlays", "supertrend_dir", i) === dir ? A.get("overlays", "supertrend", i) : null; },
-                   y, L.step, dir === 1 ? up : down, 2);
-        });
-      }
-      if (on.kc) { polyline(n, ov("kc_upper"), y, L.step, COLORS.kc, 1); polyline(n, ov("kc_lower"), y, L.step, COLORS.kc, 1);
-                   polyline(n, ov("kc_mid"), y, L.step, COLORS.kc, 1, [4, 4]); }
-      if (on.pat) {  // the pattern's letter above the candle that completes it
-        ctx.font = "600 10px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.fillStyle = fg;
-        for (var q = 0; q < n; q++) {
-          var pm = A.get("patterns", null, q);
-          if (pm) ctx.fillText(pm, (q + 0.5) * L.step, y(bars[q][2]) - 4);
-        }
-        ctx.font = "12px system-ui, sans-serif";
-      }
-      if (on.psar) {
-        for (var p = 0; p < n; p++) {
-          var sv = A.get("overlays", "psar", p);
-          if (sv === null) continue;
-          ctx.fillStyle = A.get("overlays", "psar_trend", p) === 1 ? up : down;
-          ctx.beginPath(); ctx.arc((p + 0.5) * L.step, y(sv), 1.8, 0, Math.PI * 2); ctx.fill();
-        }
-      }
-    }
-
-    // Fibonacci labels on top of the candles, so they stay readable
-    if (fib) {
-      ctx.textAlign = "left";
-      fibLevels(fib).forEach(function (lv) {
-        if (lv.price < lo || lv.price > hi) return;
-        var fy = Math.round(y(lv.price)) + 0.5;
-        var ft = (lv.ratio * 100).toFixed(1).replace(".0", "") + "% " + fmt(lv.price);
-        ctx.fillStyle = css("--card") || "#fff"; ctx.globalAlpha = 0.85;
-        ctx.fillRect(2, fy - 15, ctx.measureText(ft).width + 4, 13); ctx.globalAlpha = 1;
-        ctx.fillStyle = COLORS.fib; ctx.fillText(ft, 4, fy - 4);
-      });
-    }
+    CS.drawOver(O);  // indicator lines, SAR dots, pattern letters, Fibonacci labels
 
     // the paper trader's trades: triangles at entries, dots at exits, lines for an open trade
     function tri(x, yy, pointUp, col) {
@@ -485,61 +322,8 @@
 
     // panels below the price
     var hIdx = state.hover !== null ? Math.min(n - 1, Math.max(0, state.hover)) : n - 1;
-    var legend = [];
-    L.panels.forEach(function (key, k) {
-      var pTop = L.priceH + k * PANEL_H + 6, pH = PANEL_H - 12;
-      ctx.strokeStyle = line; ctx.globalAlpha = 0.8;
-      ctx.beginPath(); ctx.moveTo(0, pTop - 3.5); ctx.lineTo(L.w, pTop - 3.5); ctx.stroke(); ctx.globalAlpha = 1;
-      var fixed = { rsi: [0, 100, [30, 70]], adx: [0, 60, [25]], stoch: [0, 100, [20, 80]], willr: [-100, 0, [-80, -20]] }[key];
-      var guides = fixed ? fixed[2] : key === "cci" ? [-100, 100] : [];
-      var series = [], pmin = Infinity, pmax = -Infinity;
-      var pv = function (name) { return function (i) { return A ? A.get("panels", name, i) : null; }; };
-      if (key === "vol") series = [{ f: function (i) { return bars[i][5] || 0; }, bars: true }];
-      if (key === "rsi") series = [{ f: pv("rsi"), c: COLORS.rsi, name: "RSI" }];
-      if (key === "adx") series = [{ f: pv("adx"), c: COLORS.adx, name: "ADX" }];
-      if (key === "atr") series = [{ f: pv("atr"), c: COLORS.atr, name: "ATR" }];
-      if (key === "cci") series = [{ f: pv("cci"), c: COLORS.cci, name: "CCI" }];
-      if (key === "willr") series = [{ f: pv("willr"), c: COLORS.willr, name: "%R" }];
-      if (key === "stoch") series = [{ f: pv("stoch_k"), c: COLORS.k, name: "K" }, { f: pv("stoch_d"), c: COLORS.d, name: "D" }];
-      if (key === "macd") series = [{ f: pv("macd_hist"), hist: true, name: "hist" }, { f: pv("macd"), c: COLORS.macd, name: "MACD" },
-                                    { f: pv("macd_signal"), c: COLORS.signal, name: "signal" }];
-      if (fixed) { pmin = fixed[0]; pmax = fixed[1]; } else {
-        series.forEach(function (sr) { for (var i = 0; i < n; i++) { var q = sr.f(i); if (q !== null && q !== undefined) { pmin = Math.min(pmin, q); pmax = Math.max(pmax, q); } } });
-        if (key === "vol") pmin = 0;
-        if (key === "macd") { var m = Math.max(Math.abs(pmin), Math.abs(pmax)); pmin = -m; pmax = m; }
-        if (key === "cci") { pmin = Math.min(pmin, -150); pmax = Math.max(pmax, 150); }
-      }
-      if (!isFinite(pmin) || !isFinite(pmax) || pmax === pmin) { pmin = 0; pmax = 1; }
-      var py = function (val) { return pTop + (pmax - val) / (pmax - pmin) * pH; };
-      guides.forEach(function (g) {
-        ctx.strokeStyle = muted; ctx.globalAlpha = 0.5; ctx.setLineDash([3, 3]);
-        ctx.beginPath(); ctx.moveTo(0, Math.round(py(g)) + 0.5); ctx.lineTo(L.plotW, Math.round(py(g)) + 0.5); ctx.stroke();
-        ctx.setLineDash([]); ctx.globalAlpha = 1; ctx.fillStyle = muted; ctx.textAlign = "left";
-        ctx.fillText(String(g), L.plotW + 6, py(g) + 4);
-      });
-      series.forEach(function (sr) {
-        if (sr.bars || sr.hist) {
-          var zero = sr.hist ? py(0) : pTop + pH;
-          for (var i = 0; i < n; i++) {
-            var q = sr.f(i);
-            if (q === null || q === undefined) continue;
-            ctx.fillStyle = sr.hist ? (q >= 0 ? up : down) : (bars[i][4] >= bars[i][1] ? up : down);
-            ctx.globalAlpha = sr.hist ? 0.6 : 0.4;
-            var yy = py(q); ctx.fillRect((i + 0.5) * L.step - bw / 2, Math.min(yy, zero), bw, Math.max(1, Math.abs(zero - yy)));
-            ctx.globalAlpha = 1;
-          }
-        } else polyline(n, sr.f, py, L.step, sr.c, 1.5);
-      });
-      ctx.fillStyle = muted; ctx.textAlign = "left";
-      ctx.fillText({ vol: "Volume", rsi: "RSI 14", macd: "MACD 12/26/9", adx: "ADX 14", stoch: "Stoch RSI",
-                    atr: "ATR 14", cci: "CCI 20", willr: "Williams %R 14" }[key], 4, pTop + 11);
-      series.forEach(function (sr) {
-        var q = sr.f(hIdx);
-        if (q === null || q === undefined || sr.bars) return;
-        legend.push('<span style="color:' + (sr.c || (q >= 0 ? up : down)) + '">' + (sr.name === "hist" ? "MACD hist" : sr.name) +
-                    " <b>" + (key === "macd" ? Number(q.toPrecision(4)) : key === "atr" ? fmt(q) : q.toFixed(1)) + "</b></span>");
-      });
-    });
+    O.top = L.priceH; O.w = L.w; O.bw = bw; O.hIdx = hIdx;
+    var legend = CS.drawPanels(O);
 
     // crosshair across price and panels
     if (state.hover !== null) {
@@ -553,24 +337,8 @@
       " " + TZ + "</span> O <b>" + fmt(hb[1]) + "</b> H <b>" + fmt(hb[2]) + "</b> L <b>" + fmt(hb[3]) +
       "</b> C <b>" + fmt(hb[4]) + '</b> <span class="' + (chg >= 0 ? "good" : "bad") + '">' +
       (chg >= 0 ? "+" : "") + chg.toFixed(2) + "%</span>";
-    if (A) {
-      var named = { ema20: "EMA20", ema50: "EMA50", ema200: "EMA200", vwap: "VWAP", supertrend: "Supertrend",
-                    tenkan: "Tenkan", kijun: "Kijun", psar: "SAR", bb_upper: "BB up", bb_lower: "BB low",
-                    kc_upper: "KC up", kc_lower: "KC low" };
-      var front = [];
-      overlayKeys.forEach(function (k) {
-        var q = A.get("overlays", k, hIdx);
-        if (q === null || !named[k]) return;
-        var col = COLORS[k] || (k === "supertrend" ? (A.get("overlays", "supertrend_dir", hIdx) === 1 ? up : down) :
-                                k.indexOf("bb") === 0 ? COLORS.bb : k.indexOf("kc") === 0 ? COLORS.kc : COLORS.psar);
-        front.push('<span style="color:' + col + '">' + named[k] + " <b>" + fmt(q) + "</b></span>");
-      });
-      var hp = on.pat ? A.get("patterns", null, hIdx) : null;
-      if (hp) front.push('<span>' + hp.split("").map(function (c) { return PATTERN_NAMES[c]; }).join(", ") + "</span>");
-      legend = front.concat(legend);
-    } else if (["ema", "bb", "vwap", "st", "ich", "psar", "sr", "kc", "fib", "vp", "pat"].some(function (k) { return on[k]; }) || L.panels.some(function (k) { return k !== "vol"; })) {
-      legend = ['<span class="muted">Loading indicators…</span>'];
-    }
+    if (A) legend = CS.overlayLegend(O, hIdx).concat(legend);
+    else if (CS.anyOn(on)) legend = ['<span class="muted">Loading indicators…</span>'];
     legendEl.innerHTML = legend.join("");
   }
 
@@ -611,9 +379,11 @@
     b.addEventListener("click", function () { select(null, b.dataset.tf); });
   });
   canvas.addEventListener("mousemove", pointer);
-  canvas.addEventListener("touchstart", pointer, { passive: true });
+  // a phone sends a mouseleave right after each tap: keep the tapped candle's values on screen
+  var touchedAt = 0;
+  canvas.addEventListener("touchstart", function (ev) { touchedAt = Date.now(); pointer(ev); }, { passive: true });
   canvas.addEventListener("touchmove", pointer, { passive: true });
-  canvas.addEventListener("mouseleave", function () { state.hover = null; draw(); });
+  canvas.addEventListener("mouseleave", function () { if (Date.now() - touchedAt < 1500) return; state.hover = null; draw(); });
   window.addEventListener("resize", resize);
   function wake() { state.busy = false; poll(); }  // back from sleep or another tab: poll at once
   document.addEventListener("visibilitychange", function () { if (!document.hidden) wake(); });
