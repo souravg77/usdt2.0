@@ -354,7 +354,7 @@ paper trading. Nothing trades real money.</p>
         note = f'<p class="good">{_e(msg)}</p>' if msg else ""
         events = EventLog(paths.events).read(limit=600)
         body = [note, _trading_stats(c, settings, paths, paper, events, acct),
-                '<div class="grid">', _account_card(acct), _paper_switch_card(c, paths, events, jobs.list(), csrf),
+                '<div class="grid">', _account_card(acct, csrf), _paper_switch_card(c, paths, events, jobs.list(), csrf),
                 _ai_card(paths, jobs.list(), csrf), _live_card(settings, paths, events), "</div>",
                 '<div class="grid">', controls, _gate_card(paths, csrf), "</div>",
                 "<h2>Equity</h2>", _equity_svg(paper, execs),
@@ -375,6 +375,14 @@ paper trading. Nothing trades real money.</p>
         from ..ops import EventLog
 
         EventLog(paths.events, service="dashboard").emit(kind, text, level=level)
+
+    @app.post("/trading/account/refresh")
+    def trading_account_refresh(request: Request, csrf: str = Form("")):
+        def act(user):
+            if account.refresh_now():
+                return "Asking Bybit for the balance again."
+            return "The balance was read a few seconds ago; that is the latest."
+        return _control_post(request, csrf, act)
 
     @app.post("/trading/pause")
     def trading_pause(request: Request, csrf: str = Form("")):
@@ -855,7 +863,8 @@ def _usdt(v) -> str:
 def _account_tile(acct: dict) -> tuple[str, str, str, str]:
     st = acct.get("state")
     if st == "ok":
-        return ("Bybit account", f"{acct['total_usdt']:,.2f}", "", "USDT, real balance")
+        return ("Bybit account", f"{acct['total_usdt']:,.2f}", "warn" if acct.get("stale") else "",
+                "USDT, last refresh failed" if acct.get("stale") else "USDT, real balance")
     if st == "no_key":
         return ("Bybit account", "no key", "warn", "save it on Settings")
     if st == "loading":
@@ -863,25 +872,43 @@ def _account_tile(acct: dict) -> tuple[str, str, str, str]:
     return ("Bybit account", "error", "bad", acct.get("note", ""))
 
 
-def _account_card(acct: dict) -> str:
+def _ago(at: float, now: float) -> str:
+    s = max(0, int(now - at))
+    if s < 90:
+        return f"{s} seconds ago"
+    if s < 5400:
+        return f"{round(s / 60)} minutes ago"
+    return f"{s / 3600:.1f} hours ago"
+
+
+def _account_card(acct: dict, csrf: str = "", now: float | None = None) -> str:
     """The real Bybit account, read only: what it holds and what that is worth in USDT."""
     st = acct.get("state")
+    now = time.time() if now is None else now
     head = '<div class="card"><h3>Bybit real account (read only)</h3>'
+    again = (f'<form method="post" action="/trading/account/refresh">{csrf}<button class="ghost">Refresh now'
+             '</button></form>') if csrf else ""
     if st == "no_key":
         return (head + '<p class="small">Save your real-account key on the <a href="/settings">Settings</a> page '
                 'to see your Bybit balance here. Paper trading doesn\'t need it.</p></div>')
     if st == "loading":
         return head + '<p class="small muted">Asking Bybit for the balance; reload in a moment.</p></div>'
     if st != "ok":
-        return head + f'<p class="bad small">{_e(acct.get("note", ""))}</p></div>'
+        return head + f'<p class="bad small">{_e(acct.get("note", ""))}</p>{again}</div>'
     rows = "".join(f'<tr><td>{_e(c["asset"])}</td><td class="num">{c["amount"]:,.8g}</td>'
                    f'<td class="num">{_usdt(c["usdt"])}</td></tr>' for c in acct["coins"])
     table = (f'<table><tr><th>Coin</th><th>Amount</th><th>USDT</th></tr>{rows}</table>' if rows
              else '<p class="muted small">The spot account is empty.</p>')
+    notes = "".join(f'<p class="bad small">{_e(n)}</p>' for n in (
+        f'Last refresh failed ({acct["stale"]}); these are the numbers from {_ago(acct["at"], now)}.'
+        if acct.get("stale") else "",
+        f'{acct["price_note"]}; coins without a price count as 0 in the total.' if acct.get("price_note") else "")
+        if n)
     return (head + f'<p>Total <b>{acct["total_usdt"]:,.2f} USDT</b> '
-            f'<span class="muted small">at {_e(time.strftime("%H:%M", time.gmtime(acct["at"])))} UTC</span></p>'
-            f'{table}<p class="small muted">Read from Bybit with your saved key, at most once a minute. This '
-            'card can\'t trade; real orders need the live lock on the server.</p></div>')
+            f'<span class="muted small">updated {_ago(acct["at"], now)}</span></p>{notes}'
+            f'{table}<p class="small muted">Read from Bybit with your saved key once a minute (this page reloads '
+            'itself every minute). This card can\'t trade; real orders need the live lock on the server.</p>'
+            f'{again}</div>')
 
 
 def _paper_switch_card(c: dict, paths: Paths, events: list[dict], jobs: list[dict], csrf: str) -> str:
