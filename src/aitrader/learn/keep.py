@@ -97,6 +97,13 @@ INDICATOR_WORDS: dict[str, str] = {
     "macd": r"\bmacd",
     "adx": r"\b(adx|plus_di|minus_di)\b",
     "stoch": r"\bstoch",
+    "kc": r"\b(keltner|kc_\w+)",
+    "fib": r"\b(fib\w*|retracement)",
+    "vp": r"\b(volume profile|value area|point of control|poc|vah|val)\b",
+    "pat": r"\b(hammer|doji|engulfing|inside_bar|outside_bar|pin bar|ha_green|heikin|body_pct)",
+    "atr": r"\b(atr\w*|true range)",
+    "cci": r"\bcci",
+    "willr": r"\b(williams|willr)",
 }
 # a book rule's notes (why it was coded so, what couldn't be) can name indicators it doesn't use
 NOT_RULES = ("name", "description", "source", "decisions", "uncodable")

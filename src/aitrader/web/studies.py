@@ -13,8 +13,12 @@ import math
 import pandas as pd
 
 from .. import indicators as ind
+from ..indicators import core
+from ..indicators.results import fibonacci_result
 
 MAX_TRADES = 40
+PROFILE_BARS = 100  # volume profile and Fibonacci swing: the last 100 bars, as the strategies use
+PATTERNS = {"bullish_engulfing": "E", "hammer": "H", "doji": "D", "inside_bar": "I"}
 
 
 def _series(s: pd.Series, digits: int = 10, tail: int = 0) -> list:
@@ -27,7 +31,7 @@ def compute(candles: list[list], tail: int = 0) -> dict:
     """Overlays (drawn on the price), panels (drawn below it) and support/resistance levels.
     Indicators warm up on every candle; ``tail`` keeps only the last values of each series."""
     if len(candles) < 2:
-        return {"overlays": {}, "panels": {}, "levels": []}
+        return {"overlays": {}, "panels": {}, "levels": [], "fib": None, "profile": None, "patterns": []}
     df = pd.DataFrame([r[:6] for r in candles], columns=["ts", "open", "high", "low", "close", "volume"])
     df = df.astype({"open": float, "high": float, "low": float, "close": float, "volume": float})
     close = df["close"]
@@ -41,6 +45,7 @@ def compute(candles: list[list], tail: int = 0) -> dict:
     sar = ind.parabolic_sar(df)
     m = ind.macd(close)
     srsi = ind.stoch_rsi(close)
+    kc = ind.keltner(df)
     overlays = {
         "ema20": series(ind.ema(close, 20)),
         "ema50": series(ind.ema(close, 50)),
@@ -51,20 +56,53 @@ def compute(candles: list[list], tail: int = 0) -> dict:
         "tenkan": series(ich["tenkan"]), "kijun": series(ich["kijun"]),
         "span_a": series(ich["span_a"]), "span_b": series(ich["span_b"]),
         "psar": series(sar["sar"]), "psar_trend": series(sar["trend"]),
+        "kc_upper": series(kc["upper"]), "kc_mid": series(kc["mid"]), "kc_lower": series(kc["lower"]),
     }
     panels = {
         "rsi": series(ind.rsi(close), 2),
         "macd": series(m["macd"]), "macd_signal": series(m["signal"]), "macd_hist": series(m["hist"]),
         "adx": series(ind.adx(df), 2),
         "stoch_k": series(srsi["k"] * 100, 2), "stoch_d": series(srsi["d"] * 100, 2),
+        "atr": series(ind.atr(df)), "cci": series(ind.cci(df), 2), "willr": series(ind.williams_r(df), 2),
     }
     try:
         levels = ind.support_resistance(df.tail(300))
     except Exception:
         levels = []
     levels = sorted(levels, key=lambda lv: -lv["touches"])[:8]
+    pats = core.candle_patterns(df)
+    marks = ["".join(c for col, c in PATTERNS.items() if row[col]) or None for _, row in pats.iterrows()]
     return {"overlays": overlays, "panels": panels,
-            "levels": [{"price": round(lv["price"], 10), "touches": lv["touches"]} for lv in levels]}
+            "levels": [{"price": round(lv["price"], 10), "touches": lv["touches"]} for lv in levels],
+            "fib": _fib(df), "profile": _profile(df.tail(PROFILE_BARS)),
+            "patterns": marks[-tail:] if tail else marks}
+
+
+def _fib(df: pd.DataFrame) -> dict | None:
+    """The Fibonacci retracement levels of the last PROFILE_BARS bars' swing, as
+    ``fibonacci_result`` (the strategies' version) measures them."""
+    try:
+        r = fibonacci_result(df, lookback=PROFILE_BARS)
+    except Exception:
+        return None
+    v = r.features
+    if not r.is_valid or "swing_high" not in v:
+        return None
+    return {"leg": r.metadata.get("leg"), "high": v["swing_high"], "low": v["swing_low"],
+            "levels": [{"ratio": float(k[6:]), "price": p} for k, p in v.items()
+                       if k.startswith("level_") and math.isfinite(p)]}
+
+
+def _profile(win: pd.DataFrame) -> dict | None:
+    """Volume per price bucket over the last PROFILE_BARS bars, with the point of control and
+    the 70% value area (high and low)."""
+    if len(win) < 2 or win["volume"].sum() <= 0:
+        return None
+    prof = core.volume_profile(win)
+    va = core.value_area(win)
+    return {"bins": [{"low": float(r.low), "high": float(r.high), "volume": float(r.volume)}
+                     for r in prof.itertuples()],
+            "poc": va["poc"], "vah": va["vah"], "val": va["val"]}
 
 
 def paper_trades(paper_state_path: str, symbol: str) -> dict:
