@@ -272,9 +272,9 @@ def test_trading_page_shows_the_real_bybit_balance_read_only(tmp_path, monkeypat
     from aitrader.web.account import RealAccount
 
     class Client:
-        async def fetch_tickers(self, pairs):
-            assert pairs == ["BTC/USDT", "SHIB/USDT"]
-            return {"BTC/USDT": {"last": 60_000.0}, "SHIB/USDT": {"last": 0.00001}}
+        async def fetch_tickers(self, *pairs):
+            assert not pairs  # every ticker: a list fails whole when one coin has no USDT market
+            return {"BTC/USDT": {"last": 60_000.0}, "SHIB/USDT": {"last": 0.00001}, "ETH/USDT": {"last": 1.0}}
 
     class Adapter:
         made = []
@@ -299,7 +299,7 @@ def test_trading_page_shows_the_real_bybit_balance_read_only(tmp_path, monkeypat
     snap = asyncio.run(acct.snapshot())
     assert snap["state"] == "ok" and snap["total_usdt"] == pytest.approx(185.0)
     assert [c["asset"] for c in snap["coins"]] == ["USDT", "BTC"]  # dust (SHIB) left out
-    assert Adapter.made[-1].closed
+    assert not Adapter.made[-1].closed  # one client kept for the key
     asyncio.run(acct.snapshot())
     assert len(Adapter.made) == 1  # cached for a minute
 
@@ -324,6 +324,86 @@ def test_trading_page_shows_the_real_bybit_balance_read_only(tmp_path, monkeypat
     login(client)
     page = client.get("/trading").text
     assert "Bybit real account (read only)" in page and "185.00 USDT" in page and "<td>BTC</td>" in page
+    assert "updated 0 seconds ago" in page
+    assert 'action="/trading/account/refresh"' in page
+
+
+def test_real_balance_keeps_refreshing(tmp_path, monkeypatch):
+    """Prices move the total each minute, a coin without a USDT market doesn't freeze the rest,
+    a failed refresh keeps the last numbers with a note, and Refresh now asks again."""
+    import asyncio
+
+    from aitrader.models import Balance
+    from aitrader.web.account import RealAccount
+
+    price, fail, made = [60_000.0], [None], []
+
+    class Client:
+        async def fetch_tickers(self, *pairs):
+            assert not pairs
+            return {"BTC/USDT": {"last": price[0]}}  # no NEWCOIN/USDT market
+
+    class Adapter:
+        def __init__(self, key, secret):
+            self.client = Client()
+            made.append(self)
+
+        async def balance(self):
+            if fail[0]:
+                raise fail[0]
+            return Balance("bybit", free={"USDT": 100.0, "BTC": 0.01, "NEWCOIN": 5.0}, used={})
+
+        async def close(self):
+            pass
+
+    clock = [0.0]
+    acct = RealAccount(adapter_factory=Adapter, environ={"BYBIT_API_KEY": "k" * 20, "BYBIT_API_SECRET": "s" * 20},
+                       clock=lambda: clock[0])
+
+    async def run():
+        snap = await acct.snapshot()
+        assert snap["total_usdt"] == pytest.approx(700.0) and not snap["price_note"]
+        assert {c["asset"]: c["usdt"] for c in snap["coins"]}["NEWCOIN"] is None
+        price[0] = 70_000.0
+        clock[0] = 61.0
+        assert (await acct.snapshot())["total_usdt"] == pytest.approx(800.0)  # the minute passed: new prices
+        assert len(made) == 1  # same client, markets loaded once
+
+        class NetworkError(Exception):
+            pass
+
+        fail[0] = NetworkError("down")
+        clock[0] = 122.0
+        snap = await acct.snapshot()
+        assert snap["state"] == "ok" and snap["total_usdt"] == pytest.approx(800.0)
+        assert "couldn't reach Bybit" in snap["stale"]
+        fail[0], price[0] = None, 50_000.0
+        assert acct.refresh_now() is False  # asked a moment ago
+        clock[0] = 140.0
+        assert acct.refresh_now() is True
+        snap = await acct.snapshot()
+        assert snap["total_usdt"] == pytest.approx(600.0) and "stale" not in snap
+        assert len(made) == 2  # a fresh client after the failure
+
+    asyncio.run(run())
+
+    from aitrader.web.app import _account_card
+    card = _account_card({**snap_ok(), "stale": "couldn't reach Bybit just now"}, csrf="<input>", now=1_000.0 + 300)
+    assert "Last refresh failed" in card and "5 minutes ago" in card and "Refresh now" in card
+
+    monkeypatch.chdir(tmp_path)
+    app = create_app(Settings(db_path=str(tmp_path / "x.db")), Auth("admin", PW, "k"),
+                     JobRunner(str(tmp_path / "jobs")), Paths(), account=acct)
+    client = TestClient(app)
+    csrf = Auth("admin", PW, "k").csrf(login(client))
+    assert client.post("/trading/account/refresh", data={"csrf": "x"}).status_code == 403
+    r = client.post("/trading/account/refresh", data={"csrf": csrf}, follow_redirects=False)
+    assert r.status_code == 303 and "/trading?msg=" in r.headers["location"]
+
+
+def snap_ok():
+    return {"state": "ok", "coins": [{"asset": "USDT", "amount": 1.0, "free": 1.0, "usdt": 1.0}],
+            "total_usdt": 1.0, "at": 1_000.0, "price_note": ""}
 
 
 def test_ai_filter_train_turn_on_and_off_from_the_trading_page(web, monkeypatch):

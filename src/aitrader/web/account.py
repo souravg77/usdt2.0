@@ -5,7 +5,12 @@ holds and what it is worth in USDT. Only two reads are made: the wallet balance 
 and the public prices of the coins held. Nothing here can place, change or cancel an order.
 
 Answers are cached for a minute, so Bybit sees at most one balance request a minute however many
-pages are open. Errors are shown by their type only: ccxt puts the signed request in the message.
+pages are open ("Refresh now" asks again at once, at most every ``MIN_GAP_S`` seconds). One Bybit
+client is kept for the key and loads only the spot market list, so a refresh is two quick calls
+instead of re-loading every perpetual and option market each minute, which could outrun the
+timeout and leave the card on old numbers. When a refresh fails the last good numbers stay, marked
+with their age and the reason. Errors are shown by their type only: ccxt puts the signed request
+in the message.
 """
 
 from __future__ import annotations
@@ -15,6 +20,7 @@ import os
 import time
 
 CACHE_S = 60.0
+MIN_GAP_S = 10.0
 STABLE = {"USDT", "USDC", "FDUSD"}
 DUST_USDT = 0.01
 
@@ -27,6 +33,8 @@ class RealAccount:
         self._at = 0.0
         self._for = ""
         self._task: asyncio.Task | None = None
+        self._adapter = None
+        self._adapter_for = ""
 
     def _keys(self) -> tuple[str, str]:
         return (self.environ.get("BYBIT_API_KEY", "").strip(), self.environ.get("BYBIT_API_SECRET", "").strip())
@@ -49,19 +57,43 @@ class RealAccount:
             return {"state": "loading"}
         return self._snap
 
+    def refresh_now(self) -> bool:
+        """Make the next page load ask Bybit again. False when the last answer is under
+        ``MIN_GAP_S`` seconds old (it is shown as it is)."""
+        if self._snap is not None and self.clock() - self._at < MIN_GAP_S:
+            return False
+        self._at = 0.0
+        return True
+
+    async def _drop_adapter(self) -> None:
+        adapter, self._adapter, self._adapter_for = self._adapter, None, ""
+        if adapter is not None:
+            try:
+                await adapter.close()
+            except Exception:
+                pass
+
     async def _refresh(self, key: str, secret: str) -> None:
-        adapter = self.adapter_factory(key, secret)
+        prev = self._snap if self._snap is not None and self._for == key[-4:] else None
         try:
+            if self._adapter is None or self._adapter_for != key:
+                await self._drop_adapter()
+                self._adapter, self._adapter_for = self.adapter_factory(key, secret), key
+            adapter = self._adapter
             bal = await asyncio.wait_for(adapter.balance(), timeout=10)
             assets = sorted(set(bal.free) | set(bal.used))
             pairs = [f"{a}/USDT" for a in assets if a not in STABLE]
-            prices = {}
+            prices, price_note = {}, ""
             if pairs:
+                # every spot ticker in one call, then ours picked out: asking for a list makes ccxt
+                # refuse the whole call when one coin has no USDT market, and the total then
+                # counted the stablecoins only and stood still while prices moved
                 try:
-                    raw = await asyncio.wait_for(adapter.client.fetch_tickers(pairs), timeout=10)
-                    prices = {s.split("/")[0]: float(t["last"]) for s, t in raw.items() if t.get("last")}
-                except Exception:
-                    pass  # a coin without a USDT market is listed without a value
+                    raw = await asyncio.wait_for(adapter.client.fetch_tickers(), timeout=10)
+                    prices = {p.split("/")[0]: float(raw[p]["last"]) for p in pairs
+                              if (raw.get(p) or {}).get("last")}
+                except Exception as exc:
+                    price_note = "coin prices: " + _why(exc)
             coins = []
             for a in assets:
                 amount = bal.total(a)
@@ -71,14 +103,13 @@ class RealAccount:
                 coins.append({"asset": a, "amount": amount, "free": bal.free.get(a, 0.0), "usdt": value})
             coins.sort(key=lambda c: -(c["usdt"] or 0))
             snap = {"state": "ok", "coins": coins, "total_usdt": sum(c["usdt"] or 0 for c in coins),
-                    "at": time.time()}
+                    "at": time.time(), "price_note": price_note}
         except Exception as exc:
-            snap = {"state": "error", "note": _why(exc), "at": time.time()}
-        finally:
-            try:
-                await adapter.close()
-            except Exception:
-                pass
+            await self._drop_adapter()  # the next try starts with a fresh connection
+            if prev is not None and prev.get("state") == "ok":
+                snap = {**prev, "stale": _why(exc)}  # keep the last good numbers, with their age
+            else:
+                snap = {"state": "error", "note": _why(exc), "at": time.time()}
         self._snap, self._at, self._for = snap, self.clock(), key[-4:]
 
 
@@ -88,7 +119,10 @@ def _bybit(key: str, secret: str):
 
     # paper Settings: this adapter is only ever asked for the balance and prices; any order
     # would still be refused by the live lock
-    return BybitAdapter(Settings(), keys=ExchangeKeys(key, secret))
+    adapter = BybitAdapter(Settings(), keys=ExchangeKeys(key, secret))
+    # spot markets only: Bybit's full list adds perpetuals and options, several slow calls
+    adapter.client.options.setdefault("fetchMarkets", {})["types"] = ["spot"]
+    return adapter
 
 
 def _why(exc: Exception) -> str:
