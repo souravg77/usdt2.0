@@ -60,8 +60,16 @@ class CombinedControl:
     def killed(self) -> bool:
         return self.state()["killed"]
 
+    @property
+    def halted(self) -> bool:
+        return self.own.halted
+
     def pause(self, reason: str, by: str = "") -> dict:
         return self.own.pause(reason, by)
+
+    def halt(self, reason: str, by: str = "") -> dict:
+        """A safety halt of this user's trading (the executor can't vouch for a position)."""
+        return self.own.halt(reason, by)
 
     def kill(self, reason: str = "kill switch", by: str = "") -> dict:
         return self.own.kill(reason, by)

@@ -354,6 +354,9 @@ def test_combined_control():
     c.kill(by="me")
     assert c.killed and own.killed and not plat.killed
     json.dumps(c.state())
+    own.resume()
+    c.halt("no resting stop on BTC/USDT", by="safety halt (live)")  # the executor's safety halt
+    assert c.halted and c.paused and own.halted and not plat.paused
 
 
 def test_switching_live_off_sells_live_positions(tmp_path):

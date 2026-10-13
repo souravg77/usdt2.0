@@ -1042,3 +1042,24 @@ def test_bybit_adapter_perp_orders_stops_and_margin_check():
         run(locked.prepare_perp(PERP, 1.0))
     with pytest.raises(Exception):
         run(locked.place_order(PERP, Side.SELL, 1, client_id="x"))
+
+
+def test_one_position_whose_check_fails_doesnt_block_the_others(ex):
+    make, adapter, paper, _events = ex
+    eth = "s1|bybit|ETH/USDT|1h"
+    _paper(paper, {eth: _pos(SIG), KEY: _pos(SIG)})
+    e = make()
+    run(e.tick())
+    assert set(e.state["positions"]) == {eth, KEY}
+    real = adapter.get_orderbook
+
+    async def book(symbol, depth=20):
+        if symbol == "ETH/USDT":
+            raise RuntimeError("bad request for ETH/USDT")
+        return await real(symbol, depth)
+
+    adapter.get_orderbook = book
+    adapter.bid = 94.0  # BTC falls through its stop
+    out = run(e.tick())
+    assert out["closed"] == [KEY]  # still checked and sold, though ETH's check failed first
+    assert e.state["failures"] == 1 and eth in e.state["positions"]

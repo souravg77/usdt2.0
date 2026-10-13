@@ -104,6 +104,33 @@ def test_an_improvement_must_pass_the_full_gate(monkeypatch):
     assert "already found" in again["outcome"]
 
 
+def test_an_improved_builtin_still_runs(monkeypatch):
+    """A hand-coded strategy keeps its code's name, so the improved version can be built and gated."""
+    reg = Registry("/nonexistent/reg.json")
+    e = Entry(id="builtin-trend_pullback", kind="builtin", name="trend_pullback", status="paper")
+    reg.add(e)
+
+    class Markets(FakeMarkets):
+        def run(self, entry, part, cfg):
+            make_strategy(entry)
+            t = imp.tunables(entry)
+            exp = 0.01 * t["target_r"] if part == 0 else 0.05 * t["target_r"]
+            return {"trades": 100, "expectancy_r": exp, "win_rate": 0.5, "profit_factor": 1.2,
+                    "max_drawdown_r": 5.0}
+
+    def fake_evaluate(entry, store, exchanges, symbols, cfg=None, **kw):
+        make_strategy(entry)  # what the real gate does first
+        entry.backtest = {"failed": []}
+        entry.set_status("paper", "test")
+
+    monkeypatch.setattr(imp, "evaluate", fake_evaluate)
+    out = imp.improve_one(e, reg, Markets(None), BacktestConfig(), ["bybit"], ["BTC/USDT"], max_evals=40)
+    assert out["new_id"], out["outcome"]
+    new = reg.get(out["new_id"])
+    assert new.name == "trend_pullback" and new.id.startswith("builtin-trend_pullback~")
+    assert make_strategy(new).params["target_r"] > make_strategy(e).params["target_r"]
+
+
 def test_nothing_to_tune():
     e = Entry(id="x", kind="rule", name="x", spec={"stop": {"type": "expr", "expr": "low"}, "target": None})
     assert "nothing to tune" in imp.improve_one(e, Registry("/nonexistent/r.json"), FakeMarkets(lambda t: 0),
