@@ -26,6 +26,8 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from ..clock import label as tz_label, local, offset_minutes
+
 from fastapi import FastAPI, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
 
@@ -108,7 +110,9 @@ def create_app(settings: Settings, auth: Auth, jobs: JobRunner, paths: Paths | N
                    f'<button class="link">Log out</button></form></div>')
         meta = f'<meta http-equiv="refresh" content="{refresh}">' if refresh else ""
         mode = settings.mode.value
-        return HTMLResponse(f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+        now = time.time()
+        return HTMLResponse(f"""<!doctype html><html lang="en" data-tz-offset="{offset_minutes(now)}"
+data-tz-label="{_e(tz_label(now))}"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">{meta}
 <title>{_e(title)} · aitrader</title><style>{CSS}</style></head>
 <body><header><a class="brand" href="/"><span class="logo" aria-hidden="true"></span>aitrader</a>
@@ -585,7 +589,7 @@ def _csrf(auth: Auth, token: str | None) -> str:
 def _when(ts) -> str:
     if not ts:
         return "-"
-    return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    return local(ts)
 
 
 def _status_class(status: str) -> str:

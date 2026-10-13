@@ -16,6 +16,8 @@ import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
+from ..clock import local
+
 log = logging.getLogger(__name__)
 
 FEED_THIS_WEEK = "https://nfs.faireconomy.media/cc_calendar_thisweek.json"
@@ -119,10 +121,10 @@ class CalendarFilter:
                 continue
             if ev.time - self.block_before <= at < ev.time:
                 return FilterDecision(False, 0.0, True, f"{ev.title} ({ev.country}) at "
-                                      f"{ev.time:%H:%M} UTC: no new entries before release", ev)
+                                      f"{local(ev.time.timestamp(), '%H:%M')}: no new entries before release", ev)
             if ev.time <= at < ev.time + self.settle_after:
                 return FilterDecision(False, 0.0, False, f"{ev.title} ({ev.country}) released "
-                                      f"{ev.time:%H:%M} UTC: waiting for markets to settle", ev)
+                                      f"{local(ev.time.timestamp(), '%H:%M')}: waiting for markets to settle", ev)
         if not self.healthy(at.timestamp()):
             return FilterDecision(True, self.failsafe_size, False,
                                   "calendar feed unavailable: trading at reduced size")
