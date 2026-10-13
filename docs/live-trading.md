@@ -66,6 +66,28 @@ docker compose run --rm collector trade kill --confirm
 The dashboard's **Trading** page has the same buttons (the kill switch needs you to type `KILL`),
 and so does Telegram (`/pause`, `/resume`, `/kill CONFIRM`).
 
+## Safety halt (automatic)
+
+The live executor stops opening trades by itself, and alerts you, when it can't vouch for what
+it holds:
+
+- an open position has no confirmed stop resting on Bybit 2 minutes after it filled;
+- the account holds less of a coin (or a short) than the ledger says (checked after a restart and
+  every 5 minutes);
+- the Bybit price stream has been quiet for 2 minutes on a coin with an open position
+  (`AITRADER_FEED_HALT_S`, at least 30 seconds);
+- 5 executor passes in a row failed;
+- a short is within 3% of Bybit's own liquidation price (mark price), or its stop is no longer at
+  most halfway from entry to that price (checked every minute).
+
+On a halt, entry orders still waiting are cancelled; resting stops and exits are left alone, so
+open positions stay protected. The dashboard shows **SAFETY HALT** with the reason. Check the
+account on Bybit, fix the cause, then press **Resume** (or `/resume` on Telegram). The halt
+pauses paper trading too, because pause is shared.
+
+Secrets never reach the logs: every log line, traceback and event is passed through
+`ops/redact.py`, which hides key and secret values, signed URLs and Bybit's signing headers.
+
 ## Step 1: your real Bybit key (read only until you go live)
 
 Make a key on bybit.com: **API Management → Create New Key → System-generated**, Read-Write, tick
@@ -178,8 +200,17 @@ It can't approve anything.
 When the gate passes, approve one or two strategies by id (`aitrader learn list` shows them):
 
 ```bash
-docker compose run --rm collector golive approve --strategy <id> --by Shawn
+docker compose run --rm -it collector golive approve --strategy <id> --by Shawn
 ```
+
+It re-runs the gate, then shows what you are approving and asks you to type a phrase that names
+the strategies, for example `I approve <id> for real-money trading`. Only that exact phrase,
+typed at a terminal, approves. There is no `--yes` flag, piped input is refused (so the `-it`
+matters), and the website has no way to approve.
+
+The approval file is sealed. If it is edited by hand, copied, or written by anything other than
+`golive approve`, the live executor refuses to start, the guard blocks every entry, and the
+dashboard and `aitrader doctor` say so.
 
 The approval is tied to those strategies' rules and to the active AI model. If either changes,
 the live executor stops opening trades for it until you check the gate and approve again.

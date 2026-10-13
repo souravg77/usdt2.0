@@ -7,7 +7,15 @@ from aitrader.strategies import (FAMILY_STRATEGIES, STRATEGIES, BuyTheDip, Momen
 
 
 DATA = {"buy_the_dip": dict(vol=0.03, drift=0.0015),
-        "cci_divergence": dict(seed=8, vol=0.01, drift=0.0)}
+        "cci_divergence": dict(seed=8, vol=0.01, drift=0.0),
+        "ema_crossover": dict(seed=0, vol=0.02, drift=0.0),
+        "sma_crossover": dict(seed=0, vol=0.02, drift=0.0),
+        "opening_range_breakout": dict(seed=0, tf_ms=300_000),
+        "vwap_reclaim": dict(seed=0, tf_ms=900_000),
+        "vwap_mean_reversion": dict(seed=0, drift=0.0, tf_ms=900_000),
+        "rsi_reversal": dict(seed=0),
+        "rsi_divergence": dict(seed=0),
+        "ml_classifier": dict(seed=0)}
 
 
 def synthetic(n=1500, seed=7, drift=0.0004, vol=0.01, tf_ms=3_600_000):

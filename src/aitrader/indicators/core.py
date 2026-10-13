@@ -269,6 +269,28 @@ def vwap(df: pd.DataFrame, n: int | None = 20, anchor: str | None = None) -> pd.
     return pv.rolling(n, min_periods=n).sum() / df["volume"].rolling(n, min_periods=n).sum().replace(0, np.nan)
 
 
+def vwap_bands(df: pd.DataFrame, n: int | None = 20, anchor: str | None = "D") -> pd.DataFrame:
+    """VWAP with its volume-weighted standard deviation of the typical price over the same bars
+    (anchored at each ``anchor`` period, UTC, or rolling over ``n`` bars). ``bars`` counts the
+    bars in the current anchor period (or ``n`` once a rolling window is full)."""
+    typical = (df["high"] + df["low"] + df["close"]) / 3
+    vol = df["volume"]
+    if anchor:
+        key = pd.to_datetime(df["ts"], unit="ms", utc=True).dt.floor(anchor).to_numpy()
+        v = vol.groupby(key).cumsum().replace(0, np.nan)
+        mean = (typical * vol).groupby(key).cumsum() / v
+        sq = (typical ** 2 * vol).groupby(key).cumsum() / v
+        bars = pd.Series(1, index=df.index).groupby(key).cumsum()
+    else:
+        v = vol.rolling(n, min_periods=n).sum().replace(0, np.nan)
+        mean = (typical * vol).rolling(n, min_periods=n).sum() / v
+        sq = (typical ** 2 * vol).rolling(n, min_periods=n).sum() / v
+        bars = pd.Series(np.minimum(np.arange(len(df)) + 1, n), index=df.index)
+    sd = np.sqrt((sq - mean ** 2).clip(lower=0))
+    return pd.DataFrame({"vwap": mean, "sd": sd, "upper1": mean + sd, "lower1": mean - sd,
+                         "upper2": mean + 2 * sd, "lower2": mean - 2 * sd, "bars": bars}, index=df.index)
+
+
 def relative_volume(df: pd.DataFrame, n: int = 20) -> pd.Series:
     """This bar's volume divided by the average of the previous ``n`` bars."""
     return df["volume"] / df["volume"].shift(1).rolling(n, min_periods=n).mean()
@@ -417,6 +439,14 @@ def bullish_divergence(df: pd.DataFrame, osc: pd.Series, lookback: int = 30,
 FIB_RATIOS = (0.236, 0.382, 0.5, 0.618, 0.786)
 
 
+def donchian(df: pd.DataFrame, n: int = 20) -> pd.DataFrame:
+    """Donchian channel of the *previous* ``n`` bars (the current bar is left out, so a close
+    above ``upper`` is a breakout): highest high, lowest low and their middle."""
+    upper = df["high"].shift(1).rolling(n, min_periods=n).max()
+    lower = df["low"].shift(1).rolling(n, min_periods=n).min()
+    return pd.DataFrame({"upper": upper, "lower": lower, "mid": (upper + lower) / 2}, index=df.index)
+
+
 def fib_levels(swing_low: float, swing_high: float, ratios=FIB_RATIOS) -> dict[float, float]:
     """Fibonacci retracement prices for a move from ``swing_low`` up to ``swing_high``: how far
     a pullback would go at each ratio (Binance Academy: 23.6, 38.2, 50, 61.8, 78.6%)."""
@@ -434,6 +464,33 @@ def volume_profile(df: pd.DataFrame, bins: int = 24) -> pd.DataFrame:
     out = pd.DataFrame({"low": edges[:-1], "high": edges[1:], "volume": vol})
     out["poc"] = out["volume"] == out["volume"].max()
     return out
+
+
+def value_area(df: pd.DataFrame, bins: int = 24, share: float = 0.70) -> dict:
+    """Point of control and value area of ``df`` (pass a trailing window, e.g. the last 100
+    bars, so nothing later leaks in): the busiest price bucket, then neighbouring buckets added
+    on the busier side until ``share`` of the volume is inside. Prices are bucket mid-points
+    for the POC and bucket edges for VAH/VAL."""
+    prof = volume_profile(df, bins)
+    vol = prof["volume"].to_numpy(float)
+    total = vol.sum()
+    if not len(df) or total <= 0:
+        return {"poc": float("nan"), "vah": float("nan"), "val": float("nan")}
+    poc = int(np.argmax(vol))
+    lo = hi = poc
+    inside = vol[poc]
+    while inside < share * total and (lo > 0 or hi < len(vol) - 1):
+        below = vol[lo - 1] if lo > 0 else -1.0
+        above = vol[hi + 1] if hi < len(vol) - 1 else -1.0
+        if above >= below:
+            hi += 1
+            inside += above
+        else:
+            lo -= 1
+            inside += below
+    row = prof.iloc[poc]
+    return {"poc": float((row["low"] + row["high"]) / 2), "vah": float(prof["high"].iloc[hi]),
+            "val": float(prof["low"].iloc[lo])}
 
 
 # ---- validity -----------------------------------------------------------------------------------

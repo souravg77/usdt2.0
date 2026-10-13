@@ -181,6 +181,42 @@ def cmd_signals(s: Settings, args) -> int:
     return 0
 
 
+def cmd_indicators(s: Settings, args) -> int:
+    """The 20 standard indicators on the last closed candle of a stored series (Phase 3)."""
+    from .data.context import ContextStore, attach_context, has_context
+    from .indicators import candles_to_frame
+    from .indicators.results import closed_only, evaluate_all
+    from .models import TIMEFRAME_MS
+
+    store = CandleStore(s.db_path)
+    try:
+        candles = store.load(args.exchange, args.symbol, args.timeframe)
+        if not candles:
+            print("no candles stored for that series; run `aitrader download` first", file=sys.stderr)
+            return 1
+        df = closed_only(candles_to_frame(candles), int(time.time() * 1000), TIMEFRAME_MS[args.timeframe])
+        if has_context(store):
+            ctx = ContextStore(s.db_path)
+            try:
+                df = attach_context(df, ctx, args.exchange, args.symbol, args.timeframe)
+            finally:
+                ctx.close()
+    finally:
+        store.close()
+    res = evaluate_all(df)
+    if args.json:
+        print(json.dumps({k: r.as_dict() for k, r in res.items()}, default=str, indent=1))
+        return 0
+    print(f"{args.symbol} {args.timeframe}, last closed candle {_fmt(int(df['ts'].iloc[-1]))} UTC")
+    side = {1: "bullish", -1: "bearish", 0: "neutral"}
+    for name, r in res.items():
+        main = next(iter(r.features.items()), ("", float("nan")))
+        note = r.metadata.get("zone") or r.metadata.get("regime") or r.metadata.get("bias") or ""
+        print(f"  {name:15} {side[r.direction] if r.is_valid else 'not valid':10} conf {r.confidence:4.2f}  "
+              f"{main[0]}={main[1]:.6g}  {note}{'' if r.is_valid else f' (needs {r.warmup_period} bars)'}")
+    return 0
+
+
 def cmd_backtest(s: Settings, args) -> int:
     """Backtest one strategy on stored candles: in-sample / out-of-sample / final-test split,
     monthly results calendar and a trades CSV (Phase 3)."""
@@ -277,6 +313,8 @@ async def cmd_context(s: Settings, args) -> int:
                 if args.once:
                     return 0
                 await asyncio.sleep(args.interval)
+        if args.context_cmd == "derivs":
+            return await _print_derivs(args.symbol or s.symbols)
         now, symbol = int(time.time() * 1000), (args.symbol or ["BTC/USDT"])[0]
         for ex, sym in dict.fromkeys([(args.exchange, symbol), ("global", "*")]):
             for metric in ("funding_rate", "open_interest", "long_short_ratio", "btc_dominance",
@@ -292,6 +330,35 @@ async def cmd_context(s: Settings, args) -> int:
         return 0
     finally:
         ctx.close()
+
+
+async def _print_derivs(symbols: list[str]) -> int:
+    """Live perpetual readings from Bybit (public data, no key): last, mark and index price,
+    basis, funding and open interest."""
+    from .data.context import make_client
+    from .data.derivs import fetch_snapshot
+
+    client = make_client()
+    try:
+        print(f"{'pair':10} {'last':>12} {'mark':>12} {'index':>12} {'basis':>8} {'funding':>9} "
+              f"{'per year':>9} {'next in':>8} {'open interest':>14}")
+        for sym in symbols:
+            try:
+                d = await fetch_snapshot(client, sym)
+            except Exception as exc:
+                print(f"{sym:10} unavailable: {type(exc).__name__}: {exc}")
+                continue
+
+            def pct(v, digits=3):
+                return "-" if v is None else f"{v * 100:+.{digits}f}%"
+
+            nxt = d.funding_in_s()
+            print(f"{sym:10} {d.last or 0:>12g} {d.mark or 0:>12g} {d.index or 0:>12g} {pct(d.basis):>8} "
+                  f"{pct(d.funding_rate, 4):>9} {pct(d.funding_annualized, 1):>9} "
+                  f"{'-' if nxt is None else f'{nxt / 3600:.1f}h':>8} {d.open_interest or 0:>14g}")
+        return 0
+    finally:
+        await client.close()
 
 
 def cmd_news(s: Settings, args) -> int:
@@ -518,6 +585,22 @@ def cmd_learn(s: Settings, args) -> int:
         print(f"{moved} strategies moved to paper trading; {n} paper trading now "
               f"({len(reg.with_status('retired'))} retired after poor paper results stay retired)")
         return 0
+    if cmd == "keep-top":
+        from .learn.keep import indicators_used, keep_top, save_n, saved_n
+
+        n = save_n(args.registry, args.n) if args.n else saved_n(args.registry)
+        out = keep_top(reg, n)
+        reg.save()
+        print(f"the best {len(out['kept'])} strategies keep paper trading (at most {n}):")
+        for i, k in enumerate(out["kept"], 1):
+            print(f"  {i:2d}. {k['id']:44} {k['score']:+.3f}R per trade"
+                  f"{'' if k['passed'] else '  (did not pass the backtest)'}")
+        untested = f", {out['untested']} had no backtest result yet" if out["untested"] else ""
+        print(f"{len(out['benched'])} taken out of paper trading, {len(out['returned'])} brought back{untested}")
+        used = indicators_used(reg)
+        if used:
+            print("indicators they use: " + ", ".join(f"{k} ({c})" for k, c in used.items()))
+        return 0
     if cmd == "test":
         if args.ids:
             entries = [reg.get(i) for i in args.ids]
@@ -570,11 +653,33 @@ def cmd_learn(s: Settings, args) -> int:
         reg.save()
         print(f"{e.id} retired")
         return 0
+    if cmd == "improve":
+        from .learn.improve import improve
+
+        entries = [reg.get(i) for i in args.ids] if args.ids else reg.with_status("paper")
+        if not entries:
+            print("nothing to improve: no strategy is paper trading", file=sys.stderr)
+            return 1
+        store = CandleStore(s.db_path)
+        try:
+            rep = improve(store, reg, entries, exchanges, symbols, cfg, args.max_evals, args.report)
+        finally:
+            store.close()
+        reg.save()
+        for r in rep["results"]:
+            ch = ", ".join(f"{k} {a:g}->{b:g}" for k, (a, b) in r["changes"].items())
+            print(f"  {r['strategy']:40} tried {r['tried']:3d}  {r['outcome']}" + (f"\n      {ch}" if ch else "")
+                  + (f"\n      new: {r['new_id']}" if r.get("new_id") else ""))
+        print(f"{rep['improved']} of {len(rep['results'])} strategies improved")
+        return 0
+    if cmd in ("teach", "teach-on", "teach-off"):
+        return _teach(s, args, reg, exchanges, symbols, cfg)
     if cmd == "paper":
         from .events import CalendarFilter
         from .news import NewsFilter
 
         from .ai import LiveFilter
+        from .learn.teacher import TeacherFilter
 
         from .ops import EventLog
         from .trade import Control
@@ -593,7 +698,8 @@ def cmd_learn(s: Settings, args) -> int:
                              ai_filter=None if args.no_ai else LiveFilter(args.models),
                              control=Control(os.path.join(TRADE_DIR, "control.json")),
                              context=context, events=EventLog(service="paper"),
-                             news=None if args.no_news else NewsFilter())
+                             news=None if args.no_news else NewsFilter(),
+                             teacher=None if args.no_teacher else TeacherFilter(args.teacher_dir))
         try:
             if args.once:
                 print(trader.tick())
@@ -603,6 +709,67 @@ def cmd_learn(s: Settings, args) -> int:
             store.close()
         return 0
     raise RuleError(f"unknown learn command {cmd}")
+
+
+def _teach(s: Settings, args, reg, exchanges, symbols, cfg) -> int:
+    """``learn teach`` / ``teach-on`` / ``teach-off``: the backtest teacher (learn/teacher.py)."""
+    from .learn import make_strategy
+    from .learn.teacher import Teacher, collect, describe, teach
+    from .ops import EventLog
+
+    teacher = Teacher(args.dir, events=EventLog(service="cli"))
+    if args.learn_cmd == "teach-on":
+        try:
+            t = teacher.turn_on(args.by)
+        except ValueError as exc:
+            print(f"not turned on: {exc}", file=sys.stderr)
+            return 1
+        print(f"paper trading now follows lessons {t['version']}; `learn teach-off` stops it")
+        return 0
+    if args.learn_cmd == "teach-off":
+        teacher.turn_off(args.by or "")
+        print("paper trading no longer follows the teacher's lessons")
+        return 0
+    entries = (list(reg.entries.values()) if args.all else reg.with_status("paper", "retired"))
+    strategies = []
+    for e in entries:
+        try:
+            strategies.append((e.id, make_strategy(e)))
+        except Exception as exc:  # one broken entry must not stop the lesson
+            print(f"  skipping {e.id}: {exc}", file=sys.stderr)
+    if not strategies:
+        print("no strategies to learn from: start paper trading first, or pass --all", file=sys.stderr)
+        return 1
+    store = CandleStore(s.db_path)
+    try:
+        frame = collect(store, strategies, exchanges, symbols, cfg)
+    finally:
+        store.close()
+    if frame.empty:
+        print("no backtest signals: download history first (`aitrader download`)", file=sys.stderr)
+        return 1
+    result = teach(frame)
+    teacher.save_candidate(result)
+    w, f = result["check"]["without"], result["check"]["with"]
+    c = result["counts"]
+    print(f"lessons {result['version']}: {result['signals']} backtest signals from {len(strategies)} strategies "
+          f"(learned on {result['learn_signals']}, checked on {result['check_signals']} they never saw)")
+    print(f"  {c['trade']} situations to trade, {c['avoid']} to avoid, {c['unproven']} unproven; "
+          f"1R profit-take helps in {result['exit_1r']}")
+    print(f"  unseen part without lessons: {w['trades']} trades, win rate {w['win_rate'] or 0:.0%}, "
+          f"{w['expectancy_r'] or 0:+.3f}R per trade")
+    print(f"  unseen part with lessons:    {f['trades']} trades, win rate {f['win_rate'] or 0:.0%}, "
+          f"{f['expectancy_r'] or 0:+.3f}R per trade")
+    if result["passed"]:
+        print("PASSED: turn it on from the dashboard (Trading page) or `aitrader learn teach-on --by <name>`")
+    else:
+        print(f"not usable: {result['why']}")
+    best = sorted(((sid, key, x) for sid, by in result["lessons"].items() for key, x in by.items()
+                   if x["verdict"] == "trade"), key=lambda t: -t[2]["own"]["shrunk_r"])[:10]
+    for sid, key, x in best:
+        print(f"  {sid:36} {describe(key):42} {x['own']['trades']:4d} trades "
+              f"{x['own']['expectancy_r']:+.3f}R" + ("  (take profit at 1R)" if x["exit_1r"] else ""))
+    return 0
 
 
 def _filter_strategies(reg, use_all: bool) -> list:
@@ -890,6 +1057,7 @@ def cmd_trade(s: Settings, args) -> int:
 async def _trade_run(s: Settings, args, control) -> int:
     from .safety import assert_live_allowed
     from .trade import Executor, GateConfig, GoLive, RiskEngine, RiskLimits
+    from .trade.golive import approval_intact
 
     mode = args.mode
     events = _events(f"executor-{mode}")
@@ -901,7 +1069,11 @@ async def _trade_run(s: Settings, args, control) -> int:
             print("set AITRADER_PILOT_MAX_USDT in .env: the most USDT the live pilot may use", file=sys.stderr)
             return 1
         gl = GoLive(events=events, cfg=GateConfig.from_env())
-        approved = sorted((gl._load("approval.json").get("strategies") or {}))
+        approval = gl._load("approval.json")
+        approved = sorted((approval.get("strategies") or {}))
+        if approved and not approval_intact(approval):
+            print("the go-live approval was edited or not made by `golive approve`: approve again", file=sys.stderr)
+            return 1
         if not approved:
             print("no go-live approval: run `aitrader golive check` then `aitrader golive approve`",
                   file=sys.stderr)
@@ -921,8 +1093,11 @@ async def _trade_run(s: Settings, args, control) -> int:
         from .data.bybit_ws import BybitSpotStream
 
         # streamed prices: stops checked every second, quiet coins get no new entries
+        from .ops import feedstats
+
         ex.prices = BybitSpotStream(s.symbols)
         stream = asyncio.create_task(ex.prices.run())
+        reporter = asyncio.create_task(feedstats.report(ex.prices))  # the Monitor page's feed health
     try:
         if args.once:
             print(json.dumps(await ex.tick(), indent=1))
@@ -932,8 +1107,32 @@ async def _trade_run(s: Settings, args, control) -> int:
         if stream is not None:
             ex.prices.stop()
             stream.cancel()
+            reporter.cancel()
         await adapter.close()
     return 0
+
+
+def confirm_live_approval(strategy_ids: list[str], ask=input, isatty=None) -> str | None:
+    """LIVE ENABLED needs a person at a terminal typing the phrase that names the strategies.
+    There is deliberately no --yes flag, and piped input is refused. Returns what was typed, or
+    None when it wasn't confirmed."""
+    from .trade.golive import confirmation_phrase
+
+    if not (isatty or sys.stdin.isatty)():
+        print("approving live trading needs a person: run it in a terminal "
+              "(with docker: `docker compose run --rm -it collector golive approve ...`)", file=sys.stderr)
+        return None
+    phrase = confirmation_phrase(strategy_ids)
+    print("This lets the live executor place REAL orders with real money for: " + ", ".join(sorted(strategy_ids)))
+    print("Nothing here promises a profit. To approve, type exactly:\n  " + phrase)
+    try:
+        typed = ask("> ").strip()
+    except EOFError:
+        typed = ""
+    if typed != phrase:
+        print("not approved", file=sys.stderr)
+        return None
+    return typed
 
 
 def cmd_golive(s: Settings, args) -> int:
@@ -954,8 +1153,11 @@ def cmd_golive(s: Settings, args) -> int:
         print(f"recorded: {args.item} confirmed by {a['by']}")
         return 0
     if cmd == "approve":
+        phrase = confirm_live_approval(args.strategy or [])
+        if phrase is None:
+            return 1
         try:
-            gl.approve(args.strategy or [], by=args.by)
+            gl.approve(args.strategy or [], by=args.by, confirmation=phrase)
         except ValueError as exc:
             print(f"not approved: {exc}", file=sys.stderr)
             return 1
@@ -1174,6 +1376,13 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--symbol", default="BTC/USDT")
     ps.add_argument("--usdt", type=float, default=100.0)
 
+    ind = sub.add_parser("indicators", help="the 20 standard indicators (direction, confidence, validity) "
+                         "on the last closed candle of a stored series")
+    ind.add_argument("--exchange", default=EXCHANGE, choices=EXCHANGES)
+    ind.add_argument("--symbol", default="BTC/USDT")
+    ind.add_argument("--timeframe", default="1h")
+    ind.add_argument("--json", action="store_true")
+
     sg = sub.add_parser("signals", help="run a strategy over stored candles and save its signal log")
     sg.add_argument("--strategy", required=True)
     sg.add_argument("--exchange", default=EXCHANGE, choices=EXCHANGES)
@@ -1222,8 +1431,9 @@ def build_parser() -> argparse.ArgumentParser:
     ca = sub.add_parser("calendar", help="show upcoming high-impact events and the current decision")
     ca.add_argument("--hours", type=float, default=72)
 
-    cx = sub.add_parser("context", help="market context: funding, open interest, total market cap")
-    cx.add_argument("context_cmd", choices=["collect", "show"])
+    cx = sub.add_parser("context", help="market context: funding, open interest, total market cap; "
+                        "derivs: live mark/index price, basis and funding of the perpetuals")
+    cx.add_argument("context_cmd", choices=["collect", "show", "derivs"])
     cx.add_argument("--symbol", action="append")
     cx.add_argument("--exchange", default=EXCHANGE, choices=EXCHANGES, help="for show")
     cx.add_argument("--once", action="store_true", help="collect: one top-up, then exit")
@@ -1260,6 +1470,9 @@ def build_parser() -> argparse.ArgumentParser:
     le_sub.add_parser("add-shorts", help="add a short twin (Bybit perpetual futures) of every long strategy")
     le_sub.add_parser("paper-all", help="paper-trade every strategy, including untested and rejected "
                                         "ones (fake money; poor ones retire on their paper results)")
+    lk = le_sub.add_parser("keep-top", help="keep only the best N strategies paper trading (ranked by "
+                                            "backtest and paper results); the rest leave paper trading")
+    lk.add_argument("--n", type=int, help="how many to keep, 10-20 (default: the last number used, else 15)")
     lt = le_sub.add_parser("test", help="backtest candidates; passes go to paper trading")
     lt.add_argument("ids", nargs="*")
     lt.add_argument("--retest", action="store_true", help="also re-test rejected strategies")
@@ -1276,6 +1489,22 @@ def build_parser() -> argparse.ArgumentParser:
     lx = le_sub.add_parser("retire", help="stop paper-trading a strategy")
     lx.add_argument("id")
     lx.add_argument("--reason")
+    lim = le_sub.add_parser("improve", help="try many settings for each paper strategy on older data, keep a change "
+                                            "only if it also wins on newer data and passes the full gate")
+    lim.add_argument("ids", nargs="*", help="strategies to improve (default: every one paper trading)")
+    lim.add_argument("--max-evals", type=int, default=30, help="most backtests per strategy in the search")
+    lim.add_argument("--report", default="data/learn/improve.json")
+    lte = le_sub.add_parser("teach", help="backtest teacher: learn which market situations (trend, volatility, "
+                                          "volume) each strategy wins and loses in, check it on unseen data")
+    lte.add_argument("--all", action="store_true", help="every strategy in the registry, not only the ones "
+                                                       "paper trading or retired after paper")
+    lte.add_argument("--dir", default="data/learn/teacher")
+    lton = le_sub.add_parser("teach-on", help="paper trading follows the newest lessons (they must pass the check)")
+    lton.add_argument("--by", required=True)
+    lton.add_argument("--dir", default="data/learn/teacher")
+    ltoff = le_sub.add_parser("teach-off", help="paper trading stops following the lessons")
+    ltoff.add_argument("--by")
+    ltoff.add_argument("--dir", default="data/learn/teacher")
     lp = le_sub.add_parser("paper", help="service: paper-trade every strategy that passed")
     lp.add_argument("--interval", type=float, default=60)
     lp.add_argument("--once", action="store_true")
@@ -1284,6 +1513,8 @@ def build_parser() -> argparse.ArgumentParser:
     lp.add_argument("--no-ai", action="store_true", help="ignore the active AI trade filter")
     lp.add_argument("--models", default="data/ai/models", help="trade-filter model registry folder")
     lp.add_argument("--no-context", action="store_true", help="ignore the market-context filter")
+    lp.add_argument("--no-teacher", action="store_true", help="ignore the backtest teacher's lessons")
+    lp.add_argument("--teacher-dir", default="data/learn/teacher")
 
     sub.add_parser("migrate", help="bring the database schema up to date")
     bk = sub.add_parser("backup", help="copy the database and registries into a folder")
@@ -1403,6 +1634,9 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    from .ops.redact import install
+
+    install()  # no key, signature or signed URL is ever written to a log
     if args.env_file:
         from dotenv import load_dotenv
 
@@ -1419,6 +1653,7 @@ def main(argv: list[str] | None = None) -> int:
         "stream": cmd_stream,
         "paper-smoke": cmd_paper_smoke,
         "signals": cmd_signals,
+        "indicators": cmd_indicators,
         "strategies": cmd_strategies,
         "backtest": cmd_backtest,
         "calendar": cmd_calendar,

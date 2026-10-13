@@ -24,7 +24,7 @@ The dashboard's strategy list and `aitrader learn list` show each strategy's run
 | RESEARCH, BACKTESTED, OUT-OF-SAMPLE VALIDATED, PAPER, REJECTED, UNDER REVIEW, RETIRED | the strategy registry (`data/learn/registry.json`, field `status`) | the backtest gate (`learn test`), the paper service, `learn retire`, `learn paper-all` |
 | SHADOW MONITORED | counted from `data/learn/paper_state.json` | the paper service |
 | LIVE-ELIGIBLE | read from `data/golive/report.json` | the go/no-go gate (`golive check`) |
-| LIVE ENABLED | read from `data/golive/approval.json`, checked by `GoLive.guard` | only you, with `golive approve --strategy <id> --by <name>` |
+| LIVE ENABLED | read from `data/golive/approval.json`, checked by `GoLive.guard` | only you, with `golive approve --strategy <id> --by <name>` at a terminal, typing the confirmation phrase |
 
 The top three rungs are never written into the registry: the registry refuses those statuses.
 So editing the registry can't make a strategy look approved, and the only way to LIVE ENABLED is
@@ -121,7 +121,10 @@ it with a small budget.
 ### LIVE ENABLED WITH EXPLICIT APPROVAL
 
 You run `aitrader golive approve --strategy <id> --by <name>` for one or two strategies after reading the
-gate report and the risk settings. The approval re-runs the gate and is refused if it fails. It is
+gate report and the risk settings. The approval re-runs the gate and is refused if it fails. It
+then asks you to type `I approve <ids> for real-money trading` with the strategy ids; anything
+else, no terminal, or piped input means no approval, and there is no flag that skips the
+question. The approval file is sealed, so a hand-written or edited one counts for nothing. It is
 tied to the strategies' rules and the active AI model: if either changes, the strategy drops back
 to LIVE-ELIGIBLE or PAPER on the ladder and the live executor stops entering for it. The
 live monitor sends trading back to paper when live drawdown passes 10R or live results fall more
@@ -162,3 +165,13 @@ backtest has no walk-forward, Monte Carlo or holdout result until it is tested a
 `learn paper-all` (the dashboard's "turn paper trading on") still moves untested, rejected and
 under-review strategies to paper so they can be watched. The ladder shows those as PAPER
 with the note "did not pass the backtest gate", and they can't go further up.
+
+## How the ladder is tested
+
+`tests/test_promotion.py` checks that there are exactly these seven rungs in order
+(RESEARCH, BACKTESTED, OOS_VALIDATED, PAPER_DEMO, SHADOW_MONITORED, LIVE_ELIGIBLE, LIVE_ENABLED;
+PAPER_DEMO is the PAPER rung, run on real Bybit prices on this server), that the registry refuses
+the top three, that one strategy climbs every rung in turn and only with the evidence each needs,
+and that LIVE ENABLED can't be reached without the typed phrase: wrong phrases, a phrase for other
+strategies, no terminal, piped input, unknown flags and forged or edited approval files are all
+refused.

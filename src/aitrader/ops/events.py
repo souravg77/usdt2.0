@@ -8,7 +8,7 @@ small on Linux), readers tail the file by byte offset. Kinds the rest of the cod
 - ``error``: a caught exception in a service loop
 - ``crash``: a service loop died (unhandled), counted by the Phase 6 stability check
 - ``disconnect`` / ``reconnect``: exchange or data feed availability
-- ``risk_pause`` / ``resume`` / ``kill``: risk engine and kill switch
+- ``risk_pause`` / ``halt`` / ``resume`` / ``kill``: risk engine, safety halt and kill switch
 - ``heartbeat``: written by ``Heartbeat`` every few minutes, so gaps show downtime
 """
 
@@ -18,10 +18,12 @@ import json
 import os
 import time
 
+from .redact import redact, redact_data
+
 DEFAULT_PATH = "data/ops/events.jsonl"
 MAX_BYTES = 20 * 1024 * 1024  # rotate to events.jsonl.1 past this
 ALERT_KINDS = {"trade_open", "trade_close", "error", "crash", "disconnect", "reconnect",
-               "risk_pause", "resume", "kill", "daily_summary", "weekly_report", "gate", "live_switch"}
+               "risk_pause", "halt", "resume", "kill", "daily_summary", "weekly_report", "gate", "live_switch"}
 
 
 class EventLog:
@@ -29,8 +31,9 @@ class EventLog:
         self.path, self.service = path, service
 
     def emit(self, kind: str, text: str, level: str = "info", **data) -> dict:
+        # an exchange error can carry a signed request: nothing secret reaches the log or alerts
         ev = {"ts": int(time.time() * 1000), "service": self.service, "kind": kind,
-              "level": level, "text": text, "data": data}
+              "level": level, "text": redact(text), "data": redact_data(data)}
         os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
         try:
             if os.path.getsize(self.path) > MAX_BYTES:

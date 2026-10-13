@@ -88,12 +88,16 @@ def run_checks(settings, root: str = ".", env_file: str = ".env", now: float | N
 
     # ---- money safety ---------------------------------------------------------------------------
     problems = live_gate_problems(settings)
+    from ..trade.golive import approval_intact
+
     approval = _load(p("data", "golive", "approval.json"))
     if problems:
         add(PASS, "live lock", f"locked (mode {settings.mode.value}): no real-money orders")
     else:
         add(WARN, "live lock", "OPEN: real-money orders are possible")
-        if not approval.get("strategies"):
+        if approval and not approval_intact(approval):
+            add(FAIL, "go-live approval", "approval.json was edited or not made by `golive approve`: approve again")
+        elif not approval.get("strategies"):
             add(FAIL, "go-live approval", "the live lock is open but no strategy is approved (aitrader golive check)")
         if not _env("AITRADER_PILOT_MAX_USDT"):
             add(WARN, "pilot budget", "AITRADER_PILOT_MAX_USDT is unset: the executor-live service won't start")

@@ -14,6 +14,7 @@ from aitrader.ops.telegram import Telegram, TelegramService
 from aitrader.trade import (HARD_MAX_RISK, Control, Executor, GateConfig, GoLive, RiskEngine,
                             RiskLimits, client_id)
 from aitrader.trade.report import daily_text, status_text, weekly, weekly_text
+from aitrader.trade.golive import confirmation_phrase
 
 HOUR = 3_600_000
 NOW = 1_760_000_000.0  # fixed clock (seconds)
@@ -395,7 +396,7 @@ def test_gate_fails_until_everything_is_in_place(tmp_path):
     assert not rep["passed"]
     assert {"Stability", "Security: keys", "Security: kill switch tested"} <= failed
     with pytest.raises(ValueError):
-        gl.approve(["s1"], by="Shawn")
+        gl.approve(["s1"], by="Shawn", confirmation=confirmation_phrase(["s1"]))
     _beats(events)
     gl.attest("keys", by="Shawn")
     EventLog(events.path, service="executor-testnet").emit("kill", "flattened")  # old demo runs don't count
@@ -404,7 +405,7 @@ def test_gate_fails_until_everything_is_in_place(tmp_path):
     rep = gl.evaluate()
     assert rep["passed"], [c for c in rep["criteria"] if not c["passed"]]
     assert gl.guard("s1") == ["no go-live approval (aitrader golive approve)"]
-    gl.approve(["s1"], by="Shawn")
+    gl.approve(["s1"], by="Shawn", confirmation=confirmation_phrase(["s1"]))
     assert gl.guard("s1") == []
     assert gl.guard("other")
 
@@ -421,9 +422,9 @@ def test_approval_breaks_when_rules_change_and_monitor(tmp_path):
     _beats(events)
     gl.attest("kill_switch", by="Shawn")
     gl.attest("keys", by="Shawn")
-    gl.approve(["s1"], by="Shawn")
+    gl.approve(["s1"], by="Shawn", confirmation=confirmation_phrase(["s1"]))
     with pytest.raises(ValueError):
-        gl.approve(["a", "b", "c"], by="Shawn")
+        gl.approve(["a", "b", "c"], by="Shawn", confirmation=confirmation_phrase(["a", "b", "c"]))
     reg = Registry(str(tmp_path / "reg.json"))
     reg.entries["s1"].spec = {"a": 2}
     reg.save()
@@ -1031,7 +1032,8 @@ def test_bybit_adapter_perp_orders_stops_and_margin_check():
     run(ad.place_stop(PERP, 0.5, 105.04, "ait3", side=Side.BUY))
     args = client.calls[-1]
     assert args[2] == "buy" and args[5] == {"positionIdx": 0, "reduceOnly": True, "triggerPrice": 105.0,
-                                             "triggerDirection": "ascending", "orderLinkId": "ait3"}
+                                             "triggerDirection": "ascending", "triggerBy": "MarkPrice",
+                                             "orderLinkId": "ait3"}
     with pytest.raises(ValueError):  # a spot stop never buys
         run(ad.place_stop("BTC/USDT", 0.5, 105.0, "ait4", side=Side.BUY))
     assert run(ad.perp_position(PERP)) == 0.5

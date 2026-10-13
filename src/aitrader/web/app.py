@@ -54,11 +54,15 @@ class Paths:
     news: str = "data/news"
     pairs: str = "data/pairs/ranking.json"
     changes: str = "data/changes"
+    feed: str = "data/ops/feed.json"
+    teacher: str = "data/learn/teacher"
+    improve: str = "data/learn/improve.json"
 
 
 def create_app(settings: Settings, auth: Auth, jobs: JobRunner, paths: Paths | None = None,
                secure_cookie: bool = False, users=None, keys_secret: str = "", signup: bool = False,
-               verifier=None, checkers: dict | None = None, live=None, account=None) -> FastAPI:
+               verifier=None, checkers: dict | None = None, live=None, account=None,
+               monitor: dict | None = None) -> FastAPI:
     """``users`` (an ``accounts.UserStore``) turns on user accounts: sign-up when ``signup`` is
     true, each user's own page, and the admin's Users page. Without it only the admin can log in."""
     paths = paths or Paths()
@@ -163,7 +167,8 @@ def create_app(settings: Settings, auth: Auth, jobs: JobRunner, paths: Paths | N
     from .report_pages import add_report_routes
     from .settings_pages import add_settings_routes
 
-    add_market_routes(app, settings=settings, page=page, guard=guard, live=live, paper_state=paths.paper_state)
+    add_market_routes(app, settings=settings, page=page, guard=guard, live=live, paper_state=paths.paper_state,
+                      registry=paths.registry)
     add_report_routes(app, settings=settings, auth=auth, jobs=jobs, page=page, guard=guard,
                       report_path=paths.report)
     add_news_routes(app, settings=settings, auth=auth, jobs=jobs, page=page, guard=guard, news_dir=paths.news)
@@ -305,6 +310,16 @@ paper trading. Nothing trades real money.</p>
 
         return Control(os.path.join(paths.trade_dir, "control.json"))
 
+    from .monitor_pages import add_monitor_routes
+
+    add_monitor_routes(app, settings=settings, page=page, guard=guard, auth=auth, paths=paths,
+                       csrf=lambda token: _csrf(auth, token), control=_control, **(monitor or {}))
+
+    from .teacher_pages import add_teacher_routes
+
+    add_teacher_routes(app, settings=settings, page=page, guard=guard, auth=auth, paths=paths,
+                       csrf=lambda token: _csrf(auth, token), jobs=jobs, exchange=EXCHANGE)
+
     @app.get("/trading")
     async def trading(request: Request, msg: str = ""):
         user, token, redirect = guard(request)
@@ -318,6 +333,9 @@ paper trading. Nothing trades real money.</p>
         acct = await account.snapshot()
         if c["killed"]:
             state = f'<b class="bad">KILL SWITCH ON</b> since {_when(c.get("since"))}'
+        elif c.get("halted"):
+            state = (f'<b class="bad">SAFETY HALT</b> since {_when(c.get("since"))}: {_e(c.get("reason", ""))}. '
+                     'Check the account on Bybit, then press Resume')
         elif c["paused"]:
             state = f'<b class="bad">PAUSED</b> since {_when(c.get("since"))}: {_e(c.get("reason", ""))}'
         else:
@@ -401,11 +419,31 @@ paper trading. Nothing trades real money.</p>
                         [["learn", "add-library"], ["learn", "add-builtin"], ["learn", "add-shorts"],
                          ["learn", "paper-all"],
                          ["download", "--since", since, "--exchange", EXCHANGE],
-                         ["learn", "test", "--paper"]], meta={"kind": "paper-start"})
+                         ["learn", "test", "--paper"], ["learn", "keep-top"]], meta={"kind": "paper-start"})
             _event("paper_on", f"paper trading turned on from the dashboard by {user}")
             return ("Paper trading is on: every strategy is being loaded into paper trading, then a year of "
-                    "price history is downloaded and each one is backtested. Trades open when a strategy's "
-                    "signal appears on a closed candle.")
+                    "price history is downloaded, each one is backtested and only the best ones keep paper "
+                    "trading. Trades open when a strategy's signal appears on a closed candle.")
+        return _control_post(request, csrf, act)
+
+    @app.post("/trading/paper/keep")
+    def trading_paper_keep(request: Request, csrf: str = Form(""), n: str = Form("")):
+        def act(user):
+            from ..learn.keep import DEFAULT_N, MAX_N, MIN_N, clamp
+
+            try:
+                count = clamp(int(n or DEFAULT_N))
+            except ValueError:
+                return f"Not changed: enter a number from {MIN_N} to {MAX_N}."
+            busy = {j.get("meta", {}).get("kind") for j in jobs.list() if j["status"] in ("queued", "running")}
+            if busy & {"paper-start", "keep-top"}:
+                return "Strategies are already being loaded or ranked; see Recent jobs on the Overview page."
+            jobs.submit(f"Keep only the best {count} strategies paper trading",
+                        [["learn", "keep-top", "--n", str(count)]], meta={"kind": "keep-top"})
+            _event("keep_top", f"keep only the best {count} strategies, from the dashboard by {user}")
+            return (f"Ranking the strategies: the best {count} keep paper trading, the rest stop opening "
+                    "trades (their open trades still close normally). The Markets chart now starts with "
+                    "the indicators they use.")
         return _control_post(request, csrf, act)
 
     @app.post("/trading/ai/train")
@@ -471,7 +509,8 @@ paper trading. Nothing trades real money.</p>
     return app
 
 
-NAV = [("/", "Overview"), ("/markets", "Markets"), ("/pairs", "Pairs"), ("/trading", "Trading"), ("/replay", "Replay"),
+NAV = [("/", "Overview"), ("/markets", "Markets"), ("/pairs", "Pairs"), ("/trading", "Trading"), ("/monitor", "Monitor"),
+       ("/replay", "Replay"), ("/teacher", "Teacher"),
        ("/news", "News"), ("/research", "Research"), ("/reports", "Reports"), ("/books", "Submit a book"), ("/changes", "Change requests"), ("/admin/users", "Users"),
        ("/settings", "Settings")]
 
@@ -784,6 +823,8 @@ def _trading_stats(c: dict, settings, paths: Paths, paper: dict, events: list[di
 
     if c["killed"]:
         trading = ("Kill switch on", "bad")
+    elif c.get("halted"):
+        trading = ("Safety halt", "bad")
     elif c["paused"]:
         trading = ("Paused", "warn")
     else:
@@ -856,6 +897,8 @@ def _paper_switch_card(c: dict, paths: Paths, events: list[dict], jobs: list[dic
                      and j["status"] in ("queued", "running")), None)
     if c["killed"]:
         state, cls, why = "OFF", "bad", "the kill switch is on"
+    elif c.get("halted"):
+        state, cls, why = "OFF", "bad", "the safety halt stopped new entries (see Controls)"
     elif c["paused"]:
         state, cls, why = "OFF", "bad", "new entries are paused"
     elif starting:
@@ -867,28 +910,41 @@ def _paper_switch_card(c: dict, paths: Paths, events: list[dict], jobs: list[dic
     else:
         state, cls, why = "ON", "good", f"{in_paper} strategies trading with fake money"
     on = "Turn paper trading on" if state != "ON" else "Reload every strategy"
+    from ..learn.keep import MAX_N, MIN_N, saved_n
+
+    keep_n = saved_n(paths.registry)
     return (f'<div class="card"><h3>Paper trading (fake money)</h3><p>Paper trading <b class="{cls}">{state}</b>: {why}</p>'
             '<p class="small muted">On puts every strategy into paper trading, the untested and the '
             'backtest-rejected ones too, and downloads a year of history for all pairs. Each one then trades '
             'live prices with fake money; one that loses too much retires by itself. Each one is then backtested '
-            'too: only strategies that pass both the backtest and paper trading can ever be approved for live. '
+            'too, and only the best keep paper trading: only strategies that pass both the backtest and paper '
+            'trading can ever be approved for live. '
             'Off pauses new entries '
             '(pause and resume apply to the live trader too).</p><div class="row">'
             f'<form method="post" action="/trading/paper/on">{csrf}<button>{on}</button></form>'
             f'<form method="post" action="/trading/paper/off">{csrf}<button class="ghost">Turn paper trading off</button></form>'
-            '</div></div>')
+            '</div><p class="small muted">Keep only the best: strategies are ranked by their backtest and paper '
+            'results (ones that passed the backtest first, then result per trade, with few trades counting '
+            'for less). The best stay in paper trading and the rest stop opening trades; every reload ranks '
+            'them again, so one can come back.</p>'
+            f'<form method="post" action="/trading/paper/keep" class="row">{csrf}'
+            f'<label class="small">Keep the best <input type="number" name="n" min="{MIN_N}" max="{MAX_N}" '
+            f'value="{keep_n}" style="width:4.5em"> strategies</label><button class="ghost">Keep only the best</button></form>'
+            '</div>')
 
 
 def _live_card(settings, paths: Paths, events: list[dict]) -> str:
     """Live (real money) readiness. It is switched on only on the server, never from the website."""
     rep = _load_json(os.path.join(paths.golive_dir, "report.json"))
+    from ..trade.golive import approval_intact
+
     approval = _load_json(os.path.join(paths.golive_dir, "approval.json"))
     svc, svc_cls, _detail = _service_state(events, "executor-live", int(time.time() * 1000))
     checks = [
         ("Real Bybit keys saved (spot trade only, no withdrawals, IP-bound)",
          bool(os.environ.get("BYBIT_API_KEY") and os.environ.get("BYBIT_API_SECRET"))),
         ("Go/no-go gate passed", bool(rep.get("passed"))),
-        ("Strategies approved (aitrader golive approve)", bool(approval.get("by"))),
+        ("Strategies approved (aitrader golive approve)", approval_intact(approval)),
         ("Pilot budget set (AITRADER_PILOT_MAX_USDT in .env)", bool(os.environ.get("AITRADER_PILOT_MAX_USDT"))),
         ("Live lock opened in .env on the server", not live_gate_problems(settings)),
         ("Live trader running", svc_cls == "good"),
@@ -949,6 +1005,8 @@ def _equity_svg(paper: dict, execs: dict) -> str:
 
 def _gate_card(paths: Paths, csrf: str) -> str:
     rep = _load_json(os.path.join(paths.golive_dir, "report.json"))
+    from ..trade.golive import approval_intact
+
     approval = _load_json(os.path.join(paths.golive_dir, "approval.json"))
     if rep:
         rows = "".join(f'<li class="{"good" if c["passed"] else "bad"}">{"✓" if c["passed"] else "✗"} '
@@ -958,7 +1016,9 @@ def _gate_card(paths: Paths, csrf: str) -> str:
     else:
         rows, head = "", "not checked yet"
     appr = (f'<br>Approved by {_e(approval["by"])} for {_e(", ".join(approval.get("strategies", {})))}'
-            if approval.get("by") else "<br>No live approval (approve on the server: <code>aitrader golive approve</code>)")
+            if approval_intact(approval) else
+            ('<br><b class="bad">The approval file was edited or not made by <code>golive approve</code>: '
+             'it counts for nothing</b>' if approval else '') + "<br>No live approval (approve on the server: <code>aitrader golive approve</code>)")
     return (f'<div class="card"><h3>Go/no-go gate (Phase 6)</h3><p>{head}{appr}</p><ul class="small gate">{rows}</ul>'
             f'<form method="post" action="/trading/gate">{csrf}<button class="ghost">Check the gate now</button></form></div>')
 
@@ -1028,6 +1088,7 @@ code{background:var(--card2);border:1px solid var(--line);border-radius:5px;padd
 .chips{display:flex;flex-wrap:wrap;gap:8px}.tick-chip{display:inline-flex;align-items:center;gap:6px;padding:4px 6px 4px 12px;
 border:1px solid var(--line);border-radius:99px;font-size:.9em}button.small{padding:2px 8px;font-size:.8em}
 .posts{list-style:none;padding:0}.posts li{padding:10px 0;border-bottom:1px solid var(--line)}.row>label{margin:0}
+.bar{height:8px;background:var(--line);border-radius:4px;overflow:hidden;margin-top:8px}.bar span{display:block;height:100%;background:#d9534f}
 form.kill{margin-top:14px;border-top:1px solid var(--line);padding-top:10px}ul.gate{padding-left:0;list-style:none;margin:8px 0}
 .chart svg{width:100%;height:180px;display:block}.chart svg.candles{height:auto}
 .switch{font-size:1.1em}.switch.on b{color:var(--bad)}
@@ -1067,6 +1128,7 @@ padding:10px 12px;border-radius:var(--radius);font-weight:400;transition:border-
 padding:4px 10px;border-radius:999px;font-weight:600;font-size:.8em}
 .chip:hover{border-color:var(--accent)}.chip[aria-pressed=true]{color:var(--fg);border-color:var(--accent);background:var(--card2)}
 .chip i{width:10px;height:3px;border-radius:2px;display:inline-block}
+.chip small{color:var(--muted);font-size:11px}.linkish{background:none;border:0;padding:0;color:var(--accent);cursor:pointer;font:inherit;text-decoration:underline}
 .legend{display:flex;flex-wrap:wrap;gap:2px 12px;font-size:.8em;min-height:1.3em}.legend b{font-weight:600}
 details.health summary{cursor:pointer;font-weight:600}details.health table{margin-top:12px}
 @media (max-width:640px){header{padding:8px 12px}main{padding:14px 12px}nav{margin-left:0;width:100%}

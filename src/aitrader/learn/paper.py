@@ -8,7 +8,9 @@ against ``RetireRule``; a strategy whose paper results fall below the bar is ret
 no new trades. When a person has promoted a Phase 4 trade-filter model, each new signal is
 checked by it first: skipped below its threshold, sized by its confidence above. Each signal
 records the market regime of its bar (``aitrader.market.regime``) so results can be split by it;
-the regime never blocks a paper trade here. No exchange order is ever sent from here.
+the regime never blocks a paper trade here. When a person has turned on the backtest teacher's
+lessons (``learn.teacher``), a signal in a market situation the strategy lost in is skipped, and a
+1R profit-take is added where the lessons found it caught more. No exchange order is ever sent from here.
 
 Short signals (the short twins, ``strategies.mirror``) are paper-traded as Bybit USDT perpetual
 shorts: perp fees and funding in the result, isolated margin at ``AITRADER_LEVERAGE`` (only the
@@ -63,7 +65,7 @@ class PaperTrader:
     def __init__(self, store: CandleStore, registry_path: str, exchanges: list[str],
                  symbols: list[str], cfg: PaperConfig | None = None,
                  state_path: str = DEFAULT_STATE, calendar=None, ai_filter=None, control=None,
-                 context=None, events=None, news=None):
+                 context=None, events=None, news=None, teacher=None):
         self.store, self.registry_path = store, registry_path
         # ``symbols`` may be a function returning the list (the pair ranking, read each tick)
         self.exchanges, self.symbols = exchanges, symbols
@@ -74,6 +76,7 @@ class PaperTrader:
         self.context = context  # market-context filter (funding, open interest...), or None
         self.events = events  # ops.EventLog for alerts and the stability record, or None
         self.news = news  # news.NewsFilter (AI web-search brief): can only shrink or pause entries
+        self.teacher = teacher  # learn.teacher.TeacherFilter: follows the lessons a person turned on
         self.state = {"open": {}, "trades": [], "equity": {}, "last_signal": {}}
         self._seen: dict = {}  # market -> newest candle close already evaluated (this process)
         if os.path.exists(state_path):
@@ -134,9 +137,17 @@ class PaperTrader:
                             self._note_filtered(key, sig, ai)
                             events["filtered"].append(key)
                             continue
+                        tch = self._teacher_check(sig, entry.id, df)
+                        if not tch["take"]:
+                            events["filtered"].append(key)
+                            log.info("paper signal %s skipped: the backtest teacher %s says avoid %s",
+                                     key, tch["version"], tch["situation"])
+                            continue
+                        sig = tch["signal"]
                         if market not in regimes:
                             regimes[market] = _regime(df, tf)
                         self.state["open"][key] = {"entry_id": entry.id, "signal": _sig_dict(sig),
+                                                   "situation": tch["situation"], "teacher": tch["version"],
                                                    "size_mult": size_mult * ctx_mult * ai["size"], "filled": False,
                                                    "ai_prob": ai["prob"], "ai_version": ai["version"],
                                                    "regime": regimes[market]}
@@ -244,6 +255,16 @@ class PaperTrader:
         except Exception:  # a broken model must not stop paper trading; trade unfiltered
             log.exception("trade filter failed on %s; taking the signal unfiltered", entry_id)
             return {"take": True, "size": 1.0, "prob": None, "version": None}
+
+    def _teacher_check(self, sig: Signal, entry_id: str, df) -> dict:
+        passthrough = {"take": True, "signal": sig, "situation": None, "verdict": None, "version": None}
+        if self.teacher is None:
+            return passthrough
+        try:
+            return self.teacher.check(sig, entry_id, df)
+        except Exception:  # broken lessons must not stop paper trading; take the signal as is
+            log.exception("backtest teacher failed on %s; taking the signal as is", entry_id)
+            return passthrough
 
     def _note_filtered(self, key: str, sig: Signal, ai: dict) -> None:
         skipped = self.state.setdefault("filtered", [])

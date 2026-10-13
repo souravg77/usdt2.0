@@ -86,6 +86,7 @@ def test_markets_page_loads_the_live_chart(world):
     js = client.get("/static/market.js")
     assert js.status_code == 200 and js.headers["content-type"].startswith("text/javascript")
     assert "POLL_MS = 1500" in js.text
+    assert "FETCH_MS" in js.text and "STUCK_MS" in js.text  # a request that never answers can't stop updates
     r = client.get("/markets?symbol=<script>&tf=9y")  # unknown values fall back, never echoed
     assert "<script>" not in r.text.replace('<script src="/static/market.js" defer></script>', "")
 
@@ -188,3 +189,22 @@ def test_markets_page_has_indicator_switches(world):
     for key in ("ema", "bb", "vwap", "st", "ich", "psar", "sr", "trades", "vol", "rsi", "macd", "adx", "stoch"):
         assert f'data-study="{key}"' in r.text
     assert "place orders" in r.text
+
+
+def test_chart_starts_with_the_indicators_the_strategies_use(world):
+    from aitrader.learn import Entry, Registry
+
+    client, _, _ = world
+    login(client)
+    r = client.get("/markets?symbol=BTC/USDT&tf=1h")
+    assert 'data-study="macd" data-on="1"' in r.text and "studies-reset" not in r.text  # no strategies: defaults
+    reg = Registry("data/learn/registry.json")
+    reg.add(Entry(id="a", kind="builtin", name="trend_pullback", status="paper"))
+    reg.add(Entry(id="b", kind="builtin", name="supertrend_trend", status="paper"))
+    reg.save()
+    r = client.get("/markets?symbol=BTC/USDT&tf=1h")
+    for key in ("ema", "adx", "rsi", "st", "trades", "vol"):
+        assert f'data-study="{key}" data-on="1"' in r.text, key
+    assert 'data-study="macd" data-on="0"' in r.text and 'data-study="bb" data-on="0"' in r.text
+    assert "EMA 20/50/200 (2)" in r.text and 'id="studies-reset"' in r.text
+    assert "studies-reset" in client.get("/static/market.js").text

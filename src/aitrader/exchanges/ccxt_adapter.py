@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 import ccxt.async_support as ccxt_async
 
@@ -260,7 +261,7 @@ class BybitAdapter(CcxtAdapter):
         """A resting stop-loss on Bybit that waits on the exchange, so the position is protected
         even while this server is down. Spot: a conditional order (orderFilter StopOrder) selling
         ``amount`` at market once the last price falls to ``trigger_price``. Perpetual short
-        (``side`` BUY): a reduce-only conditional buy once the price rises to it."""
+        (``side`` BUY): a reduce-only conditional buy once the mark price rises to it."""
         self._check_order_allowed()
         await self.throttle.acquire()
         amount = await self._precise(symbol, amount)
@@ -269,9 +270,11 @@ class BybitAdapter(CcxtAdapter):
         log.info("STOP %s %s %s %s at %s id=%s reason=%s", self.name, side.value, amount, symbol, trigger_price,
                  client_id, reason)
         if self.is_perp(symbol):
+            # triggered by the mark price (Bybit's fair price, which follows the spot index), so a
+            # wick on the perpetual's own book can't fire the stop; liquidation uses it too
             params = {"positionIdx": 0, "reduceOnly": True, "triggerPrice": trigger_price,
                       "triggerDirection": "ascending" if side is Side.BUY else "descending",
-                      self.client_id_param: client_id}
+                      "triggerBy": "MarkPrice", self.client_id_param: client_id}
         else:
             if side is not Side.SELL:
                 raise ValueError("a spot stop can only sell")
@@ -340,12 +343,66 @@ class BybitAdapter(CcxtAdapter):
             raise PerpNotReady("switch the Bybit account to Isolated Margin (Bybit app: Derivatives, "
                                f"margin mode) before futures trades; it is {info.get('marginMode') or 'unknown'}")
         await self.throttle.acquire()
+        rows = await self.client.fetch_positions([symbol])
+        idx = {str((r.get("info") or {}).get("positionIdx", "0")) for r in rows if r.get("symbol") == symbol}
+        if idx - {"0"}:
+            # orders here are sent with positionIdx 0, which Bybit only accepts in one-way mode
+            raise PerpNotReady(f"switch {symbol} to One-Way position mode (Bybit app: Derivatives, "
+                               "position mode) before futures trades; it is in Hedge mode")
+        await self.throttle.acquire()
         try:
             await self.client.set_leverage(int(leverage) if leverage == int(leverage) else leverage, symbol)
         except Exception as exc:
             if "110043" not in str(exc) and "not modified" not in str(exc).lower():
                 raise
         ready[symbol] = leverage
+
+    async def perp_position_info(self, symbol: str) -> dict:
+        """The open short on ``symbol`` as Bybit reports it: size (coins), entry, mark price,
+        Bybit's own liquidation price, leverage, margin mode and position index. Empty when there
+        is none."""
+        await self.throttle.acquire()
+        for r in await self.client.fetch_positions([symbol]):
+            if r.get("symbol") != symbol or r.get("side") != "short" or not float(r.get("contracts") or 0):
+                continue
+            info = r.get("info") or {}
+
+            def num(*vals):
+                for v in vals:
+                    try:
+                        if v not in (None, ""):
+                            return float(v)
+                    except (TypeError, ValueError):
+                        pass
+                return None
+
+            return {"size": float(r["contracts"]), "entry": num(r.get("entryPrice"), info.get("avgPrice")),
+                    "mark": num(r.get("markPrice"), info.get("markPrice")),
+                    "liq_price": num(r.get("liquidationPrice"), info.get("liqPrice")),
+                    "leverage": num(r.get("leverage"), info.get("leverage")),
+                    "margin_mode": r.get("marginMode"), "position_idx": int(num(info.get("positionIdx")) or 0)}
+        return {}
+
+    async def funding_paid(self, symbol: str, since_ms: int) -> float:
+        """USDT the funding settlements on ``symbol`` took from the account since ``since_ms``
+        (negative when they paid us). Read from the transaction log's SETTLEMENT rows: ``funding``
+        is the fee (positive = paid out); older rows without it fall back to ``-change``. Bybit
+        only answers for a 7-day window, so a short held longer counts its last 7 days."""
+        if not getattr(self.client, "markets", None):
+            await self.client.load_markets()
+        await self.throttle.acquire()
+        res = await self.client.private_get_v5_account_transaction_log(
+            {"accountType": "UNIFIED", "category": "linear", "type": "SETTLEMENT",
+             "symbol": self.client.market(symbol)["id"],
+             "startTime": max(int(since_ms), int(time.time() * 1000) - 7 * 86_400_000 + 60_000)})
+        rows = (res.get("result") or {}).get("list") or []
+        total = 0.0
+        for r in rows:
+            if r.get("funding") not in (None, ""):
+                total += float(r["funding"])
+            else:
+                total -= float(r.get("change") or 0)
+        return total
 
     async def perp_position(self, symbol: str) -> float:
         """Size of the open short on ``symbol`` in coins (0 when there is none)."""
