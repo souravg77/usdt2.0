@@ -136,7 +136,7 @@ def test_trading_page_and_controls(web):
     key = "s1|bybit|BTC/USDT|1h"
     with open(paths.paper_state, "w") as fh:
         json.dump({"open": {key: {"entry_id": "s1", "filled": True, "entry": 100.0, "mark_r": 0.4, "ai_prob": 0.66,
-                                  "signal": {"ts": 1, "entry": 100.0, "stop": 95.0}}},
+                                  "units": 2.0, "signal": {"ts": 1, "entry": 100.0, "stop": 95.0}}},
                    "trades": [{"key": key, "entry_id": "s1", "symbol": "BTC/USDT", "exit_ts": 1_760_000_000_000,
                                "entry": 100, "exit": 105, "r": 1.0, "pnl_usdt": 50, "exit_reason": "target",
                                "ai_prob": 0.71},
@@ -144,7 +144,8 @@ def test_trading_page_and_controls(web):
                                "entry": 100, "exit": 98, "r": -0.4, "pnl_usdt": -20, "exit_reason": "<stop>"}]}, fh)
     with open("data/trade/live_state.json", "w") as fh:
         json.dump({"positions": {key: {"key": key, "entry_id": "s1", "symbol": "BTC/USDT", "amount": 0.5,
-                                       "entry": 100.1, "stop": 95.0, "status": "open"}},
+                                       "entry": 100.1, "stop": 95.0, "status": "open", "mark": 102.0,
+                                       "cost": 50.05}},
                    "closed": [], "equity_curve": [[1, 10000], [2, 10050]]}, fh)
     token = login(client)
     r = client.get("/trading")
@@ -152,6 +153,8 @@ def test_trading_page_and_controls(web):
     for text in ("BTC/USDT", "0.66", "0.71", "+1.00R", "live equity", "<svg", "not checked yet",
                  "&lt;stop&gt;", "running"):
         assert text in r.text, text
+    assert "Now USDT" in r.text and "+4.00" in r.text and "+0.95" in r.text  # 0.4R x 5 x 2; 102 x 0.5 - 50.05
+    assert "<b>+4.95</b>" in r.text  # the total of the open positions
     assert 'data-reload-ms="60000"' in r.text and '<noscript><meta http-equiv="refresh" content="60">' in r.text
     js = client.get("/static/reload.js")  # a file, not inline: the page's security policy blocks inline scripts
     assert js.status_code == 200 and "activeElement" in js.text and "<script>" not in r.text
@@ -456,3 +459,15 @@ def test_self_refreshing_pages_wait_while_someone_types():
     from aitrader.web.app import kill_confirmed
 
     assert kill_confirmed("KILL") and kill_confirmed("kill ") and not kill_confirmed("kil")
+
+
+def test_open_positions_show_usdt_now():
+    from aitrader.web.app import _live_usdt, _paper_usdt
+
+    sig = {"entry": 100.0, "stop": 110.0}  # a paper short: risk 10 per unit
+    assert _paper_usdt({"filled": True, "mark_r": -0.5, "units": 3, "signal": sig}) == -15.0
+    assert _paper_usdt({"filled": False, "mark_r": 0.5, "units": 3, "signal": sig}) is None  # waiting
+    assert _paper_usdt({"filled": True, "units": 3, "signal": sig}) is None  # no candle closed yet
+    short = {"side": "short", "entry": 100.0, "mark": 98.0, "amount": 2, "entry_fee": 0.1}
+    assert _live_usdt(short) == 3.9  # bought back cheaper, after the fee
+    assert _live_usdt({"entry": 100.0, "amount": 2}) is None  # no price read yet

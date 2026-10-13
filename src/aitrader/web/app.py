@@ -751,26 +751,65 @@ def _ms(ts) -> str:
 
 
 def _positions_table(paper: dict, execs: dict) -> str:
-    rows = []
+    rows, total, counted = [], 0.0, 0
     for key, p in paper.get("open", {}).items():
         sig = p.get("signal", {})
         entry_id, ex, sym, tf = (key.split("|") + ["", "", "", ""])[:4]
         mark = p.get("mark_r")
+        usdt = _paper_usdt(p)
+        if usdt is not None:
+            total, counted = total + usdt, counted + 1
+        # the money columns come first so a phone shows them without scrolling sideways
         rows.append(f"<tr><td>paper</td><td>{_e(sym)}{_short(sig.get('side'))} <span class=muted>{_e(ex)} {_e(tf)}</span></td>"
+                    f"{_usdt_cell(usdt)}<td>{'' if mark is None else f'{mark:+.2f}R'}</td>"
                     f"<td>{_e(entry_id)}</td><td>{p.get('entry', sig.get('entry', 0)):.6g}"
                     f"{'' if p.get('filled') else ' <span class=muted>(waiting)</span>'}</td>"
-                    f"<td>{sig.get('stop', 0):.6g}</td><td>{'' if mark is None else f'{mark:+.2f}R'}</td>"
-                    f"<td>{_prob(p.get('ai_prob'))}</td></tr>")
+                    f"<td>{sig.get('stop', 0):.6g}</td><td>{_prob(p.get('ai_prob'))}</td></tr>")
     for mode, st in execs.items():
         for p in st.get("positions", {}).values():
             cls = "" if p.get("status") == "open" else "bad"
+            usdt = _live_usdt(p) if p.get("status") == "open" else None
+            if usdt is not None:
+                total, counted = total + usdt, counted + 1
             rows.append(f"<tr><td>{_e(mode)}</td><td>{_e(p['symbol'])} <span class=muted>{_e(p.get('amount', 0))}</span></td>"
+                        f'{_usdt_cell(usdt)}<td class="{cls}">{_e(p.get("status"))}</td>'
                         f"<td>{_e(p['entry_id'])}</td><td>{p.get('entry') or 0:.6g}</td><td>{p['stop']:.6g}</td>"
-                        f'<td class="{cls}">{_e(p.get("status"))}</td><td>{_prob(p.get("ai_prob"))}</td></tr>')
+                        f'<td>{_prob(p.get("ai_prob"))}</td></tr>')
     if not rows:
         return "<p class=muted>No open positions.</p>"
-    return ("<table><tr><th>Where</th><th>Market</th><th>Strategy</th><th>Entry</th><th>Stop</th>"
-            f"<th>Now</th><th>AI p</th></tr>{''.join(rows)}</table>")
+    foot = (f'<tr><td colspan="2"><b>Total now</b> <span class=muted>({counted} with a price)</span></td>'
+            f'{_usdt_cell(total, bold=True)}<td colspan="5"></td></tr>' if counted else "")
+    return ("<table><tr><th>Where</th><th>Market</th><th>Now USDT</th><th>Now</th><th>Strategy</th><th>Entry</th>"
+            f"<th>Stop</th><th>AI p</th></tr>{''.join(rows)}{foot}</table>")
+
+
+def _paper_usdt(p: dict) -> float | None:
+    """A paper position's profit or loss in USDT at the last closed candle, worked out the way
+    the paper trader books it when the trade closes (R x risk per unit x units)."""
+    sig = p.get("signal", {})
+    if not p.get("filled") or p.get("mark_r") is None or not p.get("units"):
+        return None
+    try:
+        return float(p["mark_r"]) * abs(float(sig["entry"]) - float(sig["stop"])) * float(p["units"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _live_usdt(p: dict) -> float | None:
+    """A live position's profit or loss in USDT at the executor's last price (the bid for a
+    long, the ask for a short), after the entry fee; None until it has read a price."""
+    if p.get("mark") is None or not p.get("amount") or not p.get("entry"):
+        return None
+    if p.get("side") == "short":  # the executor's word for a perp short
+        return (p["entry"] - p["mark"]) * p["amount"] - p.get("entry_fee", 0.0)
+    return p["mark"] * p["amount"] - p.get("cost", p["entry"] * p["amount"])
+
+
+def _usdt_cell(x: float | None, bold: bool = False) -> str:
+    if x is None:
+        return "<td>-</td>"
+    text = f"{x:+,.2f}"
+    return f'<td class="{"good" if x >= 0 else "bad"}">{f"<b>{text}</b>" if bold else text}</td>'
 
 
 def _short(side) -> str:
