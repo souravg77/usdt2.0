@@ -82,6 +82,12 @@ def add_market_routes(app, *, settings, page, guard, exchange: str = EXCHANGE, c
         with open(os.path.join(STATIC, "market.js"), encoding="utf-8") as fh:
             return Response(fh.read(), media_type="text/javascript")
 
+    @app.get("/static/chartstudies.js")
+    def chartstudies_js():
+        """Indicator drawing shared by the Markets and Replay charts."""
+        with open(os.path.join(STATIC, "chartstudies.js"), encoding="utf-8") as fh:
+            return Response(fh.read(), media_type="text/javascript")
+
     @app.get("/markets")
     def markets(request: Request, symbol: str = "", tf: str = "15m"):
         user, token, redirect = guard(request)
@@ -121,7 +127,7 @@ def add_market_routes(app, *, settings, page, guard, exchange: str = EXCHANGE, c
             'candle pattern letters: E engulfing, H hammer, D doji, I inside bar. Triangles are the paper trader\'s entries (up: buy, down: '
             'short), dots its exits (green: profit, red: loss); an open trade shows its entry, stop '
             'and target lines. The chart only shows: it can\'t place orders.</p></div>'
-            '<script src="/static/market.js" defer></script>')
+            '<script src="/static/chartstudies.js" defer></script><script src="/static/market.js" defer></script>')
         status = '<span id="live-status" class="live-status"><span class="dot"></span> Connecting…</span>'
         return page("Markets", body, user, token, head_extra=status)
 
@@ -168,7 +174,7 @@ def _strategy_indicators(registry_path: str) -> dict[str, int]:
         return {}
 
 
-def _study_chips(used: dict[str, int] | None = None) -> str:
+def _study_chips(used: dict[str, int] | None = None, skip: set[str] | frozenset = frozenset()) -> str:
     """The indicator switches. With strategies paper trading, the ones they use start on."""
     def default(k: str, on: bool) -> bool:
         return k in used or k in ALWAYS_ON if used else on
@@ -176,7 +182,7 @@ def _study_chips(used: dict[str, int] | None = None) -> str:
     return "".join(f'<button type="button" class="chip" data-study="{k}" data-on="{int(default(k, on))}" '
                    f'aria-pressed="{str(default(k, on)).lower()}"><i style="background:{c}"></i>{_e(label)}'
                    f'{f" <small>{used[k]}</small>" if used and k in used else ""}</button>'
-                   for k, label, c, _panel, on in STUDIES)
+                   for k, label, c, _panel, on in STUDIES if k not in skip)
 
 
 def _used_line(used: dict[str, int]) -> str:

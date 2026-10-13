@@ -20,7 +20,10 @@ MAX_BARS = 20_000
 
 
 def replay(entries: list[Entry], store: CandleStore, exchange: str, symbol: str, timeframe: str,
-           start_ms: int, end_ms: int, only: str = "", cfg: BacktestConfig | None = None) -> dict:
+           start_ms: int, end_ms: int, only: str | list[str] = "", cfg: BacktestConfig | None = None,
+           top: int = 0) -> dict:
+    """``only``: one strategy id, or a list of ids best first; with ``top``, the first ``top`` of
+    that list that trade ``timeframe`` (so "the best 10" means 10 that can trade this chart)."""
     step = TIMEFRAME_MS[timeframe]
     end_ms = min(end_ms, start_ms + MAX_BARS * step)
     rows = store.load(exchange, symbol, timeframe, start=start_ms - WARMUP_BARS * step, end=end_ms)
@@ -34,9 +37,14 @@ def replay(entries: list[Entry], store: CandleStore, exchange: str, symbol: str,
         out["skipped"].append({"id": "*", "why": f"only {len(rows)} candles; strategies need {MIN_BARS}"})
         return out
     df = candles_to_frame(rows)
-    for entry in entries:
-        if only and entry.id != only:
-            continue
+    if isinstance(only, str):
+        chosen = [e for e in entries if not only or e.id == only]
+    else:
+        by_id = {e.id: e for e in entries}
+        chosen = [by_id[i] for i in only if i in by_id]
+    for entry in chosen:
+        if top and len(out["strategies"]) >= top:
+            break
         try:
             strat = make_strategy(entry)
         except Exception as exc:
@@ -48,7 +56,8 @@ def replay(entries: list[Entry], store: CandleStore, exchange: str, symbol: str,
         for t in run_backtest(strat, df, exchange, symbol, timeframe, cfg or BacktestConfig()):
             if t.entry_ts < start_ms:
                 continue
-            out["trades"].append({"strategy": entry.id, "entry_ts": t.entry_ts, "entry": t.entry, "stop": t.stop,
+            side = "sell" if t.stop > t.entry else "buy"  # a short's stop sits above its entry
+            out["trades"].append({"strategy": entry.id, "side": side, "entry_ts": t.entry_ts, "entry": t.entry, "stop": t.stop,
                                   "target": t.target, "exit_ts": t.exit_ts, "exit": t.exit,
                                   "reason": t.exit_reason, "r": round(t.r, 3)})
     out["trades"].sort(key=lambda t: t["entry_ts"])
