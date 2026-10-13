@@ -348,10 +348,14 @@ class Executor:
                     reason = "paper twin closed"
                 elif _short(p):
                     ask = await self._ask(p)
+                    if ask is not None:
+                        p["mark"] = ask  # what buying it back costs now, for the loss cap
                     if ask is not None and ask >= p["stop"]:
                         reason = f"live price {ask:g} at or above the stop"
                 else:
                     bid = await self._bid(p["symbol"])
+                    if bid is not None:
+                        p["mark"] = bid  # what selling it fetches now, for the loss cap
                     if bid is not None and bid <= p["stop"]:
                         reason = f"live price {bid:g} at or below the stop"
             except Exception as exc:
@@ -754,16 +758,30 @@ class Executor:
         return [{"symbol": p["symbol"], "notional": p.get("notional") or p.get("cost")
                  or p.get("planned_units", 0) * p["stop"]} for p in self._open()]
 
+    def _open_loss(self) -> float:
+        """What the open positions are down at their latest price (gains don't offset losses)."""
+        loss = 0.0
+        for p in self.state["positions"].values():
+            if p["status"] != "open" or p.get("mark") is None or not p.get("amount"):
+                continue
+            if _short(p):
+                u = (p["entry"] - p["mark"]) * p["amount"] - p.get("entry_fee", 0.0)
+            else:
+                u = p["mark"] * p["amount"] - p.get("cost", p["entry"] * p["amount"])
+            loss += min(0.0, u)
+        return loss
+
     def _check_risk(self) -> None:
         closed = self.state["closed"]
-        if not closed or not self.state.get("last_equity"):
+        open_loss = self._open_loss()
+        if not (closed or open_loss) or not self.state.get("last_equity"):
             return
         why = self.risk.loss_breach(self.state["last_equity"], closed,
-                                    datetime.fromtimestamp(self.clock(), timezone.utc))
+                                    datetime.fromtimestamp(self.clock(), timezone.utc), open_loss=open_loss)
         if why is None and self.monitor is not None:
             why = self.monitor(closed)
         if why and not self.control.paused:
-            self.control.pause(why, by=f"risk engine ({self.mode})")
+            self.control.pause(why, by=f"risk engine ({self.mode})", auto=True)
             self.events.emit("risk_pause", f"{self.mode} paused: {why}", level="warning")
 
     def _healthy(self) -> None:

@@ -84,6 +84,11 @@ def test_loss_breach_daily_and_weekly():
     monday = int(datetime(2026, 10, 6, 1, tzinfo=timezone.utc).timestamp() * 1000)
     closed = [{"exit_ts": monday, "pnl_usdt": -190}] * 3
     assert "weekly" in eng.loss_breach(9_430, closed, now)
+    # open losses count before the trades close; open gains don't hide closed losses
+    assert eng.loss_breach(9_850, [{"exit_ts": today, "pnl_usdt": -150}], now, open_loss=-60) is not None
+    why = eng.loss_breach(10_000, [], now, open_loss=-250)
+    assert "daily" in why and "-250.00 of it in open positions" in why
+    assert eng.loss_breach(9_850, [{"exit_ts": today, "pnl_usdt": -150}], now, open_loss=+500) is None
 
 
 # ---- control and events -----------------------------------------------------------------------
@@ -1063,3 +1068,41 @@ def test_one_position_whose_check_fails_doesnt_block_the_others(ex):
     out = run(e.tick())
     assert out["closed"] == [KEY]  # still checked and sold, though ETH's check failed first
     assert e.state["failures"] == 1 and eth in e.state["positions"]
+
+
+def test_only_a_person_stops_paper_trading(tmp_path):
+    c = Control(str(tmp_path / "c.json"))
+    c.pause("daily loss cap", by="risk engine (live)", auto=True)
+    assert c.paused and not c.stops_paper  # live is paused, paper keeps collecting results
+    c.pause("paused from the dashboard by admin", by="admin")
+    assert c.stops_paper and c.state()["reason"] == "daily loss cap"  # the first reason stays
+    c.resume()
+    c.halt("no resting stop", by="safety halt (live)")
+    assert c.halted and not c.stops_paper
+    c.resume()
+    c.pause("by hand", by="admin")
+    c.halt("feed quiet", by="safety halt (live)")
+    assert c.halted and c.stops_paper  # the person's pause still counts
+    c.kill(by="admin")
+    assert c.stops_paper
+    # a control.json written before this change
+    with open(tmp_path / "c.json", "w") as fh:
+        json.dump({"paused": True, "killed": False, "reason": "x", "by": "risk engine (live)"}, fh)
+    assert not c.stops_paper
+    with open(tmp_path / "c.json", "w") as fh:
+        json.dump({"paused": True, "killed": False, "reason": "x", "by": "admin"}, fh)
+    assert c.stops_paper
+
+
+def test_an_open_loss_trips_the_daily_cap_before_the_stop(ex):
+    from aitrader.trade import RiskEngine, RiskLimits
+
+    make, adapter, *_ = ex
+    e = make(risk=RiskEngine(RiskLimits(daily_loss_pct=0.001)))
+    run(e.tick())
+    assert e.state["positions"][KEY]["status"] == "open" and not e.control.paused
+    adapter.bid = 96.0  # down about 4%, still above the 95 stop
+    run(e.tick())
+    assert KEY in e.state["positions"] and e.state["positions"][KEY]["mark"] == 96.0
+    s = e.control.state()
+    assert s["paused"] and "in open positions" in s["reason"] and not e.control.stops_paper

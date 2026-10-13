@@ -926,11 +926,11 @@ def _paper_switch_card(c: dict, paths: Paths, events: list[dict], jobs: list[dic
     svc, svc_cls, svc_detail = _service_state(events, "paper", int(time.time() * 1000))
     starting = next((j for j in jobs if j.get("meta", {}).get("kind") == "paper-start"
                      and j["status"] in ("queued", "running")), None)
+    from ..trade.control import Control
+
     if c["killed"]:
         state, cls, why = "OFF", "bad", "the kill switch is on"
-    elif c.get("halted"):
-        state, cls, why = "OFF", "bad", "the safety halt stopped new entries (see Controls)"
-    elif c["paused"]:
+    elif c["paused"] and Control._manual(c):
         state, cls, why = "OFF", "bad", "new entries are paused"
     elif starting:
         state, cls, why = "STARTING", "warn", f'loading strategies and price history (<a href="/jobs/{_e(starting["id"])}">progress</a>)'
@@ -940,6 +940,8 @@ def _paper_switch_card(c: dict, paths: Paths, events: list[dict], jobs: list[dic
         state, cls, why = "ON", "warn", f"but the paper service is {_e(svc)} ({_e(svc_detail)})"
     else:
         state, cls, why = "ON", "good", f"{in_paper} strategies trading with fake money"
+    if state == "ON" and c["paused"]:  # an automatic live pause: paper keeps going
+        why += "; live trading is paused (see Controls), paper keeps collecting results"
     on = "Turn paper trading on" if state != "ON" else "Reload every strategy"
     from ..learn.keep import MAX_N, MIN_N, saved_n
 

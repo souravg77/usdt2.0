@@ -34,8 +34,8 @@ Every executor order is sized and checked here. Strategies can't switch it off. 
 | Setting | Default | Meaning |
 |---|---|---|
 | `AITRADER_RISK_PER_TRADE` | 0.0025 | risk per trade (0.25% of equity); never above 1%, whatever you set |
-| `AITRADER_DAILY_LOSS_PCT` | 0.01 | realised loss today (UTC) that pauses trading |
-| `AITRADER_WEEKLY_LOSS_PCT` | 0.05 | realised loss this week that pauses trading |
+| `AITRADER_DAILY_LOSS_PCT` | 0.01 | loss today (UTC) that pauses trading: closed trades plus what open positions are down |
+| `AITRADER_WEEKLY_LOSS_PCT` | 0.05 | loss this week that pauses trading, counted the same way |
 | `AITRADER_MAX_OPEN_POSITIONS` | 3 | most positions at once |
 | `AITRADER_MAX_COIN_EXPOSURE_PCT` | 0.25 | most of equity in one coin |
 | `AITRADER_MAX_TOTAL_EXPOSURE_PCT` | 0.9 | most of equity invested (spot, no leverage) |
@@ -82,8 +82,9 @@ it holds:
 
 On a halt, entry orders still waiting are cancelled; resting stops and exits are left alone, so
 open positions stay protected. The dashboard shows **SAFETY HALT** with the reason. Check the
-account on Bybit, fix the cause, then press **Resume** (or `/resume` on Telegram). The halt
-pauses paper trading too, because pause is shared.
+account on Bybit, fix the cause, then press **Resume** (or `/resume` on Telegram). Paper trading
+keeps running through a halt or a loss-cap pause, so it keeps collecting the results the go-live
+gate needs; only your own pause or the kill switch stops paper trading.
 
 Secrets never reach the logs: every log line, traceback and event is passed through
 `ops/redact.py`, which hides key and secret values, signed URLs and Bybit's signing headers.

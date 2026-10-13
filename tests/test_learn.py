@@ -673,3 +673,57 @@ def test_a_strategy_that_raises_on_a_market_doesnt_stop_paper_trading(tmp_path, 
     assert trader.state["trades"] or trader.state["open"]  # the healthy strategy kept trading
     assert all(not k.startswith("boom|") for k in trader.state["open"])
     assert (tmp_path / "s.json").exists()
+
+
+def test_paper_keeps_trading_through_a_live_safety_halt(tmp_path):
+    from aitrader.trade import Control
+
+    df = synthetic(n=700)
+    store = CandleStore(str(tmp_path / "c.db"))
+    fill_store(store, df)
+    reg_path = str(tmp_path / "reg.json")
+    reg = Registry(reg_path)
+    reg.add(Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR), status="paper"))
+    reg.save()
+    control = Control(str(tmp_path / "control.json"))
+    control.halt("no resting stop on BTC/USDT", by="safety halt (live)")
+    trader = PaperTrader(store, reg_path, ["bybit"], ["BTC/USDT"], state_path=str(tmp_path / "s.json"),
+                         control=control)
+    for i in range(600, 640):
+        trader.tick(now_ms=int(df.ts.iloc[i]) + H)
+    assert trader.state["trades"] or trader.state["open"]
+    control.resume()
+    control.pause("paused by hand", by="admin")
+    before = len(trader.state["trades"]) + len(trader.state["open"])
+    opened = []
+    for i in range(640, 680):
+        opened += trader.tick(now_ms=int(df.ts.iloc[i]) + H)["opened"]
+    assert not opened and before
+
+
+def test_a_missing_entry_candle_doesnt_keep_a_paper_trade_open_forever(tmp_path, monkeypatch):
+    import aitrader.learn.paper as paper_mod
+
+    df = synthetic(n=700)
+    store = CandleStore(str(tmp_path / "c.db"))
+    fill_store(store, df)
+    reg_path = str(tmp_path / "reg.json")
+    reg = Registry(reg_path)
+    reg.add(Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR), status="paper"))
+    reg.save()
+    trader = PaperTrader(store, reg_path, ["bybit"], ["BTC/USDT"], state_path=str(tmp_path / "s.json"))
+    i = 600
+    while not trader.state["open"]:
+        trader.tick(now_ms=int(df.ts.iloc[i]) + H)
+        i += 1
+    key, pos = next(iter(trader.state["open"].items()))
+    sig_ts = pos["signal"]["ts"]
+    with store.conn:  # Bybit never sent the entry candle
+        store.conn.execute("DELETE FROM candles WHERE ts=?", (sig_ts,))
+    seen = []
+    real = paper_mod.simulate_signal
+    monkeypatch.setattr(paper_mod, "simulate_signal", lambda s, d, p, *a: seen.append(int(d.ts.iloc[p])) or real(s, d, p, *a))
+    trader.tick(now_ms=sig_ts + 2 * H)
+    assert not seen  # waits a little: the collector may still fill it in
+    trader.tick(now_ms=sig_ts + 5 * H)
+    assert seen and seen[0] == sig_ts + H  # entered on the next candle

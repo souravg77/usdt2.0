@@ -44,6 +44,7 @@ log = logging.getLogger(__name__)
 DEFAULT_STATE = "data/learn/paper_state.json"
 WINDOW_BARS = 1000  # history loaded per market, enough to warm up EMA200 and friends
 MIN_BARS = 250
+MISSING_ENTRY_BARS = 3  # bars to wait for a missing entry candle to be filled in before moving on
 
 
 @dataclass(frozen=True)
@@ -91,7 +92,9 @@ class PaperTrader:
         events = {"opened": [], "closed": [], "retired": [], "filtered": []}
         self._manage_open(reg, now_ms, events)
         allow, size_mult = self._calendar(now_ms)
-        if self.control is not None and self.control.paused:
+        # a person's pause or a kill stops paper entries; a live safety halt or loss-cap pause
+        # doesn't, so paper keeps collecting the results the go-live gate needs
+        if self.control is not None and getattr(self.control, "stops_paper", self.control.paused):
             allow = False
         frames: dict = {}  # (exchange, symbol, timeframe) -> (frame, newest close, new candle since last tick)
         regimes: dict = {}  # (exchange, symbol, timeframe) -> regime of the newest closed bar
@@ -288,13 +291,20 @@ class PaperTrader:
             df = self._frame(ex, sym, tf, sig.ts - WINDOW_BARS * step, now_ms)
             if df is None:
                 continue
-            idx = {int(t): i for i, t in enumerate(df["ts"].to_numpy())}
-            if sig.ts not in idx:
-                continue  # the entry bar hasn't closed yet
+            ts = df["ts"].to_numpy()
+            idx = {int(t): i for i, t in enumerate(ts)}
+            entry_i = idx.get(sig.ts)
+            if entry_i is None:
+                later = [i for i, t in enumerate(ts) if int(t) > sig.ts]
+                if not later or int(ts[-1]) - sig.ts < MISSING_ENTRY_BARS * step:
+                    continue  # the entry bar hasn't closed yet (or may still be filled in)
+                # the entry candle never arrived: enter on the next one rather than stay open forever
+                entry_i = later[0]
+                log.warning("paper %s: entry candle %d missing; entering at the next one", key, sig.ts)
             try:
                 if entry_id in reg.entries:
                     make_strategy(reg.entries[entry_id])  # registers its custom exit rules
-                t = simulate_signal(sig, df, idx[sig.ts], self.cfg.backtest, {})
+                t = simulate_signal(sig, df, entry_i, self.cfg.backtest, {})
             except Exception:  # never close a trade on the wrong rule: keep it open and say so
                 log.exception("paper %s: can't evaluate its exits; kept open", key)
                 continue
