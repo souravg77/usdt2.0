@@ -150,3 +150,49 @@ def test_migrate_and_backup(tmp_path, monkeypatch):
     assert main(["--env-file", "none", "migrate"]) == 0
     assert main(["--env-file", "none", "backup", "data/backups/x"]) == 0
     assert (tmp_path / "data" / "backups" / "x" / "b.db").exists()
+
+
+async def test_download_fills_holes_and_refreshes_the_newest_candle(fake_ccxt):
+    import aitrader.data.downloader as dl
+
+    s = Settings()
+    raw = [[i * 60_000, 1, 2, 0.5, 1.5, 1] for i in range(30)]
+    adapter = BybitAdapter(s, client=fake_ccxt(raw), throttle=Throttle(1000, 1000))
+    store = CandleStore(":memory:")
+    # stored with two holes, and the newest candle read before it was final
+    have = [i for i in range(25) if i not in (5, 6, 7, 12)]
+    store.upsert([Candle("bybit", "BTC/USDT", "1m", i * 60_000, 1, 2, 0.5, 1.0 if i == 24 else 1.5, 1)
+                  for i in have])
+    dl._tried.clear()
+    n = await download(adapter, store, "BTC/USDT", "1m", 0, 30 * 60_000)
+    assert n == 4 + 5  # the four missing, then 25-29
+    rows = store.load("bybit", "BTC/USDT", "1m")
+    assert [r.ts for r in rows] == [i * 60_000 for i in range(30)]
+    assert rows[24].close == 1.5  # refreshed
+    assert check_candles(rows, "1m").ok
+    assert await download(adapter, store, "BTC/USDT", "1m", 0, 30 * 60_000) == 0
+
+
+async def test_a_hole_the_exchange_has_nothing_for_is_not_asked_every_minute(fake_ccxt):
+    import aitrader.data.downloader as dl
+
+    raw = [[i * 60_000, 1, 2, 0.5, 1.5, 1] for i in range(10) if i != 4]  # Bybit has no bar 4
+    calls = []
+    client = fake_ccxt(raw)
+    real = client.fetch_ohlcv
+
+    async def counting(*a, **k):
+        calls.append(k.get("since", a[2] if len(a) > 2 else None))
+        return await real(*a, **k)
+
+    client.fetch_ohlcv = counting
+    adapter = BybitAdapter(Settings(), client=client, throttle=Throttle(1000, 1000))
+    store = CandleStore(":memory:")
+    dl._tried.clear()
+    await download(adapter, store, "BTC/USDT", "1m", 0, 10 * 60_000)
+    calls.clear()
+    await download(adapter, store, "BTC/USDT", "1m", 0, 10 * 60_000)
+    assert calls == [4 * 60_000, 9 * 60_000]  # the hole is asked for once, then the newest candle
+    calls.clear()
+    await download(adapter, store, "BTC/USDT", "1m", 0, 10 * 60_000)
+    assert calls == [9 * 60_000]  # not again right away

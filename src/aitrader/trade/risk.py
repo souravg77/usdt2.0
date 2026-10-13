@@ -126,19 +126,24 @@ class RiskEngine:
         used = sum(p["notional"] for p in open_positions if p["symbol"].split("/")[0] == base)
         return self.limits.max_coin_exposure_pct * equity - used
 
-    def loss_breach(self, equity_now: float, closed: list[dict], now: datetime | None = None) -> str | None:
-        """A reason string if today's or this week's realised loss passed its cap. ``closed``
-        are trades with ``exit_ts`` (ms) and ``pnl_usdt``."""
+    def loss_breach(self, equity_now: float, closed: list[dict], now: datetime | None = None,
+                    open_loss: float = 0.0) -> str | None:
+        """A reason string if today's or this week's loss passed its cap. ``closed`` are trades
+        with ``exit_ts`` (ms) and ``pnl_usdt``; ``open_loss`` (zero or negative) is what the open
+        positions are down right now, so a big loss counts before the trade is closed.
+        ``equity_now`` values open positions at cost."""
         now = now or datetime.now(timezone.utc)
         day0 = now.replace(hour=0, minute=0, second=0, microsecond=0)
         week0 = day0 - timedelta(days=day0.weekday())
         for start, cap, label in ((day0, self.limits.daily_loss_pct, "daily"),
                                   (week0, self.limits.weekly_loss_pct, "weekly")):
             ms = start.timestamp() * 1000
-            pnl = sum(t["pnl_usdt"] for t in closed if t["exit_ts"] >= ms)
-            start_equity = equity_now - pnl
+            realised = sum(t["pnl_usdt"] for t in closed if t["exit_ts"] >= ms)
+            start_equity = equity_now - realised
+            pnl = realised + min(0.0, open_loss)
             if start_equity > 0 and pnl < 0 and -pnl / start_equity >= cap:
+                held = f", {open_loss:+.2f} of it in open positions" if open_loss < 0 else ""
                 return (f"{label} loss cap hit: {pnl:+.2f} USDT ({pnl / start_equity:+.1%} of "
-                        f"{start_equity:,.2f}; cap {cap:.1%})")
+                        f"{start_equity:,.2f}; cap {cap:.1%}){held}")
         return None
 

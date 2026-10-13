@@ -64,8 +64,8 @@ class CombinedControl:
     def halted(self) -> bool:
         return self.own.halted
 
-    def pause(self, reason: str, by: str = "") -> dict:
-        return self.own.pause(reason, by)
+    def pause(self, reason: str, by: str = "", auto: bool = False) -> dict:
+        return self.own.pause(reason, by, auto=auto)
 
     def halt(self, reason: str, by: str = "") -> dict:
         """A safety halt of this user's trading (the executor can't vouch for a position)."""

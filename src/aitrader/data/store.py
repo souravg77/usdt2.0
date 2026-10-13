@@ -90,6 +90,12 @@ class CandleStore:
         ).fetchone()
         return row[0]
 
+    def timestamps(self, exchange: str, symbol: str, timeframe: str, start: int, end: int) -> list[int]:
+        """Stored candle times in ``[start, end]``, oldest first."""
+        return [r[0] for r in self.conn.execute(
+            "SELECT ts FROM candles WHERE exchange=? AND symbol=? AND timeframe=? AND ts>=? AND ts<=? "
+            "ORDER BY ts", (exchange, symbol, timeframe, start, end))]
+
     def last_ts(self, exchange: str, symbol: str, timeframe: str) -> int | None:
         row = self.conn.execute(
             "SELECT MAX(ts) FROM candles WHERE exchange=? AND symbol=? AND timeframe=?",
