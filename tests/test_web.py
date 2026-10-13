@@ -471,3 +471,52 @@ def test_open_positions_show_usdt_now():
     short = {"side": "short", "entry": 100.0, "mark": 98.0, "amount": 2, "entry_fee": 0.1}
     assert _live_usdt(short) == 3.9  # bought back cheaper, after the fee
     assert _live_usdt({"entry": 100.0, "amount": 2}) is None  # no price read yet
+
+
+def test_open_positions_follow_the_live_price(tmp_path, monkeypatch):
+    """The Trading page's Now USDT column updates every 1.5 s from /api/positions, which prices
+    the open positions with the same cached Bybit feed as the Markets page."""
+    from aitrader.web.app import live_position_usdt
+
+    monkeypatch.chdir(tmp_path)
+
+    class FakeLive:
+        def __init__(self):
+            self.asked = []
+
+        async def tickers(self, symbols):
+            self.asked.append(symbols)
+            return {"source": "live", "tickers": [{"symbol": "BTC/USDT", "price": 103.0},
+                                                  {"symbol": "ETH/USDT", "price": 48.0}]}
+
+    fake = FakeLive()
+    paths = Paths(paper_state="data/learn/paper_state.json")
+    client = TestClient(create_app(Settings(), Auth("admin", PW, "k"),
+                                   JobRunner(str(tmp_path / "jobs"), env_file="none"), paths, live=fake))
+    assert client.get("/api/positions").status_code == 401
+    login(client)
+    assert client.get("/api/positions").json()["rows"] == {}  # nothing open: Bybit isn't asked
+    assert fake.asked == []
+    os.makedirs("data/learn", exist_ok=True)
+    os.makedirs("data/trade", exist_ok=True)
+    paper = {"open": {"a|bybit|BTC/USDT|1h": {"filled": True, "entry": 100.0, "units": 2.0, "mark_r": 0.1,
+                                              "signal": {"entry": 100.0, "stop": 95.0, "side": "buy"}},
+                      "b|bybit|ETH/USDT|4h": {"filled": True, "entry": 50.0, "units": 3.0,
+                                              "signal": {"entry": 50.0, "stop": 52.0, "side": "sell"}},
+                      "c|bybit|SOL/USDT|1h": {"filled": False, "signal": {"entry": 10.0, "stop": 9.0}}}}
+    json.dump(paper, open(paths.paper_state, "w"))
+    json.dump({"positions": {"k": {"key": "k", "entry_id": "a", "symbol": "BTC/USDT", "amount": 0.5, "entry": 100.0,
+                                   "cost": 50.1, "stop": 95.0, "status": "open"}}}, open("data/trade/live_state.json", "w"))
+    r = client.get("/api/positions").json()
+    assert r["source"] == "live" and fake.asked[-1] == ["BTC/USDT", "ETH/USDT"]  # only filled ones
+    assert r["rows"] == {"paper|a|bybit|BTC/USDT|1h": 6.0,  # (103 - 100) x 2
+                         "paper|b|bybit|ETH/USDT|4h": 6.0,  # short: (50 - 48) x 3
+                         "live|k": 1.4}  # 103 x 0.5 - 50.1
+    assert r["total"] == 13.4
+    page = client.get("/trading").text
+    for cell in ('data-pos="paper|a|bybit|BTC/USDT|1h"', 'data-pos="live|k"', 'data-pos="total"',
+                 '<script src="/static/positions.js" defer></script>'):
+        assert cell in page, cell
+    js = client.get("/static/positions.js")
+    assert js.status_code == 200 and "/api/positions" in js.text
+    assert live_position_usdt(paper, {}, {})["rows"] == {}  # no price: cells keep what they showed

@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 from ..clock import label as tz_label, local, offset_minutes
 
 from fastapi import FastAPI, Form, Request, UploadFile
-from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 
 from ..config import EXCHANGE, Settings
 from ..safety import live_gate_problems
@@ -178,6 +178,32 @@ data-tz-label="{_e(tz_label(now))}"{f' data-reload-ms="{int(refresh * 1000)}"' i
     from .research_pages import add_research_routes
     from .report_pages import add_report_routes
     from .settings_pages import add_settings_routes
+
+    if live is None:
+        from .live import LiveMarket
+
+        live = LiveMarket(settings.db_path, EXCHANGE)
+
+    @app.get("/api/positions")
+    async def api_positions(request: Request):
+        """Each open position's profit or loss in USDT at the live price (cached ~1s, the same
+        feed as the Markets page), for the Trading page to update every second."""
+        _user, _token, redirect = guard(request)
+        if redirect:
+            return JSONResponse({"error": "sign in"}, status_code=401)
+        paper = _load_json(paths.paper_state)
+        execs = {m: _load_json(os.path.join(paths.trade_dir, f"{m}_state.json")) for m in ("live",)}
+        symbols = sorted(set(_open_symbols(paper, execs)))
+        if not symbols:
+            return JSONResponse({"source": "", "rows": {}, "total": None})
+        prices = await live.tickers(symbols)
+        return JSONResponse(live_position_usdt(paper, execs, {t["symbol"]: t.get("price") for t in prices.get("tickers", [])},
+                                               source=prices.get("source", "")))
+
+    @app.get("/static/positions.js")
+    def positions_js():
+        with open(os.path.join(os.path.dirname(__file__), "static", "positions.js"), encoding="utf-8") as fh:
+            return Response(fh.read(), media_type="text/javascript")
 
     add_market_routes(app, settings=settings, page=page, guard=guard, live=live, paper_state=paths.paper_state,
                       registry=paths.registry)
@@ -373,6 +399,7 @@ paper trading. Nothing trades real money.</p>
                 "<h2>Open positions</h2>", _positions_table(paper, execs),
                 "<h2>Trade log</h2>", _trades_table(paper, execs),
                 "<h2>Events</h2>", _events_table(events)]
+        body.append('<script src="/static/positions.js" defer></script>')
         return page("Trading", "".join(body), user, token, refresh=60)
 
     def _control_post(request: Request, csrf: str, action) -> Response:
@@ -761,7 +788,7 @@ def _positions_table(paper: dict, execs: dict) -> str:
             total, counted = total + usdt, counted + 1
         # the money columns come first so a phone shows them without scrolling sideways
         rows.append(f"<tr><td>paper</td><td>{_e(sym)}{_short(sig.get('side'))} <span class=muted>{_e(ex)} {_e(tf)}</span></td>"
-                    f"{_usdt_cell(usdt)}<td>{'' if mark is None else f'{mark:+.2f}R'}</td>"
+                    f"{_usdt_cell(usdt, pos_id='paper|' + key)}<td>{'' if mark is None else f'{mark:+.2f}R'}</td>"
                     f"<td>{_e(entry_id)}</td><td>{p.get('entry', sig.get('entry', 0)):.6g}"
                     f"{'' if p.get('filled') else ' <span class=muted>(waiting)</span>'}</td>"
                     f"<td>{sig.get('stop', 0):.6g}</td><td>{_prob(p.get('ai_prob'))}</td></tr>")
@@ -772,14 +799,14 @@ def _positions_table(paper: dict, execs: dict) -> str:
             if usdt is not None:
                 total, counted = total + usdt, counted + 1
             rows.append(f"<tr><td>{_e(mode)}</td><td>{_e(p['symbol'])} <span class=muted>{_e(p.get('amount', 0))}</span></td>"
-                        f'{_usdt_cell(usdt)}<td class="{cls}">{_e(p.get("status"))}</td>'
+                        f'{_usdt_cell(usdt, pos_id=mode + "|" + str(p.get("key", "")))}<td class="{cls}">{_e(p.get("status"))}</td>'
                         f"<td>{_e(p['entry_id'])}</td><td>{p.get('entry') or 0:.6g}</td><td>{p['stop']:.6g}</td>"
                         f'<td>{_prob(p.get("ai_prob"))}</td></tr>')
     if not rows:
         return "<p class=muted>No open positions.</p>"
-    foot = (f'<tr><td colspan="2"><b>Total now</b> <span class=muted>({counted} with a price)</span></td>'
-            f'{_usdt_cell(total, bold=True)}<td colspan="5"></td></tr>' if counted else "")
-    return ("<table><tr><th>Where</th><th>Market</th><th>Now USDT</th><th>Now</th><th>Strategy</th><th>Entry</th>"
+    foot = (f'<tr><td colspan="2"><b>Total now</b> <span class="muted" id="pos-live">at the last closed candle</span></td>'
+            f'{_usdt_cell(total if counted else None, bold=True, pos_id="total")}<td colspan="5"></td></tr>')
+    return ("<table><tr><th>Where</th><th>Market</th><th>Now USDT</th><th>R (last candle)</th><th>Strategy</th><th>Entry</th>"
             f"<th>Stop</th><th>AI p</th></tr>{''.join(rows)}{foot}</table>")
 
 
@@ -805,11 +832,43 @@ def _live_usdt(p: dict) -> float | None:
     return p["mark"] * p["amount"] - p.get("cost", p["entry"] * p["amount"])
 
 
-def _usdt_cell(x: float | None, bold: bool = False) -> str:
+def _usdt_cell(x: float | None, bold: bool = False, pos_id: str = "") -> str:
+    tag = f' data-pos="{_e(pos_id)}"' if pos_id else ""
     if x is None:
-        return "<td>-</td>"
+        return f"<td{tag}>-</td>"
     text = f"{x:+,.2f}"
-    return f'<td class="{"good" if x >= 0 else "bad"}">{f"<b>{text}</b>" if bold else text}</td>'
+    return f'<td{tag} class="{"good" if x >= 0 else "bad"}">{f"<b>{text}</b>" if bold else text}</td>'
+
+
+def _open_symbols(paper: dict, execs: dict) -> list[str]:
+    out = [(k.split("|") + ["", "", ""])[2] for k, p in paper.get("open", {}).items() if p.get("filled")]
+    for st in execs.values():
+        out += [p.get("symbol", "") for p in st.get("positions", {}).values() if p.get("status") == "open"]
+    return [s for s in out if s]
+
+
+def live_position_usdt(paper: dict, execs: dict, prices: dict, source: str = "") -> dict:
+    """Each open position's profit or loss in USDT at ``prices`` (symbol -> last price), keyed
+    like the table's cells, plus the total. Before exit fees; a position without a price is left
+    out (its cell keeps what it showed)."""
+    rows: dict[str, float] = {}
+    for key, p in paper.get("open", {}).items():
+        sym = (key.split("|") + ["", "", ""])[2]
+        px, units, entry = prices.get(sym), p.get("units"), p.get("entry")
+        if not p.get("filled") or not px or not units or not entry:
+            continue
+        short = (p.get("signal") or {}).get("side") == "sell"
+        rows["paper|" + key] = ((entry - px) if short else (px - entry)) * units
+    for mode, st in execs.items():
+        for p in st.get("positions", {}).values():
+            px = prices.get(p.get("symbol"))
+            if p.get("status") != "open" or not px:
+                continue
+            u = _live_usdt({**p, "mark": px})
+            if u is not None:
+                rows[f"{mode}|{p.get('key', '')}"] = u
+    return {"source": source, "rows": {k: round(v, 4) for k, v in rows.items()},
+            "total": round(sum(rows.values()), 4) if rows else None}
 
 
 def _short(side) -> str:
