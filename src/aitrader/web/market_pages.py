@@ -117,7 +117,8 @@ def add_market_routes(app, *, settings, page, guard, exchange: str = EXCHANGE, c
             '<p class="muted small">Prices and candles come from Bybit\'s public market data '
             '(no key needed) and refresh every 1.5 seconds while this page is open. Times are India time (IST) unless AITRADER_TZ says otherwise. '
             'Hover or touch the chart to read a candle and its indicators. Indicators use the same '
-            'formulas as the strategies. Triangles are the paper trader\'s entries (up: buy, down: '
+            'formulas as the strategies. Fibonacci levels and the volume profile cover the last 100 candles; '
+            'candle pattern letters: E engulfing, H hammer, D doji, I inside bar. Triangles are the paper trader\'s entries (up: buy, down: '
             'short), dots its exits (green: profit, red: loss); an open trade shows its entry, stop '
             'and target lines. The chart only shows: it can\'t place orders.</p></div>'
             '<script src="/static/market.js" defer></script>')
@@ -134,12 +135,19 @@ STUDIES = [
     ("ich", "Ichimoku", "#38bdf8", False, False),
     ("psar", "Parabolic SAR", "#fb923c", False, False),
     ("sr", "Support/resistance", "#a3a3a3", False, False),
+    ("kc", "Keltner", "#a78bfa", False, False),
+    ("fib", "Fibonacci", "#eab308", False, False),
+    ("vp", "Volume profile", "#64748b", False, False),
+    ("pat", "Candle patterns", "#84cc16", False, False),
     ("trades", "Agent's trades", "#7aa2ff", False, True),
     ("vol", "Volume", "#64748b", True, True),
     ("rsi", "RSI", "#c084fc", True, True),
     ("macd", "MACD", "#4cc3ff", True, True),
     ("adx", "ADX", "#f5c542", True, False),
     ("stoch", "Stoch RSI", "#2dd4bf", True, False),
+    ("atr", "ATR", "#f97316", True, False),
+    ("cci", "CCI", "#22d3ee", True, False),
+    ("willr", "Williams %R", "#e879f9", True, False),
 ]
 
 

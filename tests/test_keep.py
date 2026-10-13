@@ -59,13 +59,25 @@ def test_keep_top_keeps_n_even_when_results_are_negative(tmp_path):
 
 
 def test_indicators_come_from_the_rules():
-    assert indicators(entry("a", name="trend_pullback")) == {"ema", "adx", "rsi"}
+    assert indicators(entry("a", name="trend_pullback")) == {"ema", "adx", "rsi", "sr", "atr"}  # market structure
     assert indicators(entry("b", name="supertrend_trend")) >= {"st"}
+    assert "ema" not in indicators(entry("f", name="fibonacci_reaction"))  # "smaller" isn't SMA
+    assert indicators(entry("d", name="range_support_bounce")) >= {"sr", "adx"}  # its channel
+    assert {"fib"} <= indicators(entry("f", name="fibonacci_reaction"))
+    assert {"vp"} <= indicators(entry("v", name="value_area_reversion"))
+    assert {"kc"} <= indicators(entry("k", name="keltner_breakout"))
+    assert {"pat"} <= indicators(entry("h", name="hammer_reversal"))
+    assert {"cci"} <= indicators(entry("c", name="cci_divergence"))
+    assert {"willr"} <= indicators(entry("w", name="williams_r_reversal"))
     rule = Entry(id="r", kind="rule", name="r",
                  spec={"description": "MACD and Bollinger in the text only",
+                       "decisions": ["volume confirmation approximated with rsi(14) < 30"],
+                       "uncodable": ["a parabolic SAR exit"],
                        "entry": [{"left": "close", "op": ">", "right": "vwap(20)"},
                                  {"left": "rsi(14)", "op": "<", "right": "30"}]})
-    assert indicators(rule) == {"vwap", "rsi"}  # the description doesn't count
+    assert indicators(rule) == {"vwap", "rsi"}  # the description and the notes don't count
+    div = Entry(id="d", kind="rule", name="d", spec={"entry": [{"left": "rsi_bull_div(14,30)", "op": ">=", "right": 1}]})
+    assert indicators(div) == {"rsi"}
     short = Entry(id="short-r", kind="short", name="short: r",
                   spec={"base_id": "r", "base_kind": "rule", "base_name": "r", "base_spec": rule.spec})
     assert indicators(short) == {"vwap", "rsi"}
@@ -76,7 +88,7 @@ def test_indicators_used_counts_paper_strategies(tmp_path):
                entry("c", name="supertrend_trend", status="retired"))
     used = indicators_used(reg)
     assert used["ema"] == 2 and used["rsi"] == 2 and used["adx"] == 1 and "st" not in used
-    assert list(used)[:2] == ["ema", "rsi"]
+    assert list(used)[:3] == ["atr", "ema", "rsi"]  # most used first, then by name
 
 
 def test_saved_n_is_clamped(tmp_path):

@@ -161,6 +161,32 @@ def test_market_studies_line_up_with_the_candles_and_show_paper_trades(world, mo
     assert 0 <= s["panels"]["rsi"][-1] <= 100 and s["levels"]
 
 
+def test_chart_has_every_indicator_the_strategies_use():
+    """ATR, CCI, Williams %R, Keltner, Fibonacci, volume profile and candle patterns are on the
+    chart too, from the same functions the strategies call."""
+    import pandas as pd
+
+    from aitrader import indicators as ind
+    from aitrader.indicators.results import fibonacci_result
+    from aitrader.web.studies import compute
+
+    rows = [[i * 60_000, 100 + i % 7, 102 + i % 7, 98 + i % 7, 101 + i % 5, 10 + i % 3] for i in range(300)]
+    s = compute(rows, tail=50)
+    df = pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"]).astype(float)
+    assert s["panels"]["atr"][-1] == round(float(ind.atr(df).iloc[-1]), 10)
+    assert s["panels"]["cci"][-1] == round(float(ind.cci(df).iloc[-1]), 2)
+    assert -100 <= s["panels"]["willr"][-1] <= 0
+    assert s["overlays"]["kc_lower"][-1] < s["overlays"]["kc_mid"][-1] < s["overlays"]["kc_upper"][-1]
+    assert len(s["patterns"]) == 50 and set("".join(p for p in s["patterns"] if p)) <= set("EHDI")
+    fib = fibonacci_result(df)
+    assert s["fib"]["high"] == fib.features["swing_high"] and s["fib"]["leg"] == fib.metadata["leg"]
+    assert [lv["ratio"] for lv in s["fib"]["levels"]] == [0.236, 0.382, 0.5, 0.618, 0.786]
+    prof = s["profile"]
+    assert len(prof["bins"]) == 24 and prof["val"] <= prof["poc"] <= prof["vah"]
+    assert sum(b["volume"] for b in prof["bins"]) == df["volume"].tail(100).sum()  # the last 100 candles
+    assert compute(rows[:1])["fib"] is None
+
+
 def test_paper_trades_for_one_pair(tmp_path):
     import json
 
@@ -186,7 +212,8 @@ def test_markets_page_has_indicator_switches(world):
     client, _, _ = world
     login(client)
     r = client.get("/markets?symbol=BTC/USDT&tf=1h")
-    for key in ("ema", "bb", "vwap", "st", "ich", "psar", "sr", "trades", "vol", "rsi", "macd", "adx", "stoch"):
+    for key in ("ema", "bb", "vwap", "st", "ich", "psar", "sr", "trades", "vol", "rsi", "macd", "adx", "stoch",
+                "kc", "fib", "vp", "pat", "atr", "cci", "willr"):
         assert f'data-study="{key}"' in r.text
     assert "place orders" in r.text
 
@@ -206,5 +233,6 @@ def test_chart_starts_with_the_indicators_the_strategies_use(world):
     for key in ("ema", "adx", "rsi", "st", "trades", "vol"):
         assert f'data-study="{key}" data-on="1"' in r.text, key
     assert 'data-study="macd" data-on="0"' in r.text and 'data-study="bb" data-on="0"' in r.text
+    assert 'data-study="atr" data-on="1"' in r.text and 'data-study="cci" data-on="0"' in r.text  # stops use ATR
     assert "EMA 20/50/200 (2)" in r.text and 'id="studies-reset"' in r.text
     assert "studies-reset" in client.get("/static/market.js").text

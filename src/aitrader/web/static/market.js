@@ -12,8 +12,10 @@
   var PANEL_H = 84;
   var COLORS = { ema20: "#f5c542", ema50: "#4cc3ff", ema200: "#c084fc", bb: "#94a3b8", vwap: "#f472b6",
                  tenkan: "#38bdf8", kijun: "#fb923c", psar: "#fb923c", rsi: "#c084fc", macd: "#4cc3ff",
-                 signal: "#fb923c", adx: "#f5c542", k: "#2dd4bf", d: "#f472b6", sr: "#a3a3a3" };
-  var PANELS = ["vol", "rsi", "macd", "adx", "stoch"];
+                 signal: "#fb923c", adx: "#f5c542", k: "#2dd4bf", d: "#f472b6", sr: "#a3a3a3",
+                 kc: "#a78bfa", fib: "#eab308", vp: "#64748b", atr: "#f97316", cci: "#22d3ee", willr: "#e879f9" };
+  var PANELS = ["vol", "rsi", "macd", "adx", "stoch", "atr", "cci", "willr"];
+  var PATTERN_NAMES = { E: "engulfing", H: "hammer", D: "doji", I: "inside bar" };
   var on = {};
   var canvas = document.getElementById("chart");
   var ctx = canvas.getContext("2d");
@@ -219,7 +221,7 @@
     S.ts.forEach(function (t, i) { pos[t] = i; });
     bars.forEach(function (b) { out.idx.push(pos[b[0]] === undefined ? -1 : pos[b[0]]); });
     out.get = function (group, key, i) {
-      var arr = (S[group] || {})[key], j = out.idx[i];
+      var arr = key === null ? S[group] : (S[group] || {})[key], j = out.idx[i];
       return arr && j >= 0 ? arr[j] : null;
     };
     out.S = S;
@@ -237,6 +239,12 @@
       if (started) ctx.lineTo(x, yy); else { ctx.moveTo(x, yy); started = true; }
     }
     ctx.stroke(); ctx.setLineDash([]); ctx.lineWidth = 1;
+  }
+
+  // 0% at the end of the move, 100% at its start
+  function fibLevels(f) {
+    return [{ ratio: 0, price: f.leg === "up" ? f.high : f.low }].concat(f.levels,
+            [{ ratio: 1, price: f.leg === "up" ? f.low : f.high }]);
   }
 
   function barIndex(bars, ts) {
@@ -274,9 +282,12 @@
       if (on.st) overlayKeys.push("supertrend");
       if (on.ich) overlayKeys.push("tenkan", "kijun", "span_a", "span_b");
       if (on.psar) overlayKeys.push("psar");
+      if (on.kc) overlayKeys.push("kc_upper", "kc_mid", "kc_lower");
       overlayKeys.forEach(function (k) { for (var i = 0; i < n; i++) room(A.get("overlays", k, i)); });
     }
     trades.open.forEach(function (t) { room(t.stop); room(t.target); room(t.entry); });
+    var fib = A && on.fib ? A.S.fib : null, prof = A && on.vp ? A.S.profile : null;
+    if (fib) { room(fib.high); room(fib.low); }
     var pad = (hi - lo) * 0.06 || hi * 0.001 || 1;
     hi += pad; lo -= pad;
     var top = 8, bottom = L.priceH - 4;
@@ -334,6 +345,39 @@
       });
     }
 
+    // volume profile of the last 100 candles: bars from the right edge, busiest bucket (POC) brighter
+    if (prof) {
+      var vmax = 0;
+      prof.bins.forEach(function (bn) { vmax = Math.max(vmax, bn.volume); });
+      prof.bins.forEach(function (bn) {
+        if (!vmax || bn.high < lo || bn.low > hi) return;
+        var y0 = y(bn.high), y1 = y(bn.low), wd = bn.volume / vmax * L.plotW * 0.25;
+        var poc = prof.poc >= bn.low && prof.poc <= bn.high;
+        ctx.fillStyle = poc ? COLORS.fib : COLORS.vp; ctx.globalAlpha = poc ? 0.35 : 0.25;
+        ctx.fillRect(L.plotW - wd, y0 + 0.5, wd, Math.max(1, y1 - y0 - 1));
+      });
+      ctx.globalAlpha = 1;
+      [["vah", "VAH"], ["poc", "POC"], ["val", "VAL"]].forEach(function (k) {
+        var pv0 = prof[k[0]];
+        if (pv0 === null || pv0 === undefined || pv0 < lo || pv0 > hi) return;
+        var vy = Math.round(y(pv0)) + 0.5;
+        ctx.strokeStyle = k[0] === "poc" ? COLORS.fib : muted; ctx.globalAlpha = 0.7; ctx.setLineDash(k[0] === "poc" ? [] : [3, 3]);
+        ctx.beginPath(); ctx.moveTo(L.plotW * 0.75, vy); ctx.lineTo(L.plotW, vy); ctx.stroke(); ctx.setLineDash([]);
+        ctx.globalAlpha = 1; ctx.fillStyle = muted; ctx.textAlign = "right";
+        ctx.fillText(k[1], L.plotW * 0.75 - 4, vy + 4);
+      });
+    }
+    // Fibonacci retracements of the last 100 candles' swing (0% at the end of the move)
+    if (fib) {
+      fibLevels(fib).forEach(function (lv) {
+        if (lv.price < lo || lv.price > hi) return;
+        var fy = Math.round(y(lv.price)) + 0.5;
+        ctx.strokeStyle = COLORS.fib; ctx.globalAlpha = lv.ratio === 0 || lv.ratio === 1 ? 0.4 : 0.75;
+        ctx.setLineDash([6, 4]); ctx.beginPath(); ctx.moveTo(0, fy); ctx.lineTo(L.plotW, fy); ctx.stroke();
+        ctx.setLineDash([]); ctx.globalAlpha = 1;
+      });
+    }
+
     // candles (volume moved to its own panel)
     var bw = Math.max(1, L.step * 0.66);
     bars.forEach(function (b, i) {
@@ -359,6 +403,16 @@
                    y, L.step, dir === 1 ? up : down, 2);
         });
       }
+      if (on.kc) { polyline(n, ov("kc_upper"), y, L.step, COLORS.kc, 1); polyline(n, ov("kc_lower"), y, L.step, COLORS.kc, 1);
+                   polyline(n, ov("kc_mid"), y, L.step, COLORS.kc, 1, [4, 4]); }
+      if (on.pat) {  // the pattern's letter above the candle that completes it
+        ctx.font = "600 10px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.fillStyle = fg;
+        for (var q = 0; q < n; q++) {
+          var pm = A.get("patterns", null, q);
+          if (pm) ctx.fillText(pm, (q + 0.5) * L.step, y(bars[q][2]) - 4);
+        }
+        ctx.font = "12px system-ui, sans-serif";
+      }
       if (on.psar) {
         for (var p = 0; p < n; p++) {
           var sv = A.get("overlays", "psar", p);
@@ -367,6 +421,19 @@
           ctx.beginPath(); ctx.arc((p + 0.5) * L.step, y(sv), 1.8, 0, Math.PI * 2); ctx.fill();
         }
       }
+    }
+
+    // Fibonacci labels on top of the candles, so they stay readable
+    if (fib) {
+      ctx.textAlign = "left";
+      fibLevels(fib).forEach(function (lv) {
+        if (lv.price < lo || lv.price > hi) return;
+        var fy = Math.round(y(lv.price)) + 0.5;
+        var ft = (lv.ratio * 100).toFixed(1).replace(".0", "") + "% " + fmt(lv.price);
+        ctx.fillStyle = css("--card") || "#fff"; ctx.globalAlpha = 0.85;
+        ctx.fillRect(2, fy - 15, ctx.measureText(ft).width + 4, 13); ctx.globalAlpha = 1;
+        ctx.fillStyle = COLORS.fib; ctx.fillText(ft, 4, fy - 4);
+      });
     }
 
     // the paper trader's trades: triangles at entries, dots at exits, lines for an open trade
@@ -423,12 +490,16 @@
       var pTop = L.priceH + k * PANEL_H + 6, pH = PANEL_H - 12;
       ctx.strokeStyle = line; ctx.globalAlpha = 0.8;
       ctx.beginPath(); ctx.moveTo(0, pTop - 3.5); ctx.lineTo(L.w, pTop - 3.5); ctx.stroke(); ctx.globalAlpha = 1;
-      var fixed = { rsi: [0, 100, [30, 70]], adx: [0, 60, [25]], stoch: [0, 100, [20, 80]] }[key];
+      var fixed = { rsi: [0, 100, [30, 70]], adx: [0, 60, [25]], stoch: [0, 100, [20, 80]], willr: [-100, 0, [-80, -20]] }[key];
+      var guides = fixed ? fixed[2] : key === "cci" ? [-100, 100] : [];
       var series = [], pmin = Infinity, pmax = -Infinity;
       var pv = function (name) { return function (i) { return A ? A.get("panels", name, i) : null; }; };
       if (key === "vol") series = [{ f: function (i) { return bars[i][5] || 0; }, bars: true }];
       if (key === "rsi") series = [{ f: pv("rsi"), c: COLORS.rsi, name: "RSI" }];
       if (key === "adx") series = [{ f: pv("adx"), c: COLORS.adx, name: "ADX" }];
+      if (key === "atr") series = [{ f: pv("atr"), c: COLORS.atr, name: "ATR" }];
+      if (key === "cci") series = [{ f: pv("cci"), c: COLORS.cci, name: "CCI" }];
+      if (key === "willr") series = [{ f: pv("willr"), c: COLORS.willr, name: "%R" }];
       if (key === "stoch") series = [{ f: pv("stoch_k"), c: COLORS.k, name: "K" }, { f: pv("stoch_d"), c: COLORS.d, name: "D" }];
       if (key === "macd") series = [{ f: pv("macd_hist"), hist: true, name: "hist" }, { f: pv("macd"), c: COLORS.macd, name: "MACD" },
                                     { f: pv("macd_signal"), c: COLORS.signal, name: "signal" }];
@@ -436,10 +507,11 @@
         series.forEach(function (sr) { for (var i = 0; i < n; i++) { var q = sr.f(i); if (q !== null && q !== undefined) { pmin = Math.min(pmin, q); pmax = Math.max(pmax, q); } } });
         if (key === "vol") pmin = 0;
         if (key === "macd") { var m = Math.max(Math.abs(pmin), Math.abs(pmax)); pmin = -m; pmax = m; }
+        if (key === "cci") { pmin = Math.min(pmin, -150); pmax = Math.max(pmax, 150); }
       }
       if (!isFinite(pmin) || !isFinite(pmax) || pmax === pmin) { pmin = 0; pmax = 1; }
       var py = function (val) { return pTop + (pmax - val) / (pmax - pmin) * pH; };
-      if (fixed) fixed[2].forEach(function (g) {
+      guides.forEach(function (g) {
         ctx.strokeStyle = muted; ctx.globalAlpha = 0.5; ctx.setLineDash([3, 3]);
         ctx.beginPath(); ctx.moveTo(0, Math.round(py(g)) + 0.5); ctx.lineTo(L.plotW, Math.round(py(g)) + 0.5); ctx.stroke();
         ctx.setLineDash([]); ctx.globalAlpha = 1; ctx.fillStyle = muted; ctx.textAlign = "left";
@@ -459,12 +531,13 @@
         } else polyline(n, sr.f, py, L.step, sr.c, 1.5);
       });
       ctx.fillStyle = muted; ctx.textAlign = "left";
-      ctx.fillText({ vol: "Volume", rsi: "RSI 14", macd: "MACD 12/26/9", adx: "ADX 14", stoch: "Stoch RSI" }[key], 4, pTop + 11);
+      ctx.fillText({ vol: "Volume", rsi: "RSI 14", macd: "MACD 12/26/9", adx: "ADX 14", stoch: "Stoch RSI",
+                    atr: "ATR 14", cci: "CCI 20", willr: "Williams %R 14" }[key], 4, pTop + 11);
       series.forEach(function (sr) {
         var q = sr.f(hIdx);
         if (q === null || q === undefined || sr.bars) return;
         legend.push('<span style="color:' + (sr.c || (q >= 0 ? up : down)) + '">' + (sr.name === "hist" ? "MACD hist" : sr.name) +
-                    " <b>" + (key === "macd" ? Number(q.toPrecision(4)) : q.toFixed(1)) + "</b></span>");
+                    " <b>" + (key === "macd" ? Number(q.toPrecision(4)) : key === "atr" ? fmt(q) : q.toFixed(1)) + "</b></span>");
       });
     });
 
@@ -482,17 +555,20 @@
       (chg >= 0 ? "+" : "") + chg.toFixed(2) + "%</span>";
     if (A) {
       var named = { ema20: "EMA20", ema50: "EMA50", ema200: "EMA200", vwap: "VWAP", supertrend: "Supertrend",
-                    tenkan: "Tenkan", kijun: "Kijun", psar: "SAR", bb_upper: "BB up", bb_lower: "BB low" };
+                    tenkan: "Tenkan", kijun: "Kijun", psar: "SAR", bb_upper: "BB up", bb_lower: "BB low",
+                    kc_upper: "KC up", kc_lower: "KC low" };
       var front = [];
       overlayKeys.forEach(function (k) {
         var q = A.get("overlays", k, hIdx);
         if (q === null || !named[k]) return;
         var col = COLORS[k] || (k === "supertrend" ? (A.get("overlays", "supertrend_dir", hIdx) === 1 ? up : down) :
-                                k.indexOf("bb") === 0 ? COLORS.bb : COLORS.psar);
+                                k.indexOf("bb") === 0 ? COLORS.bb : k.indexOf("kc") === 0 ? COLORS.kc : COLORS.psar);
         front.push('<span style="color:' + col + '">' + named[k] + " <b>" + fmt(q) + "</b></span>");
       });
+      var hp = on.pat ? A.get("patterns", null, hIdx) : null;
+      if (hp) front.push('<span>' + hp.split("").map(function (c) { return PATTERN_NAMES[c]; }).join(", ") + "</span>");
       legend = front.concat(legend);
-    } else if (["ema", "bb", "vwap", "st", "ich", "psar", "sr"].some(function (k) { return on[k]; }) || L.panels.some(function (k) { return k !== "vol"; })) {
+    } else if (["ema", "bb", "vwap", "st", "ich", "psar", "sr", "kc", "fib", "vp", "pat"].some(function (k) { return on[k]; }) || L.panels.some(function (k) { return k !== "vol"; })) {
       legend = ['<span class="muted">Loading indicators…</span>'];
     }
     legendEl.innerHTML = legend.join("");
