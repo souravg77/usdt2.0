@@ -368,7 +368,7 @@ def _risk_card(r: dict, c: dict, csrf: str, e) -> str:
             f'<table><tr><th>Pair</th><th>Side</th><th>Notional</th><th>Stop on Bybit</th></tr>{pos}</table>'
             f'<form method="post" action="/trading/kill" class="kill">{csrf}'
             '<label>Emergency kill switch: stops entries and closes everything the live executor opened. '
-            'Type KILL to confirm <input name="confirm" autocomplete="off" placeholder="KILL"></label>'
+            'Type KILL to confirm <input name="confirm" autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false" required placeholder="KILL"></label>'
             '<button class="danger">Pull the kill switch</button></form></div>')
 
 
