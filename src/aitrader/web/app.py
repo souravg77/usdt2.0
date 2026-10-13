@@ -385,8 +385,14 @@ paper trading. Nothing trades real money.</p>
                     f' · live orders {live}</p><div class="row">'
                     f'<form method="post" action="/trading/pause">{csrf}<button>Pause new entries</button></form>'
                     f'<form method="post" action="/trading/resume">{csrf}<button class="ghost">Resume</button></form>'
-                    f'</div><form method="post" action="/trading/kill" class="kill">{csrf}'
-                    '<label>Kill switch: stops entries and sells everything the live executor bought. '
+                    '</div>'
+                    f'<form method="post" action="/trading/close-all" class="row">{csrf}'
+                    '<button class="warn-btn">Close all open positions</button>'
+                    '<span class="small muted">Closes every paper position at the last closed candle\'s price '
+                    '(fees included) within a minute. Paper trading keeps running: press Pause new entries '
+                    'first if you don\'t want new ones.</span></form>'
+                    f'<form method="post" action="/trading/kill" class="kill">{csrf}'
+                    '<label>Kill switch: stops entries, closes every paper position and sells everything the live executor bought. '
                     'Type KILL to confirm <input name="confirm" autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false" required placeholder="KILL"></label>'
                     '<button class="danger">Pull the kill switch</button></form></div>')
         note = f'<p class="{"bad" if bad else "good"}">{_e(msg)}</p>' if msg else ""
@@ -396,7 +402,11 @@ paper trading. Nothing trades real money.</p>
                 _ai_card(paths, jobs.list(), csrf), _live_card(settings, paths, events), "</div>",
                 '<div class="grid">', controls, _gate_card(paths, csrf), "</div>",
                 "<h2>Equity</h2>", _equity_svg(paper, execs),
-                "<h2>Open positions</h2>", _positions_table(paper, execs),
+                "<h2>Open positions</h2>",
+                (f'<form method="post" action="/trading/close-all" class="row">{csrf}'
+                 '<button class="warn-btn">Close all open positions</button></form>'
+                 if (paper.get("open") if isinstance(paper, dict) else None) else ""),
+                _positions_table(paper, execs),
                 "<h2>Trade log</h2>", _trades_table(paper, execs),
                 "<h2>Events</h2>", _events_table(events)]
         body.append('<script src="/static/positions.js" defer></script>')
@@ -448,7 +458,17 @@ paper trading. Nothing trades real money.</p>
                 return "Not pulled: type KILL in the box next to the button, then press it.", False
             _control().kill(f"kill switch from the dashboard by {user}", by=user)
             _event("kill", f"kill switch pulled from the dashboard by {user}", "warning")
-            return "Kill switch on: entries stopped, executors are selling. Resume when ready."
+            return ("Kill switch on: entries stopped, paper positions close within a minute and the live executor "
+                    "sells. Resume when ready.")
+        return _control_post(request, csrf, act)
+
+    @app.post("/trading/close-all")
+    def trading_close_all(request: Request, csrf: str = Form("")):
+        def act(user):
+            _control().request_close_all(by=user)
+            _event("close_all", f"close all open paper positions asked from the dashboard by {user}", "warning")
+            return ("Closing every open paper position at the last closed candle's price; they'll be gone within "
+                    "a minute. Paper trading keeps running.")
         return _control_post(request, csrf, act)
 
     @app.post("/trading/paper/on")
@@ -1215,7 +1235,7 @@ button{padding:8px 16px;border:1px solid var(--accent);background:var(--accent);
 font:inherit;font-weight:600;font-size:.92em}
 button:hover{background:var(--accent2)}button.ghost{background:transparent;color:var(--accent)}
 button.ghost:hover{background:color-mix(in srgb,var(--accent) 12%,transparent)}
-button.danger{background:var(--bad);border-color:var(--bad)}button.danger:hover{filter:brightness(1.1)}
+button.danger{background:var(--bad);border-color:var(--bad)}button.warn-btn{background:#d97706;border-color:#d97706}button.danger:hover{filter:brightness(1.1)}
 button.link,form.inline button{background:none;border:none;color:var(--accent);padding:0;font-weight:500}
 form.inline{display:inline}
 table{width:100%;border-collapse:collapse;display:block;overflow-x:auto;background:var(--card);border:1px solid var(--line);

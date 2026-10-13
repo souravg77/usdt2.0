@@ -280,8 +280,23 @@ class PaperTrader:
         log.info("paper signal %s skipped by trade filter %s (p=%.3f)", key, ai["version"], ai["prob"])
 
     def _manage_open(self, reg: Registry, now_ms: int, events: dict) -> None:
+        # the kill switch, or a person's "close all open positions", closes every paper position
+        # at the last closed candle's price (fees included) and cancels those still waiting for
+        # their entry candle
+        asked = getattr(self.control, "close_all_requested", None)
+        close_req = asked() if callable(asked) else None
+        why = "closed by hand" if close_req is not None else "kill switch"
+        killed = self.control is not None and bool(getattr(self.control, "killed", False))
+        left = 0  # positions the close request covers that couldn't be priced this pass
         for key, pos in list(self.state["open"].items()):
             entry_id, ex, sym, tf = key.split("|")
+            # a close request covers the positions opened before it, not those opened after
+            closing = killed or (close_req is not None and pos["signal"]["ts"] <= close_req * 1000)
+            if closing and not pos.get("filled"):
+                del self.state["open"][key]
+                events["closed"].append(key)
+                log.info("paper %s cancelled (%s) before its entry", key, why)
+                continue
             if ex not in self.exchanges:  # an exchange no longer used: its prices stopped updating
                 del self.state["open"][key]
                 log.info("paper %s dropped: %s is no longer one of the exchanges", key, ex)
@@ -290,6 +305,7 @@ class PaperTrader:
             step = TIMEFRAME_MS[tf]
             df = self._frame(ex, sym, tf, sig.ts - WINDOW_BARS * step, now_ms)
             if df is None:
+                left += closing
                 continue
             ts = df["ts"].to_numpy()
             idx = {int(t): i for i, t in enumerate(ts)}
@@ -307,6 +323,7 @@ class PaperTrader:
                 t = simulate_signal(sig, df, entry_i, self.cfg.backtest, {})
             except Exception:  # never close a trade on the wrong rule: keep it open and say so
                 log.exception("paper %s: can't evaluate its exits; kept open", key)
+                left += closing
                 continue
             if t is None:
                 del self.state["open"][key]
@@ -333,8 +350,10 @@ class PaperTrader:
                 if short:
                     pos["leverage"] = lev
             if t.exit_reason == "end" and t.exit_ts == int(df["ts"].iloc[-1]):
-                pos["mark_r"] = round(t.r, 3)  # still open
-                continue
+                if not closing:
+                    pos["mark_r"] = round(t.r, 3)  # still open
+                    continue
+                t.exit_reason = why
             pnl = t.r * abs(sig.entry - sig.stop) * pos["units"]
             self.state["equity"][entry_id] = equity + pnl
             row = {**_trade_dict(t), "key": key, "entry_id": entry_id, "units": pos["units"],
@@ -346,6 +365,8 @@ class PaperTrader:
             del self.state["open"][key]
             events["closed"].append(key)
             log.info("paper close %s %s %+.2fR %+.2f USDT", key, t.exit_reason, t.r, pnl)
+        if close_req is not None and not left:  # any it couldn't price yet: tried again next pass
+            self.control.clear_close_all(close_req)
 
     def _score(self, reg: Registry, events: dict) -> None:
         rule = self.cfg.retire
