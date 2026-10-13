@@ -13,6 +13,7 @@ from fastapi.responses import PlainTextResponse, RedirectResponse
 
 from ..learn.improve import load_report
 from ..learn.teacher import Teacher, best_for, describe, now_situations
+from ..clock import local
 
 
 def _e(x) -> str:
@@ -74,7 +75,7 @@ def _improve_section(rep: dict, busy, form: str) -> str:
             rows.append(f'<tr><td>{_e(r["strategy"])}</td><td>{r.get("tried", 0)}</td><td>{ch}</td>'
                         f'<td>{unseen}</td><td>{mark}{_e(r["outcome"])}'
                         + (f'<br>new: {_e(r["new_id"])}' if r.get("new_id") else "") + "</td></tr>")
-        parts.append(f'<p class="small">Last run {time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(rep["at"]))}: '
+        parts.append(f'<p class="small">Last run {local(rep["at"])}: '
                      f'{rep.get("improved", 0)} of {len(rep.get("results", []))} improved.</p>'
                      '<table><tr><th>Strategy</th><th>Settings tried</th><th>Changes</th>'
                      '<th>Newer data it never saw: per trade, win rate (before → after)</th><th>Result</th></tr>'

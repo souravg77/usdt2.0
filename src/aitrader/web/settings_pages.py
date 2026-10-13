@@ -23,6 +23,7 @@ from ..config import EXCHANGE
 from ..accounts import AccountError, KeyRejected, KeyUnverified, verify_keys
 from ..ops import secrets
 from .app import _csrf, _e, _q
+from ..clock import local
 
 GROUPS = [
     ("anthropic", "Anthropic (Claude)", "Lets the agent read trading books and write strategies. "
@@ -271,7 +272,7 @@ def add_settings_routes(app, *, settings, auth, paths, jobs, keys_secret: str, p
             if last and has_value:
                 cls = "good" if last["ok"] else "bad" if last["ok"] is False else "warn"
                 word = "Working" if last["ok"] else "Not working" if last["ok"] is False else "Not confirmed"
-                when = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(last["ts"]))
+                when = local(last["ts"])
                 detail = "" if last["ok"] else f": {last['text']}"
                 status = f'<p class="{cls}">Last check: {word}{_e(detail)} ({when})</p>'
             elif has_value:

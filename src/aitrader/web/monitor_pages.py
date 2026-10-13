@@ -32,6 +32,7 @@ from ..config import EXCHANGE
 from ..data.store import CandleStore
 from ..models import TIMEFRAME_MS
 from ..ops import feedstats
+from ..clock import local
 
 DAY_MS = 86_400_000
 GAP_DAYS = 7
@@ -336,7 +337,7 @@ def _feed_card(f: dict, e) -> str:
     rows = "".join(f"<tr><td>{e(g['symbol'])}</td><td>{e(g['timeframe'])}</td><td>{g['missing']}</td>"
                    f"<td>{g['newest_age_s']}s</td></tr>" for g in f["gaps"] if g["missing"]) or \
         '<tr><td colspan="4" class="muted">no missing candles in the last 7 days</td></tr>'
-    hist = "".join(f"<li>{datetime.fromtimestamp(h['at'], timezone.utc):%H:%M:%S} {e(h['event'])}</li>"
+    hist = "".join(f"<li>{local(h['at'], '%H:%M:%S', suffix=False)} {e(h['event'])}</li>"
                    for h in reversed(f["history"])) or '<li class="muted">none yet</li>'
     quiet = ", ".join(f["quiet_pairs"]) or "none"
     return (f'<div class="card"><h3>Feed health</h3><p>Price stream: <b>{e(f["state"])}</b><br>'

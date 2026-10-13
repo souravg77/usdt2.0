@@ -95,7 +95,7 @@ def _run_card(auth, token, rk: dict, job, now: int, fixed: list[str], ranking_pa
     mode = (os.environ.get("AITRADER_PAIRS") or "fixed").strip().lower()
     if rk.get("generated"):
         age = (now - rk["generated"]) / 3_600_000
-        last = f"Last ranking {_ms(rk['generated'])} UTC ({age:.0f}h ago)" + (
+        last = f"Last ranking {_ms(rk['generated'])} ({age:.0f}h ago)" + (
             ", stale" if age > float(os.environ.get("AITRADER_PAIRS_MAX_AGE_HOURS") or STALE_HOURS) else "") + "."
     else:
         last = "No ranking yet."

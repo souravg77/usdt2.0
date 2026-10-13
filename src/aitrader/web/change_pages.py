@@ -6,7 +6,6 @@ pull request and run the installer. Admin only, like every page that can start a
 from __future__ import annotations
 
 import os
-import time
 
 from fastapi import Form, Request
 from fastapi.responses import PlainTextResponse, RedirectResponse
@@ -14,6 +13,7 @@ from fastapi.responses import PlainTextResponse, RedirectResponse
 from ..ops import changes
 from .app import _csrf, _e, _q
 from .news_pages import _link
+from ..clock import local
 
 STATUS_CLS = {"pr_open": "good", "failed": "bad", "declined": "warn", "running": "warn", "queued": "warn"}
 STATUS_TEXT = {"pr_open": "pull request open", "failed": "failed", "declined": "declined by Claude",
@@ -88,8 +88,8 @@ def _table(rows: list[dict]) -> str:
             result += f'<div class="small muted">{_e(detail[:600])}</div>'
         if r.get("files"):
             result += f'<div class="small muted">{_e(", ".join(r["files"]))}</div>'
-        when = time.strftime("%Y-%m-%d %H:%M", time.gmtime(r.get("created", 0)))
-        out += (f'<tr><td class="small">{when} UTC<div class="muted">{_e(r.get("by", ""))}</div></td>'
+        when = local(r.get("created", 0))
+        out += (f'<tr><td class="small">{when}<div class="muted">{_e(r.get("by", ""))}</div></td>'
                 f'<td>{_e(r.get("text", ""))}</td>'
                 f'<td><span class="badge {STATUS_CLS.get(st, "")}">{_e(STATUS_TEXT.get(st, st))}</span></td>'
                 f'<td class="small">{result}</td></tr>')

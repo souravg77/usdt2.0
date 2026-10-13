@@ -19,6 +19,7 @@ from ..data.store import CandleStore
 from .app import _e, _q
 from .live import LiveMarket
 from .studies import compute, paper_trades
+from ..clock import label as tz_label, local
 
 CHART_TIMEFRAMES = ["1m", "5m", "15m", "1h", "4h", "1d"]
 TF_MS = {"1m": 60_000, "5m": 300_000, "15m": 900_000, "30m": 1_800_000, "1h": 3_600_000,
@@ -114,7 +115,7 @@ def add_market_routes(app, *, settings, page, guard, exchange: str = EXCHANGE, c
             f'<canvas id="chart" class="js-only" aria-label="live price chart"></canvas>'
             f'<noscript>{_fallback(symbol, tf, bars)}</noscript></div>'
             '<p class="muted small">Prices and candles come from Bybit\'s public market data '
-            '(no key needed) and refresh every 1.5 seconds while this page is open. Times are UTC. '
+            '(no key needed) and refresh every 1.5 seconds while this page is open. Times are India time (IST) unless AITRADER_TZ says otherwise. '
             'Hover or touch the chart to read a candle and its indicators. Indicators use the same '
             'formulas as the strategies. Triangles are the paper trader\'s entries (up: buy, down: '
             'short), dots its exits (green: profit, red: loss); an open trade shows its entry, stop '
@@ -240,10 +241,10 @@ def candles_svg(bars: list, w: int = 600, h: int = 340, pad: int = 6, axis: int 
               f'<text x="{lx + 4}" y="{y(lo):.1f}" fill="var(--muted)" font-size="15">{_price(lo)}</text>'
               f'<text x="{pad}" y="{h - 2}" fill="var(--muted)" font-size="14">{_e(_utc(bars[0].ts))}</text>'
               f'<text x="{lx}" y="{h - 2}" fill="var(--muted)" font-size="14" text-anchor="end">'
-              f'{_e(_utc(bars[-1].ts))} UTC</text>')
+              f'{_e(_utc(bars[-1].ts))} {_e(tz_label(bars[-1].ts / 1000))}</text>')
     return (f'<svg viewBox="0 0 {w} {h}" role="img" aria-label="price chart" class="candles">'
             f'{"".join(parts)}{labels}</svg>')
 
 
 def _utc(ms: int) -> str:
-    return time.strftime("%m-%d %H:%M", time.gmtime(ms / 1000))
+    return local(ms / 1000, "%m-%d %H:%M", suffix=False)

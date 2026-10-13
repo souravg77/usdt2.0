@@ -34,7 +34,10 @@
     var d = x >= 100 ? 2 : x >= 1 ? 4 : x >= 0.01 ? 5 : 8;
     return Number(x).toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
   }
-  function when(ms) { return new Date(ms).toISOString().slice(0, 16).replace("T", " "); }
+  // times in the dashboard's zone (IST unless AITRADER_TZ says otherwise), set by the server
+  var TZ_MS = (Number(document.documentElement.getAttribute("data-tz-offset")) || 0) * 60000;
+  var TZ = document.documentElement.getAttribute("data-tz-label") || "UTC";
+  function when(ms) { return new Date(ms + TZ_MS).toISOString().slice(0, 16).replace("T", " "); }
   function r(x) { return (x >= 0 ? "+" : "") + x.toFixed(2) + "R"; }
 
   // ---- loading ----------------------------------------------------------------------------------
@@ -134,7 +137,7 @@
   function update() {
     if (S.data) {
       seek.value = String(S.pos);
-      clockEl.textContent = when(now()) + " UTC · candle " + S.pos + " of " + S.data.candles.length;
+      clockEl.textContent = when(now()) + " " + TZ + " · candle " + S.pos + " of " + S.data.candles.length;
     }
     draw(); renderStats();
   }
@@ -281,7 +284,7 @@
       ctx.globalAlpha = 1;
     }
     var chg = hb[1] ? (hb[4] / hb[1] - 1) * 100 : 0;
-    ohlcEl.innerHTML = '<span class="muted">' + when(hb[0]) + " UTC</span> O <b>" + fmt(hb[1]) + "</b> H <b>" + fmt(hb[2]) +
+    ohlcEl.innerHTML = '<span class="muted">' + when(hb[0]) + " " + TZ + "</span> O <b>" + fmt(hb[1]) + "</b> H <b>" + fmt(hb[2]) +
       "</b> L <b>" + fmt(hb[3]) + "</b> C <b>" + fmt(hb[4]) + '</b> <span class="' + (chg >= 0 ? "good" : "bad") + '">' +
       (chg >= 0 ? "+" : "") + chg.toFixed(2) + "%</span>";
     S.layout = { step: step, plotW: plotW, count: bars.length };

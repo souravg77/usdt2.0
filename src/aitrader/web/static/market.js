@@ -64,8 +64,11 @@
     if (x >= 1e3) return (x / 1e3).toFixed(1) + "K";
     return x.toFixed(0);
   }
+  // times in the dashboard's zone (IST unless AITRADER_TZ says otherwise), set by the server
+  var TZ_MS = (Number(document.documentElement.getAttribute("data-tz-offset")) || 0) * 60000;
+  var TZ = document.documentElement.getAttribute("data-tz-label") || "UTC";
   function timeLabel(ms) {
-    var d = new Date(ms), p = function (n) { return (n < 10 ? "0" : "") + n; };
+    var d = new Date(ms + TZ_MS), p = function (n) { return (n < 10 ? "0" : "") + n; };
     if (state.tf === "1d") return p(d.getUTCDate()) + "/" + p(d.getUTCMonth() + 1);
     return p(d.getUTCHours()) + ":" + p(d.getUTCMinutes());
   }
@@ -473,8 +476,8 @@
     }
     var hb = bars[hIdx];
     var chg = hb[1] ? (hb[4] / hb[1] - 1) * 100 : 0;
-    ohlcEl.innerHTML = '<span class="muted">' + new Date(hb[0]).toISOString().slice(0, 16).replace("T", " ") +
-      " UTC</span> O <b>" + fmt(hb[1]) + "</b> H <b>" + fmt(hb[2]) + "</b> L <b>" + fmt(hb[3]) +
+    ohlcEl.innerHTML = '<span class="muted">' + new Date(hb[0] + TZ_MS).toISOString().slice(0, 16).replace("T", " ") +
+      " " + TZ + "</span> O <b>" + fmt(hb[1]) + "</b> H <b>" + fmt(hb[2]) + "</b> L <b>" + fmt(hb[3]) +
       "</b> C <b>" + fmt(hb[4]) + '</b> <span class="' + (chg >= 0 ? "good" : "bad") + '">' +
       (chg >= 0 ? "+" : "") + chg.toFixed(2) + "%</span>";
     if (A) {
