@@ -19,7 +19,7 @@ from ..accounts.live import gate_problems, live_stop_control, turn_off, turn_on
 from ..accounts.runner import user_control, user_dir
 from ..config import EXCHANGE, LIVE_CONFIRM_PHRASE
 from ..safety import live_gate_problems
-from .app import _csrf, _e, _equity_svg, _load_json, _positions_table, _q, _trades_table, _when
+from .app import _csrf, _e, _equity_svg, _load_json, _positions_table, _q, _trades_table, _when, kill_confirmed
 
 SIGNUPS_PER_HOUR = 3
 USER_NAV = '<a href="/me">My account</a>'
@@ -144,7 +144,7 @@ my account and I turn it on, and that I keep my exchange key without withdrawal 
                 f'<form method="post" action="/me/resume">{csrf}<button class="ghost">Resume</button></form></div>'
                 f'<form method="post" action="/me/kill" class="kill">{csrf}<label>Kill switch: sells everything '
                 'the agent bought on your account. Type KILL to confirm <input name="confirm" autocomplete="off" '
-                'placeholder="KILL"></label><button class="danger">Pull the kill switch</button></form></div>')
+                'autocapitalize="characters" autocorrect="off" spellcheck="false" required placeholder="KILL"></label><button class="danger">Pull the kill switch</button></form></div>')
 
         rows = "".join(
             f'<tr><td>{_e(k["exchange"])} {"demo trading (no longer used)" if k["testnet"] else "real account"}</td>'
@@ -290,7 +290,7 @@ stored encrypted and never shown again.</p>
         user, resp = checked(request, csrf)
         if resp:
             return resp
-        if confirm.strip() != "KILL":
+        if not kill_confirmed(confirm):
             return back(error="Not pulled: type KILL to confirm.")
         user_control(users_dir, user.id).kill("kill switch from the user's page", by=user.email)
         turn_off(users, users_dir, user.id, actor=user.email, reason="kill switch", events=events())

@@ -152,14 +152,20 @@ def test_trading_page_and_controls(web):
     for text in ("BTC/USDT", "0.66", "0.71", "+1.00R", "live equity", "<svg", "not checked yet",
                  "&lt;stop&gt;", "running"):
         assert text in r.text, text
+    assert 'data-reload-ms="60000"' in r.text and '<noscript><meta http-equiv="refresh" content="60">' in r.text
+    js = client.get("/static/reload.js")  # a file, not inline: the page's security policy blocks inline scripts
+    assert js.status_code == 200 and "activeElement" in js.text and "<script>" not in r.text
+    assert 'autocapitalize="characters"' in r.text and "required" in r.text
     csrf = auth.csrf(token)
     assert client.post("/trading/pause", data={}, follow_redirects=False).status_code == 403
     client.post("/trading/pause", data={"csrf": csrf})
     assert "PAUSED" in client.get("/trading").text
-    r = client.post("/trading/kill", data={"csrf": csrf, "confirm": "kill"}, follow_redirects=False)
-    assert "type+KILL" in r.headers["location"] or "type%20KILL" in r.headers["location"]
-    assert not json.load(open("data/trade/control.json"))["killed"]
-    client.post("/trading/kill", data={"csrf": csrf, "confirm": "KILL"})
+    for wrong in ("", "kil", "stop"):
+        r = client.post("/trading/kill", data={"csrf": csrf, "confirm": wrong}, follow_redirects=False)
+        assert "KILL" in r.headers["location"] and r.headers["location"].endswith("&bad=1")
+        assert not json.load(open("data/trade/control.json"))["killed"]
+    assert '<p class="bad">Not pulled' in client.get(r.headers["location"]).text  # shown as an error
+    client.post("/trading/kill", data={"csrf": csrf, "confirm": " Kill "})  # a phone capitalises the K
     assert json.load(open("data/trade/control.json"))["killed"]
     assert "KILL SWITCH ON" in client.get("/trading").text
     client.post("/trading/resume", data={"csrf": csrf})
@@ -442,3 +448,11 @@ def test_ai_filter_train_turn_on_and_off_from_the_trading_page(web, monkeypatch)
     assert "Turn the AI filter off" in client.get("/trading").text
     client.post("/trading/ai/off", data={"csrf": csrf})
     assert ModelRegistry(paths.models).active is None
+
+
+def test_self_refreshing_pages_wait_while_someone_types():
+    """The Trading and Monitor pages reload themselves, but not while a box (the kill switch's
+    KILL) has the cursor or something typed in it, so the reload can't wipe it."""
+    from aitrader.web.app import kill_confirmed
+
+    assert kill_confirmed("KILL") and kill_confirmed("kill ") and not kill_confirmed("kil")

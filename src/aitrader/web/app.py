@@ -108,11 +108,14 @@ def create_app(settings: Settings, auth: Auth, jobs: JobRunner, paths: Paths | N
             nav = (f'<nav>{links}</nav><div class="who"><span class="muted small">{_e(user)}</span>'
                    f'<form method="post" action="/logout" class="inline">{_csrf(auth, token)}'
                    f'<button class="link">Log out</button></form></div>')
-        meta = f'<meta http-equiv="refresh" content="{refresh}">' if refresh else ""
+        # the script reloads the page but waits while someone types (static/reload.js); the
+        # meta tag is for browsers without JavaScript
+        meta = (f'<noscript><meta http-equiv="refresh" content="{refresh}"></noscript>'
+                '<script src="/static/reload.js" defer></script>' if refresh else "")
         mode = settings.mode.value
         now = time.time()
         return HTMLResponse(f"""<!doctype html><html lang="en" data-tz-offset="{offset_minutes(now)}"
-data-tz-label="{_e(tz_label(now))}"><head><meta charset="utf-8">
+data-tz-label="{_e(tz_label(now))}"{f' data-reload-ms="{int(refresh * 1000)}"' if refresh else ""}><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">{meta}
 <title>{_e(title)} · aitrader</title><style>{CSS}</style></head>
 <body><header><a class="brand" href="/"><span class="logo" aria-hidden="true"></span>aitrader</a>
@@ -121,6 +124,11 @@ data-tz-label="{_e(tz_label(now))}"><head><meta charset="utf-8">
 <footer class="muted small">aitrader · live trading stays locked until you open it on the server</footer></body></html>""")
 
     # ---- login ----------------------------------------------------------------------------------
+
+    @app.get("/static/reload.js")
+    def reload_js():
+        with open(os.path.join(os.path.dirname(__file__), "static", "reload.js"), encoding="utf-8") as fh:
+            return Response(fh.read(), media_type="text/javascript")
 
     @app.get("/healthz")
     def healthz():
@@ -325,7 +333,7 @@ paper trading. Nothing trades real money.</p>
                        csrf=lambda token: _csrf(auth, token), jobs=jobs, exchange=EXCHANGE)
 
     @app.get("/trading")
-    async def trading(request: Request, msg: str = ""):
+    async def trading(request: Request, msg: str = "", bad: str = ""):
         user, token, redirect = guard(request)
         if redirect:
             return redirect
@@ -353,9 +361,9 @@ paper trading. Nothing trades real money.</p>
                     f'<form method="post" action="/trading/resume">{csrf}<button class="ghost">Resume</button></form>'
                     f'</div><form method="post" action="/trading/kill" class="kill">{csrf}'
                     '<label>Kill switch: stops entries and sells everything the live executor bought. '
-                    'Type KILL to confirm <input name="confirm" autocomplete="off" placeholder="KILL"></label>'
+                    'Type KILL to confirm <input name="confirm" autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false" required placeholder="KILL"></label>'
                     '<button class="danger">Pull the kill switch</button></form></div>')
-        note = f'<p class="good">{_e(msg)}</p>' if msg else ""
+        note = f'<p class="{"bad" if bad else "good"}">{_e(msg)}</p>' if msg else ""
         events = EventLog(paths.events).read(limit=600)
         body = [note, _trading_stats(c, settings, paths, paper, events, acct),
                 '<div class="grid">', _account_card(acct, csrf), _paper_switch_card(c, paths, events, jobs.list(), csrf),
@@ -373,7 +381,9 @@ paper trading. Nothing trades real money.</p>
             return redirect
         if not auth.check_csrf(token, csrf):
             return PlainTextResponse("bad form token; reload the page", status_code=403)
-        return RedirectResponse(f"/trading?msg={_q(action(user))}", status_code=303)
+        out = action(user)
+        text, ok = out if isinstance(out, tuple) else (out, True)
+        return RedirectResponse(f"/trading?msg={_q(text)}{'' if ok else '&bad=1'}", status_code=303)
 
     def _event(kind: str, text: str, level: str = "info") -> None:
         from ..ops import EventLog
@@ -407,8 +417,8 @@ paper trading. Nothing trades real money.</p>
     @app.post("/trading/kill")
     def trading_kill(request: Request, csrf: str = Form(""), confirm: str = Form("")):
         def act(user):
-            if confirm.strip() != "KILL":
-                return "Not pulled: type KILL in the box to confirm."
+            if not kill_confirmed(confirm):
+                return "Not pulled: type KILL in the box next to the button, then press it.", False
             _control().kill(f"kill switch from the dashboard by {user}", by=user)
             _event("kill", f"kill switch pulled from the dashboard by {user}", "warning")
             return "Kill switch on: entries stopped, executors are selling. Resume when ready."
@@ -519,6 +529,12 @@ paper trading. Nothing trades real money.</p>
         return _control_post(request, csrf, act)
 
     return app
+
+
+
+def kill_confirmed(text: str) -> bool:
+    """The kill switch's confirm box: KILL in any case (phones capitalise only the first letter)."""
+    return (text or "").strip().upper() == "KILL"
 
 
 NAV = [("/", "Overview"), ("/markets", "Markets"), ("/pairs", "Pairs"), ("/trading", "Trading"), ("/monitor", "Monitor"),
