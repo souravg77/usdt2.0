@@ -84,19 +84,22 @@ def keep_top(reg: Registry, n: int) -> dict:
 
 # chart indicator key (the Markets page chips) -> words in a strategy's rules that mean it uses it
 INDICATOR_WORDS: dict[str, str] = {
-    "ema": r"\b(ema\w*|sma|moving average)",
+    "ema": r"\b(ema\w*|sma\d*|moving averages?)\b",
     "bb": r"\b(bb_\w+|bollinger)",
     "vwap": r"\bvwap",
     "st": r"\bsupertrend",
     "ich": r"\b(tenkan|kijun|cloud_\w+|ichimoku)",
     "psar": r"\b(psar|parabolic)",
-    "sr": r"\b(support|resistance|highest_high|lowest_low)",
-    "vol": r"\b(volume|rel_volume|avg_volume|obv\w*)",
-    "rsi": r"\brsi\b",
+    "sr": (r"\b(support|resistance|highest_high|lowest_low|highest high|lowest low|donchian"
+           r"|swing (?:high|low)s?|market structure)"),
+    "vol": r"\b(volume|rel_volume|avg_volume|obv\w*|mfi|cmf|force_index)",
+    "rsi": r"\brsi\w*",
     "macd": r"\bmacd",
     "adx": r"\b(adx|plus_di|minus_di)\b",
     "stoch": r"\bstoch",
 }
+# a book rule's notes (why it was coded so, what couldn't be) can name indicators it doesn't use
+NOT_RULES = ("name", "description", "source", "decisions", "uncodable")
 
 
 def _rules_text(entry: Entry) -> str:
@@ -112,8 +115,8 @@ def _rules_text(entry: Entry) -> str:
         if spec is None:
             return entry.name
         return " ".join(str(getattr(spec, f, "")) for f in ("setup", "entry", "stop", "target", "filter"))
-    # the rules only: a description or book quote can mention an indicator the rules don't use
-    return json.dumps({k: v for k, v in (entry.spec or {}).items() if k not in ("name", "description", "source")})
+    # the rules only: a description, book quote or note can mention an indicator the rules don't use
+    return json.dumps({k: v for k, v in (entry.spec or {}).items() if k not in NOT_RULES})
 
 
 def indicators(entry: Entry) -> set[str]:

@@ -59,13 +59,19 @@ def test_keep_top_keeps_n_even_when_results_are_negative(tmp_path):
 
 
 def test_indicators_come_from_the_rules():
-    assert indicators(entry("a", name="trend_pullback")) == {"ema", "adx", "rsi"}
+    assert indicators(entry("a", name="trend_pullback")) == {"ema", "adx", "rsi", "sr"}  # market structure
     assert indicators(entry("b", name="supertrend_trend")) >= {"st"}
+    assert "ema" not in indicators(entry("f", name="fibonacci_reaction"))  # "smaller" isn't SMA
+    assert indicators(entry("d", name="range_support_bounce")) >= {"sr", "adx"}  # its channel
     rule = Entry(id="r", kind="rule", name="r",
                  spec={"description": "MACD and Bollinger in the text only",
+                       "decisions": ["volume confirmation approximated with rsi(14) < 30"],
+                       "uncodable": ["a parabolic SAR exit"],
                        "entry": [{"left": "close", "op": ">", "right": "vwap(20)"},
                                  {"left": "rsi(14)", "op": "<", "right": "30"}]})
-    assert indicators(rule) == {"vwap", "rsi"}  # the description doesn't count
+    assert indicators(rule) == {"vwap", "rsi"}  # the description and the notes don't count
+    div = Entry(id="d", kind="rule", name="d", spec={"entry": [{"left": "rsi_bull_div(14,30)", "op": ">=", "right": 1}]})
+    assert indicators(div) == {"rsi"}
     short = Entry(id="short-r", kind="short", name="short: r",
                   spec={"base_id": "r", "base_kind": "rule", "base_name": "r", "base_spec": rule.spec})
     assert indicators(short) == {"vwap", "rsi"}
