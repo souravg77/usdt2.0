@@ -63,6 +63,7 @@ class Settings:
     paper_taker_fee: float = 0.001
     paper_maker_fee: float = 0.001
     paper_slippage_bps: float = 5.0
+    max_cost_r: float = 0.25  # fee filter: skip trades whose round-trip costs exceed this share of the risk
     symbols: list[str] = field(default_factory=lambda: ["BTC/USDT", "ETH/USDT"])
     timeframes: list[str] = field(default_factory=lambda: ["1h"])
     keys: dict[str, ExchangeKeys] = field(default_factory=dict)
@@ -84,6 +85,7 @@ class Settings:
             paper_taker_fee=float(e("AITRADER_PAPER_TAKER_FEE", "0.001")),
             paper_maker_fee=float(e("AITRADER_PAPER_MAKER_FEE", "0.001")),
             paper_slippage_bps=float(e("AITRADER_PAPER_SLIPPAGE_BPS", "5")),
+            max_cost_r=float(e("AITRADER_MAX_COST_R", "0.25")),
             symbols=_csv(e("AITRADER_SYMBOLS", ",".join(TOP_PAIRS))),
             timeframes=_csv(e("AITRADER_TIMEFRAMES", "1m,5m,15m,30m,1h,4h,1d")),
             keys=keys,

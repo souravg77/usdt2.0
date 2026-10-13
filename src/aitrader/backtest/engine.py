@@ -13,6 +13,9 @@ Fill rules, chosen to avoid flattering results (for a short, "below" and "above"
 - Stops fill as taker with slippage; targets fill as maker at the target price.
 - Trailing rules (close below EMA50, RSI above a level, time stop) exit at the next open.
 - One open trade per strategy and symbol at a time; later signals are skipped while one is open.
+- Fee filter: a signal whose stop is so close that the round trip's fees and slippage would cost
+  more than ``max_cost_r`` of the risk is skipped (``cost_r``). On a 5m chart a 0.2% stop against
+  a 0.3% round trip loses about 1R to costs alone, so such a trade can hardly win.
 """
 
 from __future__ import annotations
@@ -36,6 +39,7 @@ class BacktestConfig:
     perp_maker_fee: float = 0.0002
     perp_funding_8h: float = 0.0001  # charged to shorts as a cost, never counted as income
     max_bars_in_trade: int = 10_000
+    max_cost_r: float = 0.25  # skip signals whose round-trip costs exceed this share of the risk (0: off)
 
 
 @dataclass
@@ -224,8 +228,24 @@ def _simulate_short(sig: Signal, df: pd.DataFrame, pos: int, cfg: BacktestConfig
     )
 
 
+def cost_r(sig: Signal, cfg: BacktestConfig) -> float:
+    """The round trip's fees and slippage as a share of the planned risk, assuming the trade
+    exits at its stop as taker (the costly case). ``inf`` when the stop is on the wrong side."""
+    risk = abs(sig.entry - sig.stop)
+    if risk <= 0 or sig.entry <= 0:
+        return float("inf")
+    fee = cfg.perp_taker_fee if sig.side is Side.SELL else cfg.taker_fee
+    slip = cfg.slippage_bps / 10_000
+    return (sig.entry + sig.stop) * (fee + slip) / risk
+
+
+def too_costly(sig: Signal, cfg: BacktestConfig) -> bool:
+    return bool(cfg.max_cost_r) and cost_r(sig, cfg) > cfg.max_cost_r
+
+
 def run_backtest(strategy: Strategy, df: pd.DataFrame, exchange: str, symbol: str,
-                 timeframe: str, cfg: BacktestConfig | None = None) -> list[Trade]:
+                 timeframe: str, cfg: BacktestConfig | None = None, costly: list | None = None) -> list[Trade]:
+    """``costly``: when given, the signals the fee filter skipped are appended to it."""
     cfg = cfg or BacktestConfig()
     signals = strategy.generate(df, exchange, symbol, timeframe)
     step = TIMEFRAME_MS[timeframe]
@@ -239,6 +259,10 @@ def run_backtest(strategy: Strategy, df: pd.DataFrame, exchange: str, symbol: st
             pos = index_of.get(sig.ts - step)
             pos = None if pos is None else pos + 1
         if pos is None or pos <= busy_until:
+            continue
+        if too_costly(sig, cfg):
+            if costly is not None:
+                costly.append(sig)
             continue
         t = simulate_signal(sig, df, pos, cfg, cache)
         if t is None:

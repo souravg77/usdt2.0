@@ -83,7 +83,10 @@
       d.strategies.forEach(function (s) { S.names[s.id] = s.name; });
       msgEl.textContent = (d.top && d.strategies.length ? "The best " + d.strategies.length + " ranked strategies that trade " + d.timeframe :
         d.strategies.length + " strateg" + (d.strategies.length === 1 ? "y" : "ies") + " trade " + d.timeframe) +
+        (d.top && d.ranked_on_tf ? " (ranked on their " + d.timeframe + " backtest results)" : "") +
         " · " + d.candles.length + " candles · " + d.trades.length + " trades in this period." +
+        (d.fee_skipped ? " " + d.fee_skipped + " more signals were skipped because fees and slippage would cost over " +
+          Math.round(d.max_cost_r * 100) + "% of the risk." : "") +
         (d.strategies.length ? "" : " No strategy uses this timeframe: try 1h or 4h.");
       titleEl.textContent = d.symbol + " · " + d.timeframe + " · from " + when(d.start).slice(0, 7);
       seek.max = String(d.candles.length);

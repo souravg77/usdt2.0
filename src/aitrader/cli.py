@@ -495,7 +495,7 @@ def cmd_learn(s: Settings, args) -> int:
     exchanges = args.exchange or EXCHANGES
     symbols = args.symbol or s.symbols
     cfg = BacktestConfig(taker_fee=s.paper_taker_fee, maker_fee=s.paper_maker_fee,
-                         slippage_bps=s.paper_slippage_bps)
+                         slippage_bps=s.paper_slippage_bps, max_cost_r=s.max_cost_r)
 
     def run_tests(entries, move: bool = True) -> None:
         store = CandleStore(s.db_path)
@@ -806,7 +806,7 @@ def cmd_ai(s: Settings, args) -> int:
                   "`learn add-builtin` + `learn test`) first, or pass --all", file=sys.stderr)
             return None
         cfg = BacktestConfig(taker_fee=s.paper_taker_fee, maker_fee=s.paper_maker_fee,
-                             slippage_bps=s.paper_slippage_bps)
+                             slippage_bps=s.paper_slippage_bps, max_cost_r=s.max_cost_r)
         store = CandleStore(s.db_path)
         try:
             frame = build_dataset(store, strategies, args.exchange or EXCHANGES,

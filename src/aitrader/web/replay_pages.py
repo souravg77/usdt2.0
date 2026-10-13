@@ -49,6 +49,20 @@ def _top(strategy: str) -> int:
     return n if n in TOPS else 0
 
 
+def timeframe_ranking(rows: list[dict], tf: str) -> list[str]:
+    """Strategy ids best first by their backtest-report result on timeframe ``tf`` alone: the
+    average R per trade over every pair, shrunk toward 0 for few trades (as ``keep.score``).
+    Strategies with no trades on ``tf`` in the report are left out."""
+    scored = []
+    for r in rows:
+        on_tf = [m for m in r.get("markets", []) if m.get("timeframe") == tf]
+        n = sum(m.get("trades", 0) for m in on_tf)
+        if n:
+            scored.append((sum(m.get("total_r", 0.0) for m in on_tf) / (n + keep.PRIOR), r["id"]))
+    scored.sort(key=lambda s: s[0], reverse=True)
+    return [i for _s, i in scored]
+
+
 def replay_studies(store: CandleStore, exchange: str, res: dict) -> dict:
     """The chart indicators for each shown candle, warmed up on the candles before it. Only the
     per-candle series: support/resistance, Fibonacci and the volume profile are worked out by the
@@ -82,15 +96,18 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
 
     def cfg() -> BacktestConfig:
         return BacktestConfig(taker_fee=settings.paper_taker_fee, maker_fee=settings.paper_maker_fee,
-                              slippage_bps=settings.paper_slippage_bps)
+                              slippage_bps=settings.paper_slippage_bps, max_cost_r=settings.max_cost_r)
+
+    def report_rows() -> list[dict]:
+        try:
+            with open(report_path, encoding="utf-8") as fh:
+                return json.load(fh).get("strategies", [])
+        except (OSError, ValueError):
+            return []
 
     def ranked_strategies() -> list[tuple[str, str]]:
         """(id, label) for the strategy menu, best 5-year win rate first when a report exists."""
-        try:
-            with open(report_path, encoding="utf-8") as fh:
-                rows = json.load(fh).get("strategies", [])
-        except (OSError, ValueError):
-            rows = []
+        rows = report_rows()
         out = [(r["id"], f'{r["name"]} · {r["all"]["win_rate"]:.0f}% win, {r["all"]["total_r"]:+.0f}R')
                for r in sorted(rows, key=lambda r: (r["all"]["win_rate"] if r["all"]["trades"] >= 30 else -1,
                                                     r["all"]["total_r"]), reverse=True)]
@@ -98,15 +115,17 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
             out = [(e.id, e.name) for e in known_entries(Registry(registry_path).entries)]
         return out
 
-    def best_ids(entries) -> list[str]:
-        """Every strategy id, best first: the paper-trading ranking (``keep.rank``), then the
-        backtest report's win rate, then the rest."""
+    def best_ids(entries, tf: str) -> tuple[list[str], int]:
+        """Every strategy id, best first, and how many of them were ranked on ``tf`` itself: the
+        backtest report's results on ``tf``, then the paper-trading ranking (``keep.rank``), then
+        the report's overall win rate, then the rest."""
+        on_tf = timeframe_ranking(report_rows(), tf)
         try:
             ranked = [e.id for e, _s in keep.rank(Registry(registry_path))]
         except Exception:
             ranked = []
-        ids = ranked + [i for i, _label in ranked_strategies()] + [e.id for e in entries]
-        return list(dict.fromkeys(ids))
+        ids = on_tf + ranked + [i for i, _label in ranked_strategies()] + [e.id for e in entries]
+        return list(dict.fromkeys(ids)), len(on_tf)
 
     def compute(symbol: str, tf: str, start: datetime, months: int, strategy: str) -> dict:
         key = (symbol, tf, start, months, strategy)
@@ -119,9 +138,15 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
             start_ms = int(start.timestamp() * 1000)
             end_ms = int(_add_months(start, months).timestamp() * 1000)
             n = _top(strategy)
-            only = best_ids(entries) if n else ("" if strategy.startswith("top:") else strategy)
+            on_tf = 0
+            if n:
+                only, on_tf = best_ids(entries, tf)
+            else:
+                only = "" if strategy.startswith("top:") else strategy
             res = replay(entries, store, exchange, symbol, tf, start_ms, end_ms, only=only, cfg=cfg(), top=n)
             res["top"] = n
+            ranked = set(only[:on_tf]) if n else set()
+            res["ranked_on_tf"] = sum(1 for s in res["strategies"] if s["id"] in ranked)
             res["studies"] = replay_studies(store, exchange, res)
             by_id = {e.id: e for e in entries}
             used: dict[str, int] = {}
