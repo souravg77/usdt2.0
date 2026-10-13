@@ -212,8 +212,10 @@ def improve_one(entry: Entry, reg: Registry, markets: Markets, cfg: BacktestConf
         out["outcome"] = "better on the older data but not on the newer data it never saw: kept as it was"
         return out
     digest = hashlib.sha1(json.dumps(candidate.spec, sort_keys=True, default=str).encode()).hexdigest()[:6]
-    new = Entry(id=f"{entry.id.split('~')[0]}~{digest}", kind=candidate.kind,
-                name=entry.name if entry.name.endswith("(improved)") else f"{entry.name} (improved)",
+    # a hand-coded strategy's name is its code's name, so it stays; the ~hash in the id marks it
+    name = entry.name if candidate.kind == "builtin" or entry.name.endswith("(improved)") \
+        else f"{entry.name} (improved)"
+    new = Entry(id=f"{entry.id.split('~')[0]}~{digest}", kind=candidate.kind, name=name,
                 spec=candidate.spec, source=entry.source)
     if new.id in reg.entries:
         out["outcome"] = f"this improvement was already found before ({new.id})"

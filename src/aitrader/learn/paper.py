@@ -117,8 +117,12 @@ class PaperTrader:
                         # signals only appear when a candle closes: skip markets with no new candle
                         if not fresh or df is None or len(df) < MIN_BARS:
                             continue
-                        sdf = with_context(strat, df, self.store, ex, sym, tf)
-                        sigs = [s for s in strat.generate(sdf, ex, sym, tf) if s.ts == newest_close]
+                        try:
+                            sdf = with_context(strat, df, self.store, ex, sym, tf)
+                            sigs = [s for s in strat.generate(sdf, ex, sym, tf) if s.ts == newest_close]
+                        except Exception:  # one strategy failing on one market must not stop the rest
+                            log.exception("%s failed on %s %s %s; skipping it this candle", entry.id, ex, sym, tf)
+                            continue
                         if not sigs or sigs[-1].ts <= self.state["last_signal"].get(key, 0):
                             continue
                         sig = sigs[-1]

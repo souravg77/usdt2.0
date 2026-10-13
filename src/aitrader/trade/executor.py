@@ -138,11 +138,13 @@ class Executor:
             else:
                 self.state["flattened"] = False
                 paper = self._read_paper()
-                await self._manage_exits(paper, out)
-                if paper is not None and not ctl["paused"]:
-                    await self._enter_new(paper, out)
+                exit_error = await self._manage_exits(paper, out)
+                if paper is not None and not ctl["paused"] and exit_error is None:
+                    await self._enter_new(paper, out)  # no new risk while a position can't be checked
                 await self._arm_stops(out)
                 await self._safety_checks(out)
+                if exit_error is not None:
+                    raise exit_error  # counted like any failed pass: repeated, it halts trading
             await self.record_equity()
             self._check_risk()
             self._healthy()
@@ -330,26 +332,35 @@ class Executor:
 
     # ---- exits ----------------------------------------------------------------------------------
 
-    async def _manage_exits(self, paper: dict | None, out: dict) -> None:
+    async def _manage_exits(self, paper: dict | None, out: dict) -> Exception | None:
+        """Check every open position. A position whose check fails (an order or price lookup
+        raised) doesn't stop the others being checked; the first such error is returned."""
+        first = None
         for key, p in list(self.state["positions"].items()):
             if p["status"] != "open":
                 continue
-            if p.get("stop_cid") and await self._stop_fired(key, out):
+            try:
+                if p.get("stop_cid") and await self._stop_fired(key, out):
+                    continue
+                reason = None
+                twin = (paper or {}).get("open", {}).get(key)
+                if paper is not None and (twin is None or twin["signal"]["ts"] != p["signal_ts"]):
+                    reason = "paper twin closed"
+                elif _short(p):
+                    ask = await self._ask(p)
+                    if ask is not None and ask >= p["stop"]:
+                        reason = f"live price {ask:g} at or above the stop"
+                else:
+                    bid = await self._bid(p["symbol"])
+                    if bid is not None and bid <= p["stop"]:
+                        reason = f"live price {bid:g} at or below the stop"
+            except Exception as exc:
+                log.warning("%s exit check for %s failed: %r", self.mode, key, exc)
+                first = first or exc
                 continue
-            reason = None
-            twin = (paper or {}).get("open", {}).get(key)
-            if paper is not None and (twin is None or twin["signal"]["ts"] != p["signal_ts"]):
-                reason = "paper twin closed"
-            elif _short(p):
-                ask = await self._ask(p)
-                if ask is not None and ask >= p["stop"]:
-                    reason = f"live price {ask:g} at or above the stop"
-            else:
-                bid = await self._bid(p["symbol"])
-                if bid is not None and bid <= p["stop"]:
-                    reason = f"live price {bid:g} at or below the stop"
             if reason:
                 await self._guarded_exit(key, reason, out)
+        return first
 
     async def _guarded_exit(self, key: str, reason: str, out: dict) -> None:
         """One position's failed sell must not stop the others (or the kill switch) from selling."""

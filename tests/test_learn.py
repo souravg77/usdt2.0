@@ -636,3 +636,40 @@ def test_lab_gives_context_only_to_strategies_that_read_it(tmp_path):
     plain = STRATEGIES["trend_pullback"]()
     assert with_context(plain, df, store, "bybit", "BTC/USDT", "1h") is df
     store.close()
+
+
+def test_too_short_history_says_how_much_is_missing(tmp_path):
+    from aitrader.learn.lab import MIN_BARS, evaluate
+
+    store = CandleStore(str(tmp_path / "c.db"))
+    fill_store(store, synthetic(n=120))
+    e = Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR))
+    res = evaluate(e, store, ["bybit"], ["BTC/USDT"], move=False)
+    store.close()
+    assert f"only 120 stored 1h candles per pair (needs {MIN_BARS})" in json.dumps(res)
+
+
+def test_a_strategy_that_raises_on_a_market_doesnt_stop_paper_trading(tmp_path, monkeypatch):
+    df = synthetic(n=700)
+    store = CandleStore(str(tmp_path / "c.db"))
+    fill_store(store, df)
+    reg_path = str(tmp_path / "reg.json")
+    reg = Registry(reg_path)
+    reg.add(Entry(id="boom", kind="rule", name="boom", spec=validate_spec({**EVERY_UP_BAR, "name": "boom"}),
+                  status="paper"))
+    reg.add(Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR), status="paper"))
+    reg.save()
+    trader = PaperTrader(store, reg_path, ["bybit"], ["BTC/USDT"], state_path=str(tmp_path / "s.json"))
+    real = RuleStrategy.generate
+
+    def generate(self, *a, **k):
+        if self.spec.name == "boom":
+            raise ZeroDivisionError("bad data")
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(RuleStrategy, "generate", generate)
+    for i in range(600, 640):
+        trader.tick(now_ms=int(df.ts.iloc[i]) + H)
+    assert trader.state["trades"] or trader.state["open"]  # the healthy strategy kept trading
+    assert all(not k.startswith("boom|") for k in trader.state["open"])
+    assert (tmp_path / "s.json").exists()

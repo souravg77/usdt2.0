@@ -138,10 +138,12 @@ def evaluate(entry: Entry, store: CandleStore, exchanges: list[str], symbols: li
     regimes = {} if regimes is None else regimes
     strat = make_strategy(entry)
     trades_in, trades_oos, markets, finals, windows, tagged = [], [], [], [], {}, []
+    most = 0  # the longest stored history among its markets, to say why nothing was tested
     for ex in exchanges:
         for sym in symbols:
             for tf in strat.spec.timeframes:
                 candles = store.load(ex, sym, tf)
+                most = max(most, len(candles))
                 if len(candles) < MIN_BARS:
                     continue
                 df = with_context(strat, candles_to_frame(candles), store, ex, sym, tf)
@@ -164,7 +166,9 @@ def evaluate(entry: Entry, store: CandleStore, exchanges: list[str], symbols: li
     wf = _walk_forward_summary(windows, gate)
     mc = monte_carlo([t.r for t in trades_oos], gate.mc_runs, gate.mc_horizon, gate.mc_seed)
     if not markets:
-        why_in = [f"no stored candles for its timeframes {', '.join(strat.spec.timeframes)}"]
+        tfs = ", ".join(strat.spec.timeframes)
+        why_in = [f"only {most} stored {tfs} candles per pair (needs {MIN_BARS}): download more history"
+                  if most else f"no stored candles for its timeframes {tfs}"]
         why_oos = []
     else:
         why_in = gate.check_in_sample(m_in)
