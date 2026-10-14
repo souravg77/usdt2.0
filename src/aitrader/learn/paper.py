@@ -386,6 +386,7 @@ class PaperTrader:
             if t.exit_reason == "end" and t.exit_ts == int(df["ts"].iloc[-1]):
                 if not closing:
                     pos["mark_r"] = round(t.r, 3)  # still open
+                    pos["mark"] = float(df["close"].iloc[-1])  # the price it was marked at, for the page
                     continue
                 t.exit_reason = why
             pnl = t.r * abs(sig.entry - sig.stop) * pos["units"]
