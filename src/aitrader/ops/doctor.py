@@ -117,9 +117,10 @@ def run_checks(settings, root: str = ".", env_file: str = ".env", now: float | N
             version = con.execute("PRAGMA user_version").fetchone()[0]
             add(PASS if version == SCHEMA_VERSION else FAIL, "database schema",
                 f"v{version}" if version == SCHEMA_VERSION else f"v{version}, code expects v{SCHEMA_VERSION}: run aitrader migrate")
-            row = con.execute("SELECT MAX(ts), COUNT(DISTINCT symbol) FROM candles").fetchone()
-            have = {r[0] for r in con.execute("SELECT DISTINCT symbol FROM candles")}
+            newest = _newest_candles(con)
             con.close()
+            have = set(newest)
+            row = (max(newest.values(), default=None), len(have))
             if row[0] is None:
                 add(WARN, "candles", "no candles yet: run aitrader download (see the guide)")
             else:
@@ -173,6 +174,29 @@ def run_checks(settings, root: str = ".", env_file: str = ".env", now: float | N
         else:
             age_d = (now - os.path.getmtime(backups[-1])) / 86400
             add(PASS if age_d < 8 else WARN, "backups", f"newest is {age_d:.1f} days old")
+    return out
+
+
+def _newest_candles(con) -> dict[str, int]:
+    """{symbol: newest candle ts} read along the primary key (exchange, symbol, timeframe, ts), so
+    it costs a few index lookups per market. A plain MAX(ts) or DISTINCT scans the whole table:
+    with a year of 1m-1d candles that is millions of rows, and it held up the Settings page."""
+    out: dict[str, int] = {}
+
+    def keys(sql: str, *args) -> list:
+        found, last = [], ""
+        while (row := con.execute(sql, (*args, last)).fetchone()) and row[0] is not None:
+            found.append(last := row[0])
+        return found
+
+    for ex in keys("SELECT MIN(exchange) FROM candles WHERE exchange > ?"):
+        for sym in keys("SELECT MIN(symbol) FROM candles WHERE exchange = ? AND symbol > ?", ex):
+            for tf in keys("SELECT MIN(timeframe) FROM candles WHERE exchange = ? AND symbol = ? AND timeframe > ?",
+                           ex, sym):
+                ts = con.execute("SELECT MAX(ts) FROM candles WHERE exchange = ? AND symbol = ? AND timeframe = ?",
+                                 (ex, sym, tf)).fetchone()[0]
+                if ts is not None:
+                    out[sym] = max(out.get(sym, ts), ts)
     return out
 
 

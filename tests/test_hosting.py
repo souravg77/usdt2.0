@@ -167,3 +167,22 @@ def test_backup_includes_accounts_and_user_state(tmp_path, monkeypatch):
     assert cli.cmd_backup(s, Args()) == 0
     got = set(os.listdir("data/backups/x"))
     assert {"aitrader.db", "accounts.db", "data__users__1__control.json"} <= got
+
+
+def test_doctor_reads_the_newest_candles_without_scanning_the_table(tmp_path):
+    import sqlite3
+
+    from aitrader.ops.doctor import _newest_candles
+
+    con = sqlite3.connect(str(tmp_path / "c.db"))
+    con.execute("CREATE TABLE candles (exchange TEXT, symbol TEXT, timeframe TEXT, ts INTEGER, "
+                "PRIMARY KEY (exchange, symbol, timeframe, ts)) WITHOUT ROWID")
+    con.executemany("INSERT INTO candles VALUES (?,?,?,?)", [
+        ("binance", "BTC/USDT", "1h", 5), ("bybit", "BTC/USDT", "1d", 9), ("bybit", "BTC/USDT", "1h", 7),
+        ("bybit", "ETH/USDT", "5m", 3), ("bybit", "ETH/USDT", "5m", 4)])
+    assert _newest_candles(con) == {"BTC/USDT": 9, "ETH/USDT": 4}
+    plan = " ".join(r[-1] for r in con.execute(
+        "EXPLAIN QUERY PLAN SELECT MIN(symbol) FROM candles WHERE exchange = 'bybit' AND symbol > ''"))
+    assert "SCAN" not in plan  # an index lookup, not a pass over every candle
+    assert _newest_candles(sqlite3.connect(":memory:").execute(
+        "CREATE TABLE candles (exchange, symbol, timeframe, ts)").connection) == {}

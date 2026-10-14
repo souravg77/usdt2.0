@@ -8,9 +8,10 @@ worth trading. A strategy ranks higher when:
 2. its result per trade is higher, out of sample plus any paper trades, shrunk toward 0 when there
    are few trades (``PRIOR`` trades of 0R are mixed in), so 3 lucky trades don't beat 80 good ones.
 
-A few places are kept for each chart timeframe (``PER_TIMEFRAME``), so the kept set doesn't end up
-trading only 4h and daily candles, which close a few times a day. A strategy gets one of those
-places only with a result above 0R per trade on that timeframe alone, after fees.
+A few places are kept for each chart timeframe (``PER_TIMEFRAME``, at most half of ``n`` in all), so
+the kept set doesn't end up trading only 4h and daily candles, which close a few times a day. A
+strategy gets one of those places only with a result above 0R per trade, after fees, both on that
+timeframe alone and overall.
 
 The top ``n`` are kept even when some score below 0 (paper money, and their results keep coming in);
 the paper trader still retires one that loses too much. The rest leave paper trading with the reason
@@ -81,17 +82,19 @@ def _tf_order(tf: str) -> int:
 def choose(ranked: list[tuple[Entry, float]], n: int,
            per_tf: int = PER_TIMEFRAME) -> list[tuple[Entry, float, str]]:
     """The ``n`` to keep, in ranking order, each with why: first up to ``per_tf`` places for the
-    best on each timeframe (shortest first, only results above 0R there), then the best overall."""
+    best on each timeframe (shortest first), then the best overall. A timeframe place needs a result
+    above 0R on that timeframe *and* overall, since the paper trader trades every timeframe of a
+    strategy; at most half of the ``n`` places go this way, so the best overall always get the rest."""
     tf_scores = {e.id: timeframe_scores(e) for e, _s in ranked}
     tfs = sorted({tf for sc in tf_scores.values() for tf in sc}, key=_tf_order)
     why: dict[str, str] = {}
     for tf in tfs:
         have = sum(1 for i in why if tf in tf_scores[i])
-        best = sorted(((e, tf_scores[e.id][tf]) for e, _s in ranked
-                       if e.id not in why and tf_scores[e.id].get(tf, 0.0) > 0),
+        best = sorted(((e, tf_scores[e.id][tf]) for e, total in ranked
+                       if e.id not in why and total > 0 and tf_scores[e.id].get(tf, 0.0) > 0),
                       key=lambda es: (_passed(es[0]), es[1]), reverse=True)
         for e, s in best[:max(0, per_tf - have)]:
-            if len(why) >= n:
+            if len(why) >= n // 2:
                 break
             why[e.id] = f"best on {tf} ({s:+.3f}R per trade there)"
     for e, _s in ranked:
