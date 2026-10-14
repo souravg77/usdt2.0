@@ -311,6 +311,30 @@ def test_add_shorts_cli(tmp_path, monkeypatch):
     assert ids == ["builtin-trend_pullback", "short-builtin-trend_pullback", "short-up", "up"]
 
 
+def test_add_timeframe_cli_makes_30m_versions(tmp_path, monkeypatch):
+    from aitrader.cli import main
+    from aitrader.learn.registry import make_strategy
+
+    monkeypatch.chdir(tmp_path)
+    reg = Registry("data/learn/registry.json")
+    reg.add(Entry(id="up", kind="rule", name="up_bar", spec=validate_spec({**EVERY_UP_BAR, "timeframes": ["1h"]})))
+    reg.add(Entry(id="daily", kind="rule", name="up_bar", spec=validate_spec({**EVERY_UP_BAR, "timeframes": ["1d"]})))
+    reg.add(Entry(id="builtin-trend_pullback", kind="builtin", name="trend_pullback",
+                  spec={"params": {"fast": 10}}))
+    reg.save()
+    assert main(["--env-file", "none", "learn", "add-timeframe"]) == 0
+    assert main(["--env-file", "none", "learn", "add-timeframe"]) == 0  # no twins of twins, no duplicates
+    assert main(["--env-file", "none", "learn", "add-shorts"]) == 0
+    reg = Registry("data/learn/registry.json")
+    assert sorted(reg.entries) == ["builtin-trend_pullback", "builtin-trend_pullback-30m", "daily", "short-builtin-trend_pullback",
+                                   "short-builtin-trend_pullback-30m", "short-daily", "short-up", "short-up-30m",
+                                   "up", "up-30m"]
+    for i in ("up-30m", "builtin-trend_pullback-30m", "short-up-30m", "short-builtin-trend_pullback-30m"):
+        assert make_strategy(reg.get(i)).spec.timeframes == ("30m",)
+    assert make_strategy(reg.get("builtin-trend_pullback-30m")).params["fast"] == 10  # same settings
+    assert make_strategy(reg.get("builtin-trend_pullback")).spec.timeframes != ("30m",)  # the original is unchanged
+
+
 def test_paper_retires_losers(tmp_path):
     df = synthetic(n=900)
     store = CandleStore(str(tmp_path / "c.db"))

@@ -485,7 +485,8 @@ paper trading. Nothing trades real money.</p>
                 return "Paper trading is already being switched on; see Recent jobs on the Overview page."
             since = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 365 * 86400))
             jobs.submit("Turn paper trading on: every strategy, then a year of price history",
-                        [["learn", "add-library"], ["learn", "add-builtin"], ["learn", "add-shorts"],
+                        [["learn", "add-library"], ["learn", "add-builtin"], ["learn", "add-timeframe", "30m"],
+                         ["learn", "add-shorts"],
                          ["learn", "paper-all"],
                          ["download", "--since", since, "--exchange", EXCHANGE],
                          ["learn", "test", "--paper"], ["learn", "keep-top"]], meta={"kind": "paper-start"})

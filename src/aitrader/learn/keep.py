@@ -8,6 +8,10 @@ worth trading. A strategy ranks higher when:
 2. its result per trade is higher, out of sample plus any paper trades, shrunk toward 0 when there
    are few trades (``PRIOR`` trades of 0R are mixed in), so 3 lucky trades don't beat 80 good ones.
 
+A few places are kept for each chart timeframe (``PER_TIMEFRAME``), so the kept set doesn't end up
+trading only 4h and daily candles, which close a few times a day. A strategy gets one of those
+places only with a result above 0R per trade on that timeframe alone, after fees.
+
 The top ``n`` are kept even when some score below 0 (paper money, and their results keep coming in);
 the paper trader still retires one that loses too much. The rest leave paper trading with the reason
 ``BENCHED``; a later run can bring one back if it climbs into the top ``n``. Strategies retired
@@ -24,6 +28,7 @@ from .registry import Entry, Registry
 
 PRIOR = 30
 BENCHED = "not in the best"
+PER_TIMEFRAME = 2  # places kept for the best strategies on each timeframe
 
 
 def _passed(entry: Entry) -> bool:
@@ -55,14 +60,56 @@ def rank(reg: Registry) -> list[tuple[Entry, float]]:
     return sorted(scored, key=lambda es: (_passed(es[0]), es[1]), reverse=True)
 
 
-def keep_top(reg: Registry, n: int) -> dict:
+def timeframe_scores(entry: Entry) -> dict[str, float]:
+    """Out-of-sample result per trade on each timeframe alone, shrunk toward 0 like ``score``."""
+    trades: dict[str, int] = {}
+    total: dict[str, float] = {}
+    for m in (entry.backtest or {}).get("markets") or []:
+        tf, n = m.get("timeframe"), m.get("trades_oos", 0)
+        if tf and n:
+            trades[tf] = trades.get(tf, 0) + n
+            total[tf] = total.get(tf, 0.0) + n * m.get("exp_oos", 0.0)
+    return {tf: total[tf] / (trades[tf] + PRIOR) for tf in trades}
+
+
+def _tf_order(tf: str) -> int:
+    from ..models import TIMEFRAME_MS
+
+    return TIMEFRAME_MS.get(tf, 0)
+
+
+def choose(ranked: list[tuple[Entry, float]], n: int,
+           per_tf: int = PER_TIMEFRAME) -> list[tuple[Entry, float, str]]:
+    """The ``n`` to keep, in ranking order, each with why: first up to ``per_tf`` places for the
+    best on each timeframe (shortest first, only results above 0R there), then the best overall."""
+    tf_scores = {e.id: timeframe_scores(e) for e, _s in ranked}
+    tfs = sorted({tf for sc in tf_scores.values() for tf in sc}, key=_tf_order)
+    why: dict[str, str] = {}
+    for tf in tfs:
+        have = sum(1 for i in why if tf in tf_scores[i])
+        best = sorted(((e, tf_scores[e.id][tf]) for e, _s in ranked
+                       if e.id not in why and tf_scores[e.id].get(tf, 0.0) > 0),
+                      key=lambda es: (_passed(es[0]), es[1]), reverse=True)
+        for e, s in best[:max(0, per_tf - have)]:
+            if len(why) >= n:
+                break
+            why[e.id] = f"best on {tf} ({s:+.3f}R per trade there)"
+    for e, _s in ranked:
+        if len(why) >= n:
+            break
+        why.setdefault(e.id, "best overall")
+    return [(e, s, why[e.id]) for e, s in ranked if e.id in why]
+
+
+def keep_top(reg: Registry, n: int, per_tf: int = PER_TIMEFRAME) -> dict:
     """Keep the best ``n`` in paper trading; bench the rest. Returns what changed."""
     ranked = rank(reg)
     if not ranked:
         return {"kept": [], "benched": [], "returned": [], "untested": 0}
-    keep = [e for e, _s in ranked[:n]]
-    keep_ids = {e.id for e in keep}
-    out = {"kept": [{"id": e.id, "score": round(sc, 4), "passed": _passed(e)} for e, sc in ranked[:n]],
+    chosen = choose(ranked, n, per_tf)
+    keep_ids = {e.id for e, _s, _w in chosen}
+    out = {"kept": [{"id": e.id, "score": round(sc, 4), "passed": _passed(e), "why": w,
+                     "timeframes": sorted(timeframe_scores(e), key=_tf_order)} for e, sc, w in chosen],
            "benched": [], "returned": [],
            "untested": sum(1 for e in reg.entries.values() if e.status == "paper" and score(e) is None)}
     for i, (e, s) in enumerate(ranked, 1):
@@ -106,7 +153,7 @@ INDICATOR_WORDS: dict[str, str] = {
     "willr": r"\b(williams|willr)",
 }
 # a book rule's notes (why it was coded so, what couldn't be) can name indicators it doesn't use
-NOT_RULES = ("name", "description", "source", "decisions", "uncodable")
+NOT_RULES = ("name", "description", "source", "decisions", "uncodable", "twin_of")
 
 
 def _rules_text(entry: Entry) -> str:
