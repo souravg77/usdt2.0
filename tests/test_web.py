@@ -220,10 +220,10 @@ def test_paper_switch_and_live_card(web, monkeypatch):
     assert not json.load(open("data/trade/control.json"))["paused"]
     steps, meta = submitted[0]
     assert meta == {"kind": "paper-start"}
-    assert steps[:4] == [["learn", "add-library"], ["learn", "add-builtin"], ["learn", "add-shorts"],
-                         ["learn", "paper-all"]]
-    assert steps[4][0] == "download" and "--since" in steps[4]
-    assert steps[5] == ["learn", "test", "--paper"] and steps[6] == ["learn", "keep-top"]
+    assert steps[:5] == [["learn", "add-library"], ["learn", "add-builtin"], ["learn", "add-timeframe", "30m"],
+                         ["learn", "add-shorts"], ["learn", "paper-all"]]
+    assert steps[5][0] == "download" and "--since" in steps[5]
+    assert steps[6] == ["learn", "test", "--paper"] and steps[7] == ["learn", "keep-top"]
 
     client.post("/trading/kill", data={"csrf": csrf, "confirm": "KILL"})
     r = client.post("/trading/paper/on", data={"csrf": csrf}, follow_redirects=False)

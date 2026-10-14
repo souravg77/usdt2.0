@@ -27,10 +27,11 @@ Files written before the ladder used "candidate" for an untested strategy; it is
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 DEFAULT_PATH = "data/learn/registry.json"
 STATUSES = ("research", "backtested", "oos_validated", "paper", "rejected", "under_review", "retired")
@@ -46,6 +47,7 @@ def migrate_status(status: str) -> str:
 class Entry:
     id: str
     kind: str  # "rule" (written by the agent), "builtin" (hand-coded) or "short" (a long one's short twin)
+    # (a timeframe twin keeps its kind; its spec carries "timeframes" and "twin_of")
     name: str
     status: str = "research"
     spec: dict | None = None
@@ -109,7 +111,11 @@ def make_strategy(entry: Entry):
     from .rules import RuleStrategy
 
     if entry.kind == "builtin":  # an improved version carries its own settings (learn.improve)
-        return STRATEGIES[entry.name](**((entry.spec or {}).get("params") or {}))
+        strat = STRATEGIES[entry.name](**((entry.spec or {}).get("params") or {}))
+        tfs = (entry.spec or {}).get("timeframes")
+        if tfs:  # a timeframe twin (``timeframe_twin``): the same rules on another chart
+            strat.spec = replace(strat.spec, timeframes=tuple(tfs))
+        return strat
     if entry.kind == "short":
         from ..strategies.mirror import ShortMirror
 
@@ -117,6 +123,18 @@ def make_strategy(entry: Entry):
         base = Entry(id=s["base_id"], kind=s["base_kind"], name=s["base_name"], spec=s.get("base_spec"))
         return ShortMirror(make_strategy(base))
     return RuleStrategy(entry.spec)
+
+
+def timeframe_twin(entry: Entry, timeframe: str) -> Entry | None:
+    """A new research entry that runs ``entry``'s rules on ``timeframe`` candles only (for example
+    a 1h strategy on 30m charts), or None for a short twin or one already a timeframe twin (their
+    long version gets its own twin, and ``add-shorts`` then adds its short)."""
+    spec = copy.deepcopy(entry.spec or {})
+    if entry.kind not in ("rule", "builtin") or spec.get("twin_of"):
+        return None
+    spec["timeframes"], spec["twin_of"] = [timeframe], entry.id
+    return Entry(id=f"{entry.id}-{timeframe}", kind=entry.kind, name=entry.name,
+                 spec=spec, source=entry.source)
 
 
 def short_twin(entry: Entry) -> Entry:

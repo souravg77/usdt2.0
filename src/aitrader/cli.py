@@ -566,6 +566,23 @@ def cmd_learn(s: Settings, args) -> int:
             print(("  + " if reg.add(e) else "  = ") + e.id)
         reg.save()
         return 0
+    if cmd == "add-timeframe":
+        from .learn.registry import make_strategy, timeframe_twin
+
+        tf, near = args.timeframe, set(args.near.split(","))
+        added = 0
+        for e in list(reg.entries.values()):
+            try:
+                tfs = set(make_strategy(e).spec.timeframes)
+            except Exception:
+                continue
+            if tf in tfs or not tfs & near:
+                continue
+            twin = timeframe_twin(e, tf)
+            added += bool(twin) and reg.add(twin)
+        reg.save()
+        print(f"{added} new {tf} versions of strategies that trade {', '.join(sorted(near))} -> {args.registry}")
+        return 0
     if cmd == "add-shorts":
         from .learn.registry import short_twin
 
@@ -593,7 +610,8 @@ def cmd_learn(s: Settings, args) -> int:
         reg.save()
         print(f"the best {len(out['kept'])} strategies keep paper trading (at most {n}):")
         for i, k in enumerate(out["kept"], 1):
-            print(f"  {i:2d}. {k['id']:44} {k['score']:+.3f}R per trade"
+            tfs = f"  [{', '.join(k['timeframes'])}]" if k["timeframes"] else ""
+            print(f"  {i:2d}. {k['id']:44} {k['score']:+.3f}R per trade{tfs}  {k['why']}"
                   f"{'' if k['passed'] else '  (did not pass the backtest)'}")
         untested = f", {out['untested']} had no backtest result yet" if out["untested"] else ""
         print(f"{len(out['benched'])} taken out of paper trading, {len(out['returned'])} brought back{untested}")
@@ -1467,11 +1485,16 @@ def build_parser() -> argparse.ArgumentParser:
     ll.add_argument("--test", action="store_true", help="backtest them straight away")
     lb = le_sub.add_parser("add-builtin", help="register the hand-coded strategies too")
     lb.add_argument("names", nargs="*")
+    lat = le_sub.add_parser("add-timeframe", help="add a copy of every long strategy that trades a nearby "
+                                                  "timeframe, running on this one (default 30m, from 15m and 1h)")
+    lat.add_argument("timeframe", nargs="?", default="30m", choices=["5m", "15m", "30m", "1h", "4h", "1d"])
+    lat.add_argument("--near", default="15m,1h", help="copy strategies that trade any of these (comma separated)")
     le_sub.add_parser("add-shorts", help="add a short twin (Bybit perpetual futures) of every long strategy")
     le_sub.add_parser("paper-all", help="paper-trade every strategy, including untested and rejected "
                                         "ones (fake money; poor ones retire on their paper results)")
     lk = le_sub.add_parser("keep-top", help="keep only the best N strategies paper trading (ranked by "
-                                            "backtest and paper results); the rest leave paper trading")
+                                            "backtest and paper results, with a few places for the best "
+                                            "on each timeframe); the rest leave paper trading")
     lk.add_argument("--n", type=int, help="how many to keep, 10-20 (default: the last number used, else 15)")
     lt = le_sub.add_parser("test", help="backtest candidates; passes go to paper trading")
     lt.add_argument("ids", nargs="*")

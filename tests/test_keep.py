@@ -110,3 +110,32 @@ def test_cli_keep_top(tmp_path, monkeypatch, capsys):
     assert "the best 12 strategies" in text and "2 taken out" in text and "indicators they use: adx (12)" in text
     assert len(Registry(reg.path).with_status("paper")) == 12
     assert main(args) == 0 and saved_n(reg.path) == 12  # the last number is remembered
+
+
+def on_tfs(e, **by_tf):
+    """Give ``e`` backtest markets: timeframe -> (trades, R per trade) out of sample."""
+    e.backtest["markets"] = [{"timeframe": tf, "trades_oos": n, "exp_oos": x} for tf, (n, x) in by_tf.items()]
+    return e
+
+
+def test_keep_top_keeps_places_for_each_timeframe(tmp_path):
+    slow = [on_tfs(entry(f"slow{i}", trades=100, exp=0.5 + i / 100), **{"4h": (60, 0.5), "1d": (40, 0.5)})
+            for i in range(12)]
+    hourly = [on_tfs(entry("h_good", trades=200, exp=0.1), **{"1h": (200, 0.1)}),
+              on_tfs(entry("h_ok", trades=200, exp=0.05), **{"1h": (200, 0.05)}),
+              on_tfs(entry("h_third", trades=200, exp=0.04), **{"1h": (200, 0.04)}),
+              on_tfs(entry("h_losing", trades=300, exp=-0.2), **{"1h": (300, -0.2)})]
+    reg = make(tmp_path, *slow, *hourly)
+    out = keep_top(reg, 10)
+    kept = {k["id"]: k for k in out["kept"]}
+    assert len(kept) == 10
+    assert {"h_good", "h_ok"} <= set(kept) and "h_third" not in kept  # two places for 1h
+    assert "h_losing" not in kept  # a place is only for a result above 0R on that timeframe
+    assert kept["h_good"]["why"].startswith("best on 1h") and kept["h_good"]["timeframes"] == ["1h"]
+    assert kept["slow9"]["why"] == "best overall" and kept["slow9"]["timeframes"] == ["4h", "1d"]
+    assert [k["id"] for k in out["kept"]][:2] == ["slow11", "slow10"]  # still listed in ranking order
+    assert reg.get("slow0").status == "retired"
+
+    # with no per-timeframe places it's the plain ranking again
+    out = keep_top(reg, 10, per_tf=0)
+    assert all(k["id"].startswith("slow") for k in out["kept"])
