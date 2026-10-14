@@ -127,14 +127,39 @@ class CandleStore:
                 applied.append(version)
         return applied
 
-    def backup(self, path: str) -> None:
-        """Consistent copy of the database, safe while other services write to it."""
+    def backup(self, path: str, candles: bool = True) -> None:
+        """Consistent copy of the database, safe while other services write to it. With
+        ``candles=False`` the candles table is copied empty: price history can always be downloaded
+        again, and it is nearly all of the file (about 2 GB a year for 20 pairs), so a daily
+        backup without it is a few MB."""
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-        dest = sqlite3.connect(path)
+        if candles:
+            dest = sqlite3.connect(path)
+            try:
+                self.conn.backup(dest)
+            finally:
+                dest.close()
+            return
+        if os.path.exists(path):
+            os.remove(path)
+        self.conn.execute("ATTACH DATABASE ? AS bk", (path,))
         try:
-            self.conn.backup(dest)
+            with self.conn:
+                for name, sql in self.conn.execute(
+                        "SELECT name, sql FROM main.sqlite_master WHERE type = 'table' "
+                        "AND name NOT LIKE 'sqlite_%'").fetchall():
+                    # (sqlite keeps the CREATE text without IF NOT EXISTS, so this is "CREATE TABLE name")
+                    self.conn.execute(sql.replace("CREATE TABLE ", "CREATE TABLE bk.", 1))
+                    if name != "candles":
+                        self.conn.execute(f'INSERT INTO bk."{name}" SELECT * FROM main."{name}"')
+                for (sql,) in self.conn.execute("SELECT sql FROM main.sqlite_master WHERE type = 'index' "
+                                                "AND sql IS NOT NULL").fetchall():
+                    self.conn.execute(sql.replace("CREATE INDEX ", "CREATE INDEX bk.", 1)
+                                      .replace("CREATE UNIQUE INDEX ", "CREATE UNIQUE INDEX bk.", 1))
+                version = self.conn.execute("PRAGMA main.user_version").fetchone()[0]
+                self.conn.execute(f"PRAGMA bk.user_version = {int(version)}")
         finally:
-            dest.close()
+            self.conn.execute("DETACH DATABASE bk")
 
     def close(self) -> None:
         self.conn.close()
