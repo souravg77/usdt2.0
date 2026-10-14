@@ -152,6 +152,26 @@ def test_migrate_and_backup(tmp_path, monkeypatch):
     assert (tmp_path / "data" / "backups" / "x" / "b.db").exists()
 
 
+def test_backup_can_leave_the_candles_out(tmp_path):
+    from aitrader.data import store as store_mod
+
+    s = store_mod.CandleStore(str(tmp_path / "a.db"))
+    s.migrate()
+    s.upsert([Candle("bybit", "BTC/USDT", "1h", i * 3_600_000, 1, 2, 0.5, 1.5, 10) for i in range(500)])
+    s.conn.execute("INSERT INTO context VALUES ('bybit', 'BTC/USDT', 'funding', 1, 0.0001)")
+    s.conn.commit()
+    s.backup(str(tmp_path / "bk" / "a.db"), candles=False)
+    s.backup(str(tmp_path / "bk" / "a.db"), candles=False)  # an old file at the path is replaced
+    copy = store_mod.CandleStore(str(tmp_path / "bk" / "a.db"))
+    assert copy.load("bybit", "BTC/USDT", "1h") == [] and copy.schema_version() == s.schema_version()
+    assert copy.conn.execute("SELECT COUNT(*) FROM context").fetchone()[0] == 1  # everything else is kept
+    copy.upsert([Candle("bybit", "BTC/USDT", "1h", 0, 1, 2, 0.5, 1.5, 10)])  # and it works as a database
+    assert len(copy.load("bybit", "BTC/USDT", "1h")) == 1
+    copy.close()
+    assert len(s.load("bybit", "BTC/USDT", "1h")) == 500  # the original is untouched
+    s.close()
+
+
 async def test_download_fills_holes_and_refreshes_the_newest_candle(fake_ccxt):
     import aitrader.data.downloader as dl
 

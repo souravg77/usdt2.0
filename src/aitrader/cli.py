@@ -971,7 +971,7 @@ def cmd_backup(s: Settings, args) -> int:
     os.makedirs(args.dest, exist_ok=True)
     store = CandleStore(s.db_path)
     try:
-        store.backup(os.path.join(args.dest, os.path.basename(s.db_path)))
+        store.backup(os.path.join(args.dest, os.path.basename(s.db_path)), candles=not getattr(args, "no_candles", False))
     finally:
         store.close()
     for path in ("data/learn/registry.json", "data/learn/paper_state.json", "data/ai/models/registry.json",
@@ -1542,6 +1542,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("migrate", help="bring the database schema up to date")
     bk = sub.add_parser("backup", help="copy the database and registries into a folder")
     bk.add_argument("dest")
+    bk.add_argument("--no-candles", action="store_true",
+                    help="leave the price candles out (they can be downloaded again): a few MB instead of GBs")
 
     w = sub.add_parser("web", help="dashboard: submit books, see strategies and results (login required)")
     w.add_argument("--host", default="127.0.0.1", help="0.0.0.0 only inside Docker or behind a proxy")
