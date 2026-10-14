@@ -173,10 +173,16 @@ def test_trading_page_and_controls(web):
     assert "KILL SWITCH ON" in client.get("/trading").text
     client.post("/trading/resume", data={"csrf": csrf})
     assert not json.load(open("data/trade/control.json"))["paused"]
+    page = client.get("/trading").text
+    assert page.count('action="/trading/close-all"') == 2  # in Controls and above the open positions
+    assert client.post("/trading/close-all", data={}, follow_redirects=False).status_code == 403
+    r = client.post("/trading/close-all", data={"csrf": csrf}, follow_redirects=False)
+    assert "Closing" in r.headers["location"] and json.load(open("data/trade/close_all.json"))["by"] == "admin"
+    assert not json.load(open("data/trade/control.json"))["paused"]  # paper trading keeps running
     client.post("/trading/gate", data={"csrf": csrf})
     assert "does not pass yet" in client.get("/trading").text
     kinds = [json.loads(line)["kind"] for line in open("data/ops/events.jsonl")]
-    assert kinds[:3] == ["risk_pause", "kill", "resume"]
+    assert kinds[:4] == ["risk_pause", "kill", "resume", "close_all"]
 
 
 def test_trading_page_status_tiles_and_grouped_events(web):

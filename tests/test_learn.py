@@ -483,6 +483,48 @@ def test_paper_honours_pause_context_and_writes_events(tmp_path):
     store.close()
 
 
+def test_kill_and_close_all_close_paper_positions(tmp_path):
+    from aitrader.trade import Control
+
+    df = synthetic(n=900)
+    store = CandleStore(str(tmp_path / "c.db"))
+    fill_store(store, df)
+    reg_path = str(tmp_path / "reg.json")
+    reg = Registry(reg_path)
+    reg.add(Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR), status="paper"))
+    reg.save()
+    control = Control(str(tmp_path / "control.json"))
+    trader = PaperTrader(store, reg_path, ["bybit"], ["BTC/USDT"], state_path=str(tmp_path / "s.json"),
+                         control=control)
+    ticks = iter(int(df.ts.iloc[i]) + H for i in range(600, 900))
+
+    def until_filled():
+        for t in ticks:
+            trader.tick(now_ms=t)
+            if any(p["filled"] for p in trader.state["open"].values()):
+                return t
+        raise AssertionError("no position opened")
+
+    until_filled()
+    control.kill("test")
+    ev = trader.tick(now_ms=next(ticks))
+    assert ev["closed"] and trader.state["open"] == {} and not ev["opened"]
+    assert trader.state["trades"][-1]["exit_reason"] == "kill switch"
+    equity = trader.state["equity"]["up"]
+    assert equity == pytest.approx(trader.state["trades"][-1]["equity_after"])
+
+    control.resume()
+    until_filled()
+    control.request_close_all(by="admin")
+    trader.tick(now_ms=next(ticks))
+    hand = [t for t in trader.state["trades"] if t["exit_reason"] == "closed by hand"]
+    assert hand and control.close_all_requested() is None  # done: the request is cleared
+    until_filled()  # paper trading carries on and new positions stay open
+    trader.tick(now_ms=next(ticks))
+    assert not control.killed
+    store.close()
+
+
 def test_paper_tick_keeps_registry_changes_made_meanwhile(tmp_path):
     """A `learn` command (or the dashboard) may change the registry while a paper tick runs."""
     df = synthetic(n=700)

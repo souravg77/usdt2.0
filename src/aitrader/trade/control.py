@@ -6,6 +6,10 @@ order and sell every position it opened. ``halted`` is a pause the executor sets
 safety can't be checked (a position without its resting stop, the account not matching the
 ledger, the price feed gone quiet); stops stay in place. All stay set until a person resumes.
 
+A person can also ask for every paper position to be closed now (``request_close_all``, kept in
+``close_all.json`` next to this file): the paper trader closes them at the last closed candle's
+price on its next pass and keeps trading. A kill closes them too.
+
 Paper trading stops only for a person: their pause or a kill (``stops_paper``). A safety halt or
 the risk engine's loss-cap pause is about the live account, so paper keeps collecting results.
 """
@@ -82,6 +86,36 @@ class Control:
 
     def resume(self, by: str = "") -> dict:
         return self._write({"paused": False, "killed": False, "halted": False, "reason": "", "by": by})
+
+    # ---- "close all open positions" (paper), a one-off request the paper trader carries out ----
+
+    def _close_path(self) -> str:
+        return os.path.join(os.path.dirname(os.path.abspath(self.path)), "close_all.json")
+
+    def request_close_all(self, by: str = "") -> dict:
+        req = {"at": time.time(), "by": by}
+        os.makedirs(os.path.dirname(self._close_path()), exist_ok=True)
+        tmp = self._close_path() + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(req, fh)
+        os.replace(tmp, self._close_path())
+        return req
+
+    def close_all_requested(self) -> float | None:
+        """When a person asked to close every paper position (epoch seconds), or None."""
+        try:
+            with open(self._close_path(), encoding="utf-8") as fh:
+                return float(json.load(fh)["at"])
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+
+    def clear_close_all(self, at: float) -> None:
+        """Done with the request made at ``at`` (a newer request stays)."""
+        if self.close_all_requested() == at:
+            try:
+                os.remove(self._close_path())
+            except OSError:
+                pass
 
     def mark_flattened(self) -> None:
         s = self.state()
