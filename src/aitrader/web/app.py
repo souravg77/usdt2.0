@@ -398,7 +398,7 @@ paper trading. Nothing trades real money.</p>
         note = f'<p class="{"bad" if bad else "good"}">{_e(msg)}</p>' if msg else ""
         events = EventLog(paths.events).read(limit=600)
         body = [note, _trading_stats(c, settings, paths, paper, events, acct),
-                '<div class="grid">', _account_card(acct, csrf), _paper_switch_card(c, paths, events, jobs.list(), csrf),
+                '<div class="grid">', _wallet_card(paths, paper, csrf), _account_card(acct, csrf), _paper_switch_card(c, paths, events, jobs.list(), csrf),
                 _ai_card(paths, jobs.list(), csrf), _live_card(settings, paths, events), "</div>",
                 '<div class="grid">', controls, _gate_card(paths, csrf), "</div>",
                 "<h2>Equity</h2>", _equity_svg(paper, execs),
@@ -427,6 +427,25 @@ paper trading. Nothing trades real money.</p>
         from ..ops import EventLog
 
         EventLog(paths.events, service="dashboard").emit(kind, text, level=level)
+
+    @app.post("/trading/paper/wallet")
+    def trading_paper_wallet(request: Request, csrf: str = Form(""), amount: str = Form("")):
+        def act(user):
+            from ..learn import wallet
+
+            try:
+                value = float(amount.replace(",", "").strip())
+            except ValueError:
+                return (f"Not changed: enter an amount from {wallet.MIN_START:,.0f} to {wallet.MAX_START:,.0f} USDT.",
+                        False)
+            if not wallet.MIN_START <= value <= wallet.MAX_START:
+                return (f"Not changed: the starting amount must be {wallet.MIN_START:,.0f} to "
+                        f"{wallet.MAX_START:,.0f} USDT.", False)
+            w = wallet.save(wallet.wallet_path(paths.paper_state), value)
+            _event("paper_wallet", f"paper wallet restarted with {w['start']:,.2f} USDT, from the dashboard by {user}")
+            return (f"The paper wallet starts again with {w['start']:,.2f} USDT. New paper trades are sized from it; "
+                    "the trade log keeps the earlier trades.")
+        return _control_post(request, csrf, act)
 
     @app.post("/trading/account/refresh")
     def trading_account_refresh(request: Request, csrf: str = Form("")):
@@ -769,6 +788,37 @@ def _ai_card(paths: Paths, job_list: list[dict], csrf: str) -> str:
     return "".join(parts)
 
 
+def _wallet_card(paths: Paths, paper: dict, csrf: str) -> str:
+    """The paper wallet: its balance, what's in open positions, and its starting amount (100-10,000)."""
+    from ..learn import wallet
+
+    w = wallet.load(wallet.wallet_path(paths.paper_state))
+    sm = wallet.summary(paper if isinstance(paper, dict) else {}, w)
+    open_pnl = [u for u in (_paper_usdt(p) for p in (paper or {}).get("open", {}).values()) if u is not None]
+    worth = sm["balance"] + sum(open_pnl)
+    since = f"since {_ms(w['since'])}" if w["since"] else "since paper trading began"
+    pnl = sm["closed_pnl"]
+    return (f'<div class="card"><h3>Paper wallet (fake money)</h3>'
+            f'<p>Balance <b>{sm["balance"]:,.2f} USDT</b><br>'
+            f'<span class="small">Started with {w["start"]:,.2f} USDT {_e(since)} · '
+            f'<span class="{"good" if pnl >= 0 else "bad"}">{pnl:+,.2f}</span> from {sm["trades"]} closed trades</span></p>'
+            '<table>'
+            f'<tr><td>In open positions</td><td>{sm["in_use"]:,.2f}</td></tr>'
+            f'<tr><td>Free to trade</td><td>{sm["free"]:,.2f}</td></tr>'
+            f'<tr><td>Open trades now</td><td class="{"good" if sum(open_pnl) >= 0 else "bad"}">{sum(open_pnl):+,.2f}</td></tr>'
+            f'<tr><td><b>Worth now</b></td><td><b>{worth:,.2f}</b></td></tr></table>'
+            '<p class="small muted">Every paper strategy trades from this one wallet. Each trade risks its '
+            "strategy's share of the balance (about 0.5%), one position is at most half of it, and open "
+            f"positions together never use more than it. A trade under Bybit's {wallet.MIN_ORDER_USDT:g} USDT "
+            "minimum order is skipped.</p>"
+            f'<form method="post" action="/trading/paper/wallet">{csrf}'
+            f'<label>Starting amount (USDT) <input name="amount" type="number" inputmode="decimal" '
+            f'min="{wallet.MIN_START:g}" max="{wallet.MAX_START:g}" step="any" value="{w["start"]:g}" required></label>'
+            '<button class="ghost">Start a new wallet</button>'
+            '<p class="small muted">Sets the balance to this amount from now on. Open positions stay open '
+            'and count in the new wallet when they close.</p></form></div>')
+
+
 def _paper_card(paths: Paths) -> str:
     if not os.path.exists(paths.paper_state):
         return '<div class="card"><h3>Paper trading</h3><p class=muted>Not started.</p></div>'
@@ -781,7 +831,11 @@ def _paper_card(paths: Paths) -> str:
     total = sum(t.get("pnl_usdt", 0) for t in trades)
     week = time.time() * 1000 - 7 * 86_400_000
     recent = [t for t in trades if t.get("exit_ts", 0) >= week]
-    return (f'<div class="card"><h3>Paper trading</h3><p>{len(st.get("open", {}))} open · '
+    from ..learn import wallet
+
+    bal = wallet.balance(st, wallet.load(wallet.wallet_path(paths.paper_state)))
+    return (f'<div class="card"><h3>Paper trading</h3><p>Wallet <b>{bal:,.2f} USDT</b><br>'
+            f'{len(st.get("open", {}))} open · '
             f'{len(trades)} closed<br>P&amp;L {total:+,.2f} USDT · last 7 days {len(recent)} trades, '
             f'{sum(t.get("r", 0) for t in recent):+.2f}R<br>'
             f'{len(st.get("filtered", []))} signals skipped by the AI filter</p></div>')

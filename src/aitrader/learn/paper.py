@@ -5,7 +5,8 @@ position when a strategy signals on the newest bar, and manages open positions w
 fill rules as the backtest (``simulate_signal``): entry at the next bar's open plus slippage,
 stop first, gaps fill at the open, fees on both sides. Results are kept per strategy and checked
 against ``RetireRule``; a strategy whose paper results fall below the bar is retired and takes
-no new trades. When a person has promoted a Phase 4 trade-filter model, each new signal is
+no new trades. Trade sizes follow the paper wallet (``learn.wallet``): the starting amount chosen on
+the Trading page plus every closed trade since. When a person has promoted a Phase 4 trade-filter model, each new signal is
 checked by it first: skipped below its threshold, sized by its confidence above. Each signal
 records the market regime of its bar (``aitrader.market.regime``) so results can be split by it;
 the regime never blocks a paper trade here. When a person has turned on the backtest teacher's
@@ -14,7 +15,7 @@ lessons (``learn.teacher``), a signal in a market situation the strategy lost in
 
 Short signals (the short twins, ``strategies.mirror``) are paper-traded as Bybit USDT perpetual
 shorts: perp fees and funding in the result, isolated margin at ``AITRADER_LEVERAGE`` (only the
-margin counts against the strategy's equity), and a short whose stop is too close to the
+margin counts against the wallet), and a short whose stop is too close to the
 liquidation price is skipped. The AI trade filter learned from long trades, so it doesn't judge
 shorts.
 """
@@ -36,6 +37,7 @@ from ..market.regime import breakdown, classify
 from ..models import TIMEFRAME_MS, Side
 from ..strategies.base import Signal
 from ..trade import futures
+from . import wallet
 from .lab import with_context
 from .registry import Registry, make_strategy
 
@@ -72,6 +74,7 @@ class PaperTrader:
         self.exchanges, self.symbols = exchanges, symbols
         self.cfg = cfg or PaperConfig()
         self.state_path, self.calendar = state_path, calendar
+        self.wallet_path = wallet.wallet_path(state_path)  # the starting amount you chose
         self.ai_filter = ai_filter  # Phase 4 trade filter (aitrader.ai.LiveFilter) or None
         self.control = control  # trade.Control: pause / kill switch, or None
         self.context = context  # market-context filter (funding, open interest...), or None
@@ -307,6 +310,13 @@ class PaperTrader:
                      "skipped": skipped, "detail": detail})
         del log_[:-500]
 
+    def _mark_signal(self, key: str, ts: int, skipped: str, detail: str = "") -> None:
+        """A signal logged as opened that couldn't be filled after all: say why."""
+        for s in reversed(self.state.get("signals", [])):
+            if s.get("key") == key and s.get("ts") == ts:
+                s.update(skipped=skipped, detail=detail)
+                return
+
     def _note_filtered(self, key: str, sig: Signal, ai: dict) -> None:
         skipped = self.state.setdefault("filtered", [])
         skipped.append({"key": key, "signal_ts": sig.ts, "prob": ai["prob"], "version": ai["version"]})
@@ -366,19 +376,23 @@ class PaperTrader:
             equity = self.state["equity"].get(entry_id, self.cfg.start_equity)
             short = sig.side is Side.SELL
             if not pos["filled"]:
+                # sized from the one paper wallet every strategy shares (learn.wallet)
+                bal = wallet.balance(self.state, wallet.load(self.wallet_path))
                 lev = self._lev() if short else 1.0
-                risk_usdt = equity * sig.risk_pct * pos.get("size_mult", 1.0)
+                risk_usdt = bal * sig.risk_pct * pos.get("size_mult", 1.0)
                 units = risk_usdt / abs(sig.entry - sig.stop)
-                units = min(units, equity * self.cfg.max_position_frac / t.entry)
-                # all of a strategy's open positions together may not tie up more than its equity
+                units = min(units, bal * self.cfg.max_position_frac / t.entry)
+                # all open positions together may not tie up more than the wallet
                 # (a spot position ties up what it cost; a perp short only its margin)
-                in_use = sum(o.get("units", 0) * o.get("entry", 0) / o.get("leverage", 1.0)
-                             for k, o in self.state["open"].items()
-                             if k != key and o.get("entry_id") == entry_id and o.get("filled"))
-                units = min(units, max(0.0, equity - in_use) * lev / t.entry)
-                if units <= 0:
+                units = min(units, max(0.0, bal - wallet.in_use(self.state, skip=key)) * lev / t.entry)
+                why = ("the wallet's money is all in open positions" if units <= 0 else
+                       f"below Bybit's {wallet.MIN_ORDER_USDT:g} USDT minimum order"
+                       if units * t.entry < wallet.MIN_ORDER_USDT else "")
+                if why:
                     del self.state["open"][key]
-                    log.info("paper %s skipped: the strategy's equity is all in open positions", key)
+                    self._mark_signal(key, sig.ts, why, f"{max(units, 0) * t.entry:.2f} USDT from a "
+                                      f"{bal:,.2f} USDT wallet")
+                    log.info("paper %s skipped: %s", key, why)
                     continue
                 pos.update(filled=True, entry=t.entry, units=units, entry_ts=t.entry_ts)
                 if short:
@@ -394,6 +408,7 @@ class PaperTrader:
             row = {**_trade_dict(t), "key": key, "entry_id": entry_id, "units": pos["units"],
                    "side": sig.side.value,
                    "pnl_usdt": pnl, "equity_after": equity + pnl,
+                   "wallet_after": wallet.balance(self.state, wallet.load(self.wallet_path)) + pnl,
                    "ai_prob": pos.get("ai_prob"), "ai_version": pos.get("ai_version"),
                    "regime": (pos.get("regime") or {}).get("label")}
             self.state["trades"].append(row)
