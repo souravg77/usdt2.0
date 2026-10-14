@@ -69,6 +69,14 @@ def test_paper_skips_trades_fees_would_eat(tmp_path):
     assert "limit 0.25R" in sigs[0]["detail"] and trader.state["blocked"] == {}
     lp = trader.state["last_pass"]  # what the last pass looked at
     assert lp["strategies"] == 1 and lp["pairs"] == 1 and lp["markets"] == 1 and lp["newest_candle"]
+
+    # a big news event: the block names it, so the page can say which and when
+    from types import SimpleNamespace
+    trader.calendar = SimpleNamespace(refresh=lambda: True, decide=lambda at: SimpleNamespace(
+        allow_entries=False, size_multiplier=0.0, reason="CPI m/m (USD) at 18:00: no new entries before release"))
+    trader.tick(now_ms=int(df.ts.iloc[-1]) + 2 * H)
+    assert trader.state["blocked"]["why"] == ("the economic-calendar filter: CPI m/m (USD) at 18:00: "
+                                              "no new entries before release")
     store.close()
 
 
@@ -91,6 +99,10 @@ def test_trading_page_says_why_no_trade_opened():
     assert "10 strategies on 19 pairs" in _signals_section(paper, now) and "10 min ago" in _signals_section(paper, now)
     paper["last_pass"]["newest_candle"] = now - 4 * 3_600_000  # the collector stopped
     assert "prices are not updating" in _signals_section(paper, now)
+    # while entries are blocked the charts aren't read: that's not a collector problem
+    paper["last_pass"] = {"at": now, "strategies": 10, "pairs": 20, "markets": 0, "newest_candle": None}
+    html = _signals_section(paper, now)
+    assert "collector" not in html and "read again once new entries are allowed" in html
 
 
 def test_top_strategies_ranked_on_the_chosen_timeframe():

@@ -91,8 +91,8 @@ class PaperTrader:
         reg = Registry(self.registry_path)  # re-read: `learn` commands may have changed it
         events = {"opened": [], "closed": [], "retired": [], "filtered": []}
         self._manage_open(reg, now_ms, events)
-        allow, size_mult = self._calendar(now_ms)
-        blocked = "" if allow else "the economic-calendar filter (a big news event)"
+        allow, size_mult, cal_why = self._calendar(now_ms)
+        blocked = "" if allow else f"the economic-calendar filter: {cal_why}"
         # a person's pause or a kill stops paper entries; a live safety halt or loss-cap pause
         # doesn't, so paper keeps collecting the results the go-live gate needs
         if self.control is not None and getattr(self.control, "stops_paper", self.control.paused):
@@ -443,12 +443,14 @@ class PaperTrader:
                 f.status = "retired"
         fresh.save()
 
-    def _calendar(self, now_ms: int) -> tuple[bool, float]:
+    def _calendar(self, now_ms: int) -> tuple[bool, float, str]:
+        """(entries allowed, size multiplier, why), e.g. why = "CPI m/m (USD) at 18:00: no new
+        entries before release"."""
         if self.calendar is None:
-            return True, 1.0
+            return True, 1.0, ""
         self.calendar.refresh()
         d = self.calendar.decide(datetime.fromtimestamp(now_ms / 1000, timezone.utc))
-        return d.allow_entries, d.size_multiplier
+        return d.allow_entries, d.size_multiplier, d.reason
 
     def save(self) -> None:
         os.makedirs(os.path.dirname(os.path.abspath(self.state_path)), exist_ok=True)

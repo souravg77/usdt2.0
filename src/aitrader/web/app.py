@@ -907,7 +907,10 @@ def _signals_section(paper: dict, now_ms: int, limit: int = 15) -> str:
     blocked = (paper.get("blocked") or {}).get("why")
     head = (f'<p class="bad">New paper entries are blocked right now by {_e(blocked)}.</p>' if blocked else "")
     lp = paper.get("last_pass") or {}
-    if lp:
+    if lp and blocked and not lp.get("markets"):  # a blocked pass doesn't read the charts
+        head += (f'<p class="small muted">Last check {_ms(lp.get("at"))}: {lp.get("strategies", 0)} strategies '
+                 f'on {lp.get("pairs", 0)} pairs; the charts are read again once new entries are allowed.</p>')
+    elif lp:
         age = (now_ms - lp["newest_candle"]) / 60_000 if lp.get("newest_candle") else None
         stale = age is None or age > 90
         head += (f'<p class="small {"bad" if stale or not lp.get("strategies") else "muted"}">Last check '
