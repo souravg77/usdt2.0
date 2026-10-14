@@ -64,7 +64,27 @@ def test_paper_skips_trades_fees_would_eat(tmp_path):
         assert not ev["opened"]
         filtered += ev["filtered"]
     assert filtered and trader.state["open"] == {}
+    sigs = trader.state["signals"]  # every signal and why it was skipped, for the Trading page
+    assert len(sigs) == len(filtered) and all(x["skipped"] == "fees too high for the stop" for x in sigs)
+    assert "limit 0.25R" in sigs[0]["detail"] and trader.state["blocked"] == {}
     store.close()
+
+
+def test_trading_page_says_why_no_trade_opened():
+    from aitrader.web.app import _signals_section
+
+    now = 1_800_000_000_000
+    assert "No strategy gave a signal in the last 24 hours" in _signals_section({}, now)
+    paper = {"blocked": {"why": "a pause or the kill switch"},
+             "signals": [{"ts": now - 90_000_000, "key": "old|bybit|BTC/USDT|1h", "skipped": ""},  # over a day ago
+                         {"ts": now - 3_600_000, "key": "a|bybit|BTC/USDT|1h", "side": "buy", "entry": 100,
+                          "stop": 99.5, "skipped": "fees too high for the stop", "detail": "0.60R of the risk"},
+                         {"ts": now - 1_800_000, "key": "b|bybit|ETH/USDT|4h", "side": "sell", "entry": 10,
+                          "stop": 10.5, "skipped": ""}]}
+    html = _signals_section(paper, now)
+    assert "blocked right now by a pause or the kill switch" in html
+    assert "<b>2</b> signals" in html and ">1</b> opened" in html and "fees too high for the stop: 1" in html
+    assert "0.60R of the risk" in html and "old" not in html
 
 
 def test_top_strategies_ranked_on_the_chosen_timeframe():
