@@ -905,6 +905,18 @@ def _signals_section(paper: dict, now_ms: int, limit: int = 15) -> str:
     day = [s for s in paper.get("signals", []) if s.get("ts", 0) >= now_ms - 86_400_000]
     blocked = (paper.get("blocked") or {}).get("why")
     head = (f'<p class="bad">New paper entries are blocked right now by {_e(blocked)}.</p>' if blocked else "")
+    lp = paper.get("last_pass") or {}
+    if lp:
+        age = (now_ms - lp["newest_candle"]) / 60_000 if lp.get("newest_candle") else None
+        stale = age is None or age > 90
+        head += (f'<p class="small {"bad" if stale or not lp.get("strategies") else "muted"}">Last check '
+                 f'{_ms(lp.get("at"))}: {lp.get("strategies", 0)} strategies on {lp.get("pairs", 0)} pairs '
+                 f'({lp.get("markets", 0)} pair/timeframe charts)'
+                 + (f', {lp["broken"]} could not be built' if lp.get("broken") else "")
+                 + (", <b>no candles found</b>: is the collector running?" if age is None else
+                    f", newest candle closed {age:.0f} min ago" + (" (<b>prices are not updating</b>: check the "
+                                                                    "collector)" if stale else ""))
+                 + ".</p>")
     if not day:
         return head + ('<p class="muted">No strategy gave a signal in the last 24 hours. A strategy signals only '
                        "when its rules match on a candle that has just closed; a quiet market can mean hours "

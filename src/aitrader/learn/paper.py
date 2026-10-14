@@ -101,12 +101,15 @@ class PaperTrader:
         frames: dict = {}  # (exchange, symbol, timeframe) -> (frame, newest close, new candle since last tick)
         regimes: dict = {}  # (exchange, symbol, timeframe) -> regime of the newest closed bar
         symbols = self._symbols()
+        built, broken, checks = 0, 0, 0  # what this pass looked at, for the dashboard
         for entry in reg.with_status("paper"):
             try:
                 strat = make_strategy(entry)
             except Exception:  # one broken strategy must not stop the others
                 log.exception("can't build %s; skipping it", entry.id)
+                broken += 1
                 continue
+            built += 1
             for ex in self.exchanges:
                 for sym in symbols:
                     for tf in strat.spec.timeframes:
@@ -122,6 +125,7 @@ class PaperTrader:
                         # signals only appear when a candle closes: skip markets with no new candle
                         if not fresh or df is None or len(df) < MIN_BARS:
                             continue
+                        checks += 1
                         try:
                             sdf = with_context(strat, df, self.store, ex, sym, tf)
                             sigs = [s for s in strat.generate(sdf, ex, sym, tf) if s.ts == newest_close]
@@ -178,6 +182,13 @@ class PaperTrader:
                                  sig.entry, sig.stop, ai["prob"], ai["size"], (regimes[market] or {}).get("label"))
         for market, (_df, close, _fresh) in frames.items():
             self._seen[market] = close
+        newest = max((c for _d, c, _f in frames.values() if c), default=None)
+        self.state["last_pass"] = {"at": now_ms, "strategies": built, "broken": broken, "pairs": len(symbols),
+                                   "markets": len(frames), "new_candles": sum(1 for *_x, f in frames.values() if f),
+                                   "checks": checks, "newest_candle": newest}
+        if checks:
+            log.info("paper pass: %d strategies checked %d new candles (%d markets), %d opened, %d skipped",
+                     built, checks, len(frames), len(events["opened"]), len(events["filtered"]))
         self._score(reg, events)
         self._save_registry(reg, events["retired"])
         self.save()
