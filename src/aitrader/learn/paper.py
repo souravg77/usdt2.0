@@ -92,19 +92,24 @@ class PaperTrader:
         events = {"opened": [], "closed": [], "retired": [], "filtered": []}
         self._manage_open(reg, now_ms, events)
         allow, size_mult = self._calendar(now_ms)
+        blocked = "" if allow else "the economic-calendar filter (a big news event)"
         # a person's pause or a kill stops paper entries; a live safety halt or loss-cap pause
         # doesn't, so paper keeps collecting the results the go-live gate needs
         if self.control is not None and getattr(self.control, "stops_paper", self.control.paused):
-            allow = False
+            allow, blocked = False, "a pause or the kill switch"
+        self.state["blocked"] = {"why": blocked, "at": now_ms} if blocked else {}
         frames: dict = {}  # (exchange, symbol, timeframe) -> (frame, newest close, new candle since last tick)
         regimes: dict = {}  # (exchange, symbol, timeframe) -> regime of the newest closed bar
         symbols = self._symbols()
+        built, broken, checks = 0, 0, 0  # what this pass looked at, for the dashboard
         for entry in reg.with_status("paper"):
             try:
                 strat = make_strategy(entry)
             except Exception:  # one broken strategy must not stop the others
                 log.exception("can't build %s; skipping it", entry.id)
+                broken += 1
                 continue
+            built += 1
             for ex in self.exchanges:
                 for sym in symbols:
                     for tf in strat.spec.timeframes:
@@ -120,6 +125,7 @@ class PaperTrader:
                         # signals only appear when a candle closes: skip markets with no new candle
                         if not fresh or df is None or len(df) < MIN_BARS:
                             continue
+                        checks += 1
                         try:
                             sdf = with_context(strat, df, self.store, ex, sym, tf)
                             sigs = [s for s in strat.generate(sdf, ex, sym, tf) if s.ts == newest_close]
@@ -131,26 +137,33 @@ class PaperTrader:
                         sig = sigs[-1]
                         self.state["last_signal"][key] = sig.ts
                         if sig.side is Side.SELL and not futures.short_stop_ok(sig.entry, sig.stop, self._lev()):
+                            self._log_signal(key, sig, "stop too close to liquidation")
                             events["filtered"].append(key)
                             log.info("paper short %s skipped: stop %.6g too close to liquidation at %gx",
                                      key, sig.stop, self._lev())
                             continue
                         if too_costly(sig, self.cfg.backtest):  # fees would eat too much of the risk
+                            self._log_signal(key, sig, "fees too high for the stop",
+                                             f"fees and slippage {cost_r(sig, self.cfg.backtest):.2f}R of the risk, "
+                                             f"limit {self.cfg.backtest.max_cost_r:.2f}R")
                             events["filtered"].append(key)
                             log.info("paper signal %s skipped: fees and slippage are %.2fR of the risk "
                                      "(limit %.2fR)", key, cost_r(sig, self.cfg.backtest), self.cfg.backtest.max_cost_r)
                             continue
                         ctx_mult = self._context(ex, sym, now_ms)
                         if ctx_mult <= 0:
+                            self._log_signal(key, sig, "market context or news filter")
                             events["filtered"].append(key)
                             continue
                         ai = self._ai_check(sig, entry.id, df)
                         if not ai["take"]:
                             self._note_filtered(key, sig, ai)
+                            self._log_signal(key, sig, "AI filter")
                             events["filtered"].append(key)
                             continue
                         tch = self._teacher_check(sig, entry.id, df)
                         if not tch["take"]:
+                            self._log_signal(key, sig, "backtest teacher")
                             events["filtered"].append(key)
                             log.info("paper signal %s skipped: the backtest teacher %s says avoid %s",
                                      key, tch["version"], tch["situation"])
@@ -164,10 +177,18 @@ class PaperTrader:
                                                    "ai_prob": ai["prob"], "ai_version": ai["version"],
                                                    "regime": regimes[market]}
                         events["opened"].append(key)
+                        self._log_signal(key, sig, "")
                         log.info("paper signal %s entry~%.6g stop %.6g ai p=%s size x%.2f regime %s", key,
                                  sig.entry, sig.stop, ai["prob"], ai["size"], (regimes[market] or {}).get("label"))
         for market, (_df, close, _fresh) in frames.items():
             self._seen[market] = close
+        newest = max((c for _d, c, _f in frames.values() if c), default=None)
+        self.state["last_pass"] = {"at": now_ms, "strategies": built, "broken": broken, "pairs": len(symbols),
+                                   "markets": len(frames), "new_candles": sum(1 for *_x, f in frames.values() if f),
+                                   "checks": checks, "newest_candle": newest}
+        if checks:
+            log.info("paper pass: %d strategies checked %d new candles (%d markets), %d opened, %d skipped",
+                     built, checks, len(frames), len(events["opened"]), len(events["filtered"]))
         self._score(reg, events)
         self._save_registry(reg, events["retired"])
         self.save()
@@ -277,6 +298,14 @@ class PaperTrader:
         except Exception:  # broken lessons must not stop paper trading; take the signal as is
             log.exception("backtest teacher failed on %s; taking the signal as is", entry_id)
             return passthrough
+
+    def _log_signal(self, key: str, sig: Signal, skipped: str, detail: str = "") -> None:
+        """Every signal and what became of it (``skipped`` says why; empty means opened), so the
+        dashboard can say why no trade opened."""
+        log_ = self.state.setdefault("signals", [])
+        log_.append({"ts": sig.ts, "key": key, "side": sig.side.value, "entry": sig.entry, "stop": sig.stop,
+                     "skipped": skipped, "detail": detail})
+        del log_[:-500]
 
     def _note_filtered(self, key: str, sig: Signal, ai: dict) -> None:
         skipped = self.state.setdefault("filtered", [])

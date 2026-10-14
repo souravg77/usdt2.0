@@ -407,6 +407,7 @@ paper trading. Nothing trades real money.</p>
                  '<button class="warn-btn">Close all open positions</button></form>'
                  if (paper.get("open") if isinstance(paper, dict) else None) else ""),
                 _positions_table(paper, execs),
+                "<h2>Signals</h2>", _signals_section(paper, int(time.time() * 1000)),
                 "<h2>Trade log</h2>", _trades_table(paper, execs),
                 "<h2>Events</h2>", _events_table(events)]
         body.append('<script src="/static/positions.js" defer></script>')
@@ -898,6 +899,47 @@ def _short(side) -> str:
 
 def _prob(p) -> str:
     return "-" if p is None else f"{p:.2f}"
+
+
+def _signals_section(paper: dict, now_ms: int, limit: int = 15) -> str:
+    """Why trades open or don't: every paper signal of the last 24 hours and what became of it."""
+    day = [s for s in paper.get("signals", []) if s.get("ts", 0) >= now_ms - 86_400_000]
+    blocked = (paper.get("blocked") or {}).get("why")
+    head = (f'<p class="bad">New paper entries are blocked right now by {_e(blocked)}.</p>' if blocked else "")
+    lp = paper.get("last_pass") or {}
+    if lp:
+        age = (now_ms - lp["newest_candle"]) / 60_000 if lp.get("newest_candle") else None
+        stale = age is None or age > 90
+        head += (f'<p class="small {"bad" if stale or not lp.get("strategies") else "muted"}">Last check '
+                 f'{_ms(lp.get("at"))}: {lp.get("strategies", 0)} strategies on {lp.get("pairs", 0)} pairs '
+                 f'({lp.get("markets", 0)} pair/timeframe charts)'
+                 + (f', {lp["broken"]} could not be built' if lp.get("broken") else "")
+                 + (", <b>no candles found</b>: is the collector running?" if age is None else
+                    f", newest candle closed {age:.0f} min ago" + (" (<b>prices are not updating</b>: check the "
+                                                                    "collector)" if stale else ""))
+                 + ".</p>")
+    if not day:
+        return head + ('<p class="muted">No strategy gave a signal in the last 24 hours. A strategy signals only '
+                       "when its rules match on a candle that has just closed; a quiet market can mean hours "
+                       "without one.</p>")
+    opened = sum(1 for s in day if not s.get("skipped"))
+    why: dict[str, int] = {}
+    for s in day:
+        if s.get("skipped"):
+            why[s["skipped"]] = why.get(s["skipped"], 0) + 1
+    parts = ", ".join(f"{k}: {n}" for k, n in sorted(why.items(), key=lambda kv: -kv[1]))
+    summary = (f"<p>Last 24 hours: <b>{len(day)}</b> signals, <b class=\"good\">{opened}</b> opened"
+               + (f", <b class=\"warn\">{len(day) - opened}</b> skipped ({_e(parts)})" if why else "") + ".</p>")
+    rows = []
+    for s in reversed(day[-limit:]):
+        _sid, _ex, sym, tf = (s.get("key", "").split("|") + ["", "", "", ""])[:4]
+        rows.append(f"<tr><td>{_ms(s.get('ts'))}</td><td>{_e(sym)} {_e(tf)}{_short(s.get('side'))}</td>"
+                    f"<td class=small>{_e(_sid)}</td><td>{s.get('entry', 0):.6g} / {s.get('stop', 0):.6g}</td>"
+                    f'<td class="small {"good" if not s.get("skipped") else "warn"}">'
+                    f'{_e(s.get("skipped") or "opened")}'
+                    f'{"<br>" + _e(s["detail"]) if s.get("detail") else ""}</td></tr>')
+    return (head + summary + "<table><tr><th>Signal</th><th>Market</th><th>Strategy</th><th>Entry / stop</th>"
+            f"<th>What happened</th></tr>{''.join(rows)}</table>")
 
 
 def _trades_table(paper: dict, execs: dict, limit: int = 40) -> str:
