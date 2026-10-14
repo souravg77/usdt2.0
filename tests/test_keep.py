@@ -139,3 +139,16 @@ def test_keep_top_keeps_places_for_each_timeframe(tmp_path):
     # with no per-timeframe places it's the plain ranking again
     out = keep_top(reg, 10, per_tf=0)
     assert all(k["id"].startswith("slow") for k in out["kept"])
+
+
+def test_timeframe_places_need_a_positive_result_overall_and_leave_half_to_the_best(tmp_path):
+    good = [on_tfs(entry(f"g{i}", trades=100, exp=0.5 + i / 100), **{"4h": (100, 0.5)}) for i in range(10)]
+    # good on 5m alone but losing overall: the paper trader would trade its losing 1h too
+    mixed = on_tfs(entry("mixed", trades=300, exp=-0.3), **{"5m": (100, 0.4), "1h": (200, -0.65)})
+    fast = [on_tfs(entry(f"{tf}_ok", trades=100, exp=0.05), **{tf: (100, 0.05)})
+            for tf in ("1m", "5m", "15m", "30m", "1h")]
+    reg = make(tmp_path, *good, mixed, *fast)
+    kept = {k["id"]: k for k in keep_top(reg, 10)["kept"]}
+    assert "mixed" not in kept
+    assert sum(k["why"].startswith("best on") for k in kept.values()) <= 5  # at most half of the 10
+    assert {"g9", "g8", "g7", "g6", "g5"} <= set(kept)
