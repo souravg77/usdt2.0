@@ -96,6 +96,12 @@ class CandleStore:
             "SELECT ts FROM candles WHERE exchange=? AND symbol=? AND timeframe=? AND ts>=? AND ts<=? "
             "ORDER BY ts", (exchange, symbol, timeframe, start, end))]
 
+    def count(self, exchange: str, symbol: str, timeframe: str, start: int, end: int) -> int:
+        """How many candles are stored in ``[start, end)``."""
+        return self.conn.execute(
+            "SELECT COUNT(*) FROM candles WHERE exchange=? AND symbol=? AND timeframe=? AND ts>=? AND ts<?",
+            (exchange, symbol, timeframe, start, end)).fetchone()[0]
+
     def last_ts(self, exchange: str, symbol: str, timeframe: str) -> int | None:
         row = self.conn.execute(
             "SELECT MAX(ts) FROM candles WHERE exchange=? AND symbol=? AND timeframe=?",

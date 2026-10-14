@@ -8,7 +8,9 @@ buy and short as its candle appears, reads the market at the current candle in p
 keeps a live win-rate table per strategy. Nothing on the chart looks past the current candle.
 
 Prices come from the database. A month that hasn't been downloaded yet can be fetched from
-Bybit with one button (a ``download`` job).
+Bybit with one button (a ``download`` job). While it runs, the page shows a bar with how many of
+the period's candles are saved so far (``/api/replay/download/<job>``) and loads the replay by
+itself when the download ends.
 """
 
 from __future__ import annotations
@@ -82,6 +84,21 @@ def _month(text: str) -> datetime | None:
         return datetime.strptime(text, "%Y-%m").replace(tzinfo=timezone.utc)
     except (TypeError, ValueError):
         return None
+
+
+def _day_ms(day: str) -> int:
+    """Midnight UTC of a YYYY-MM-DD date, as the ``download`` command reads it."""
+    return int(datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp() * 1000)
+
+
+def download_status(status: str, have: int, since_ms: int, until_ms: int, tf: str, error: str = "",
+                    ahead: str = "") -> dict:
+    """How far a download job has got: the share of the period's candles already saved. Bybit can
+    have gaps (or a pair listed later), so only a finished job counts as 100%."""
+    want = max(1, (until_ms - since_ms) // TIMEFRAME_MS[tf])
+    done = status == "done"
+    pct = 100 if done else min(99, int(have * 100 / want))
+    return {"status": status, "have": have, "want": want, "pct": pct, "error": error, "ahead": ahead}
 
 
 def _add_months(d: datetime, n: int) -> datetime:
@@ -198,16 +215,40 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
         if symbol not in symbols or tf not in REPLAY_TIMEFRAMES or start is None:
             return RedirectResponse("/replay?error=" + _q("pick a pair, a timeframe and a month"), status_code=303)
         months = min(max(int(months or 1), 1), 3)
-        since = start - timedelta(milliseconds=WARMUP_BARS * TIMEFRAME_MS[tf])
-        until = min(_add_months(start, months), datetime.now(timezone.utc))
-        jobs.submit(f"Download {symbol} {tf} for {month}",
-                    [["download", "--since", since.strftime("%Y-%m-%d"), "--until", until.strftime("%Y-%m-%d"),
-                      "--exchange", exchange, "--symbol", symbol, "--timeframe", tf]],
-                    meta={"kind": "download", "by": user})
+        since = (start - timedelta(milliseconds=WARMUP_BARS * TIMEFRAME_MS[tf])).strftime("%Y-%m-%d")
+        until = min(_add_months(start, months), datetime.now(timezone.utc)).strftime("%Y-%m-%d")
+        job_id = jobs.submit(f"Download {symbol} {tf} for {month}",
+                             [["download", "--since", since, "--until", until,
+                               "--exchange", exchange, "--symbol", symbol, "--timeframe", tf]],
+                             meta={"kind": "download", "by": user, "symbol": symbol, "tf": tf,
+                                   "since_ms": _day_ms(since), "until_ms": _day_ms(until)})
         cache.clear()
         q = f"symbol={_q(symbol)}&tf={_q(tf)}&month={_q(month)}&months={months}"
-        return RedirectResponse(f"/replay?{q}&msg=" + _q("Downloading those prices from Bybit. Press Load "
-                                                         "again in a minute."), status_code=303)
+        return RedirectResponse(f"/replay?{q}&download={job_id}", status_code=303)
+
+    @app.get("/api/replay/download/{job_id}")
+    def download_progress(request: Request, job_id: str):
+        _user, _token, redirect = guard(request)
+        if redirect:
+            return JSONResponse({"error": "sign in"}, status_code=401)
+        try:
+            job = jobs.get(job_id)
+        except (OSError, ValueError, KeyError):
+            return JSONResponse({"error": "no such download"}, status_code=404)
+        meta = job.get("meta", {})
+        if meta.get("kind") != "download" or "since_ms" not in meta:
+            return JSONResponse({"error": "no such download"}, status_code=404)
+        ahead = ""
+        if job["status"] == "queued":
+            running = [j for j in jobs.list() if j["status"] == "running"]
+            ahead = running[0]["title"] if running else ""
+        store = CandleStore(settings.db_path)
+        try:
+            have = store.count(exchange, meta["symbol"], meta["tf"], meta["since_ms"], meta["until_ms"])
+        finally:
+            store.close()
+        return JSONResponse(download_status(job["status"], have, meta["since_ms"], meta["until_ms"],
+                                            meta["tf"], job.get("error", ""), ahead))
 
     @app.get("/replay")
     def replay_page(request: Request, symbol: str = "", tf: str = "1h", month: str = "", months: int = 1,
@@ -245,6 +286,9 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
             f'<form id="replay-download" method="post" action="/replay/download" class="row hidden">{_csrf(auth, token)}'
             '<input type="hidden" name="symbol"><input type="hidden" name="tf"><input type="hidden" name="month">'
             '<input type="hidden" name="months"><button>Download these prices from Bybit</button></form>'
+            '<div id="replay-progress" class="card hidden" role="status" aria-live="polite">'
+            '<p id="progress-text" class="small"></p>'
+            '<div class="bar progress"><span id="progress-fill" style="width:0%"></span></div></div>'
             '<div class="card chart-card"><div class="chart-head"><h2 id="chart-title">Replay</h2>'
             f'<div class="segs" id="speeds">{speeds}</div></div>'
             '<div class="row replay-controls"><button type="button" id="play" disabled>Play</button>'
