@@ -80,6 +80,24 @@ def test_replay_api_and_page(client):
     job = [j for j in runner.list() if j["meta"].get("kind") == "download"][0]
     assert job["steps"] == [["download", "--since", "2025-02-16", "--until", "2025-04-01", "--exchange", "bybit",
                              "--symbol", "ETH/USDT", "--timeframe", "1h"]]
+    assert d.headers["location"].endswith("&download=" + job["id"])
+    runner.wait_idle()
+    p = c.get(f"/api/replay/download/{job['id']}").json()
+    assert p["status"] == "done" and p["pct"] == 100 and p["have"] == 0 and p["want"] == 44 * 24
+    assert c.get("/api/replay/download/nosuchjob").status_code == 404
+    assert 'id="replay-progress"' in c.get("/replay").text
+
+
+def test_download_status_counts_saved_candles(tmp_path):
+    from aitrader.web.replay_pages import download_status
+
+    s = download_status("running", 372, START, END, "1h")
+    assert s["want"] == 744 and s["pct"] == 50
+    assert download_status("running", 744, START, END, "1h")["pct"] == 99  # 100 only once the job ends
+    assert download_status("done", 700, START, END, "1h")["pct"] == 100
+    store = make_store(tmp_path / "c.db")
+    assert store.count("bybit", "BTC/USDT", "1h", START, END) == 744
+    store.close()
 
 
 RSI_UP = dict(EVERY_UP_BAR, name="rsi_up", entry=[{"left": "close", "op": ">", "right": "open"},

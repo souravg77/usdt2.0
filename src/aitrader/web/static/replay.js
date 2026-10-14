@@ -11,6 +11,9 @@
   var form = document.getElementById("replay-form");
   var dlForm = document.getElementById("replay-download");
   var msgEl = document.getElementById("replay-msg");
+  var progEl = document.getElementById("replay-progress");
+  var progText = document.getElementById("progress-text");
+  var progFill = document.getElementById("progress-fill");
   var canvas = document.getElementById("chart");
   var ctx = canvas.getContext("2d");
   var ohlcEl = document.getElementById("ohlc");
@@ -63,6 +66,8 @@
     msgEl.textContent = "Running the strategies over that period…";
     usedEl.textContent = "";
     dlForm.classList.add("hidden");
+    progEl.classList.add("hidden");
+    S.dl = null;  // stop watching a download
     setEnabled(false);
     fetch("/api/replay?" + p.toString(), { credentials: "same-origin" }).then(function (res) {
       if (res.status === 401) { location.href = "/login"; return null; }
@@ -95,6 +100,49 @@
       showUsed(d);
       update();
     }).catch(function (e) { msgEl.textContent = "Couldn't reach the server."; if (window.console) console.error(e); });
+  }
+
+  // ---- download progress ----------------------------------------------------------------------
+  // After "Download these prices", the page polls the job: the share of the period's candles saved
+  // so far fills the bar, and the replay loads by itself when the download ends.
+  function watchDownload(jobId) {
+    S.dl = jobId;
+    progEl.classList.remove("hidden");
+    dlForm.classList.add("hidden");
+    msgEl.textContent = "";
+    progText.textContent = "Starting the download from Bybit…";
+    function poll() {
+      fetch("/api/replay/download/" + encodeURIComponent(jobId), { credentials: "same-origin" }).then(function (res) {
+        if (res.status === 401) { location.href = "/login"; return null; }
+        return res.json().then(function (j) { return { ok: res.ok, j: j }; });
+      }).then(function (x) {
+        if (!x || S.dl !== jobId) return;
+        if (!x.ok) { progText.textContent = x.j.error || "Couldn't read the download."; return; }
+        var d = x.j;
+        progFill.style.width = d.pct + "%";
+        var counts = d.have.toLocaleString("en-US") + " of about " + d.want.toLocaleString("en-US") + " candles";
+        if (d.status === "queued") {
+          progText.textContent = "Waiting: another job is running first" + (d.ahead ? " (" + d.ahead + ")" : "") + ". " + counts + " saved.";
+        } else if (d.status === "running") {
+          progText.innerHTML = "<b>Downloading from Bybit: " + d.pct + "%</b> · " + esc(counts) + " saved.";
+        } else if (d.status === "done") {
+          progText.innerHTML = "<b>Download complete: 100%</b> · " + esc(counts) + " saved. Loading the replay…";
+          var p = new URLSearchParams(location.search); p.delete("download");
+          history.replaceState(null, "", "/replay?" + p.toString());
+          setTimeout(function () { progEl.classList.add("hidden"); load(); }, 800);
+          return;
+        } else {
+          progFill.style.width = "0%";
+          progText.textContent = "The download failed" + (d.error ? ": " + d.error : "") + ". Press Load to try again.";
+          return;
+        }
+        setTimeout(poll, 2000);
+      }).catch(function () {
+        if (S.dl !== jobId) return;
+        progText.textContent = "Lost the server; retrying…"; setTimeout(poll, 4000);
+      });
+    }
+    poll();
   }
 
   // switch on the indicators the loaded strategies use, with how many use each on its switch
@@ -376,5 +424,7 @@
   canvas.addEventListener("mouseleave", function () { if (Date.now() - touchedAt < 1500) return; S.hover = null; draw(); });
   window.addEventListener("resize", resize);
   resize();
-  if (new URLSearchParams(location.search).get("month")) load();
+  var dlJob = new URLSearchParams(location.search).get("download");
+  if (dlJob) watchDownload(dlJob);
+  else if (new URLSearchParams(location.search).get("month")) load();
 })();
