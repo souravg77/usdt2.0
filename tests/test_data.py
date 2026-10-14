@@ -216,3 +216,16 @@ async def test_a_hole_the_exchange_has_nothing_for_is_not_asked_every_minute(fak
     calls.clear()
     await download(adapter, store, "BTC/USDT", "1m", 0, 10 * 60_000)
     assert calls == [9 * 60_000]  # not again right away
+
+
+async def test_download_fetches_an_old_month_page_by_page(fake_ccxt):
+    """Bybit answers a kline request that has only a start with its newest bars, so a past month
+    came back empty; each page must ask for its own start-to-end window."""
+    import aitrader.data.downloader as dl
+
+    raw = [[i * 60_000, 1, 2, 0.5, 1.5, 1] for i in range(5000)]
+    adapter = BybitAdapter(Settings(), client=fake_ccxt(raw), throttle=Throttle(1000, 1000))
+    store = CandleStore(":memory:")
+    dl._tried.clear()
+    n = await download(adapter, store, "BTC/USDT", "1m", 100 * 60_000, 2600 * 60_000)
+    assert n == 2500 and store.count("bybit", "BTC/USDT", "1m", 0, 10**12) == 2500

@@ -12,9 +12,14 @@ class FakeCcxt:
         self.orders = []
         self.closed = False
 
-    async def fetch_ohlcv(self, symbol, timeframe, since=None, limit=None):
-        rows = [r for r in self.ohlcv if since is None or r[0] >= since]
-        return rows[:limit] if limit else rows
+    async def fetch_ohlcv(self, symbol, timeframe, since=None, limit=None, params=None):
+        # like Bybit's kline endpoint: without an end ("until") it answers with the newest
+        # ``limit`` bars at or after ``since``, not the ones starting at ``since``
+        until = (params or {}).get("until")
+        rows = [r for r in self.ohlcv if (since is None or r[0] >= since) and (until is None or r[0] <= until)]
+        if not limit:
+            return rows
+        return rows[:limit] if until is not None else rows[-limit:]
 
     async def fetch_order_book(self, symbol, limit=None):
         return self.book
