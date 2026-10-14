@@ -135,7 +135,7 @@ def test_trading_page_and_controls(web):
     os.makedirs("data/trade", exist_ok=True)
     key = "s1|bybit|BTC/USDT|1h"
     with open(paths.paper_state, "w") as fh:
-        json.dump({"open": {key: {"entry_id": "s1", "filled": True, "entry": 100.0, "mark_r": 0.4, "ai_prob": 0.66,
+        json.dump({"open": {key: {"entry_id": "s1", "filled": True, "entry": 100.0, "mark_r": 0.4, "mark": 102.0, "ai_prob": 0.66,
                                   "units": 2.0, "signal": {"ts": 1, "entry": 100.0, "stop": 95.0}}},
                    "trades": [{"key": key, "entry_id": "s1", "symbol": "BTC/USDT", "exit_ts": 1_760_000_000_000,
                                "entry": 100, "exit": 105, "r": 1.0, "pnl_usdt": 50, "exit_reason": "target",
@@ -155,6 +155,7 @@ def test_trading_page_and_controls(web):
         assert text in r.text, text
     assert "Now USDT" in r.text and "+4.00" in r.text and "+0.95" in r.text  # 0.4R x 5 x 2; 102 x 0.5 - 50.05
     assert "<b>+4.95</b>" in r.text  # the total of the open positions
+    assert '>102</td>' in r.text and "95 <span" in r.text and "6.86% away" in r.text  # (102 - 95) / 102
     assert 'data-reload-ms="60000"' in r.text and '<noscript><meta http-equiv="refresh" content="60">' in r.text
     js = client.get("/static/reload.js")  # a file, not inline: the page's security policy blocks inline scripts
     assert js.status_code == 200 and "activeElement" in js.text and "<script>" not in r.text
@@ -519,10 +520,18 @@ def test_open_positions_follow_the_live_price(tmp_path, monkeypatch):
                          "paper|b|bybit|ETH/USDT|4h": 6.0,  # short: (50 - 48) x 3
                          "live|k": 1.4}  # 103 x 0.5 - 50.1
     assert r["total"] == 13.4
+    assert r["prices"] == {"paper|a|bybit|BTC/USDT|1h": 103.0, "paper|b|bybit|ETH/USDT|4h": 48.0, "live|k": 103.0}
     page = client.get("/trading").text
+    # the price now and the stop loss with how far away it is, for longs and shorts
+    for cell in ("<th>Price now</th>", "<th>Stop loss</th>", 'data-px="paper|a|bybit|BTC/USDT|1h"',
+                 'data-stop="paper|b|bybit|ETH/USDT|4h" data-level="52" data-short="1"'):
+        assert cell in page, cell
     for cell in ('data-pos="paper|a|bybit|BTC/USDT|1h"', 'data-pos="live|k"', 'data-pos="total"',
                  '<script src="/static/positions.js" defer></script>'):
         assert cell in page, cell
     js = client.get("/static/positions.js")
     assert js.status_code == 200 and "/api/positions" in js.text
     assert live_position_usdt(paper, {}, {})["rows"] == {}  # no price: cells keep what they showed
+    from aitrader.web.app import stop_distance
+    assert stop_distance(100.0, 95.0, "buy") == 5.0 and stop_distance(48.0, 52.0, "sell") == 100 * 4 / 48
+    assert stop_distance(94.0, 95.0, "buy") < 0 and stop_distance(None, 95.0, "buy") is None

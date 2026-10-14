@@ -1,6 +1,6 @@
-// Trading page: the Open positions "Now USDT" column follows the live price. Every 1.5 seconds it
-// asks /api/positions (Bybit's public prices, cached ~1s on the server, the same feed as the
-// Markets page) and rewrites each cell and the total. Display only: it never trades.
+// Trading page: the Open positions "Now USDT", "Price now" and "Stop loss" columns follow the live
+// price. Every 1.5 seconds it asks /api/positions (Bybit's public prices, cached ~1s on the server,
+// the same feed as the Markets page) and rewrites each cell and the total. Display only: it never trades.
 (function () {
   "use strict";
   var cells = document.querySelectorAll("td[data-pos]");
@@ -13,6 +13,19 @@
     var text = (x >= 0 ? "+" : "") + x.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     td.className = x >= 0 ? "good" : "bad";
     td.innerHTML = bold ? "<b>" + text + "</b>" : text;
+  }
+
+  function fmt(x) { return Number(x.toPrecision(6)).toString(); }
+
+  function showPrice(k, px) {
+    var td = document.querySelector('td[data-px="' + k + '"]');
+    if (td) td.textContent = fmt(px);
+    var st = document.querySelector('td[data-stop="' + k + '"]');
+    if (!st) return;
+    var stop = parseFloat(st.getAttribute("data-level"));
+    var gap = st.getAttribute("data-short") ? stop - px : px - stop;
+    var pct = 100 * gap / px;
+    st.innerHTML = fmt(stop) + ' <span class="small ' + (pct > 0 ? "muted" : "bad") + '">' + pct.toFixed(2) + "% away</span>";
   }
 
   function poll() {
@@ -28,6 +41,7 @@
           if (k === "total") show(td, res.total, true);
           else if (res.rows && k in res.rows) show(td, res.rows[k], false);
         });
+        Object.keys(res.prices || {}).forEach(function (k) { showPrice(k, res.prices[k]); });
         source = res.source || "";
         lastOk = Date.now();
       })

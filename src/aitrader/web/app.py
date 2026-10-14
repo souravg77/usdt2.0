@@ -808,28 +808,52 @@ def _positions_table(paper: dict, execs: dict) -> str:
         usdt = _paper_usdt(p)
         if usdt is not None:
             total, counted = total + usdt, counted + 1
-        # the money columns come first so a phone shows them without scrolling sideways
+        # the money and price columns come first so a phone shows them without scrolling sideways
+        pid = "paper|" + key
         rows.append(f"<tr><td>paper</td><td>{_e(sym)}{_short(sig.get('side'))} <span class=muted>{_e(ex)} {_e(tf)}</span></td>"
-                    f"{_usdt_cell(usdt, pos_id='paper|' + key)}<td>{'' if mark is None else f'{mark:+.2f}R'}</td>"
+                    f"{_usdt_cell(usdt, pos_id=pid)}"
+                    f"{_price_cells(pid, p.get('mark') if p.get('filled') else None, sig.get('stop', 0), sig.get('side'))}"
+                    f"<td>{'' if mark is None else f'{mark:+.2f}R'}</td>"
                     f"<td>{_e(entry_id)}</td><td>{p.get('entry', sig.get('entry', 0)):.6g}"
                     f"{'' if p.get('filled') else ' <span class=muted>(waiting)</span>'}</td>"
-                    f"<td>{sig.get('stop', 0):.6g}</td><td>{_prob(p.get('ai_prob'))}</td></tr>")
+                    f"<td>{_prob(p.get('ai_prob'))}</td></tr>")
     for mode, st in execs.items():
         for p in st.get("positions", {}).values():
             cls = "" if p.get("status") == "open" else "bad"
             usdt = _live_usdt(p) if p.get("status") == "open" else None
             if usdt is not None:
                 total, counted = total + usdt, counted + 1
+            pid = mode + "|" + str(p.get("key", ""))
             rows.append(f"<tr><td>{_e(mode)}</td><td>{_e(p['symbol'])} <span class=muted>{_e(p.get('amount', 0))}</span></td>"
-                        f'{_usdt_cell(usdt, pos_id=mode + "|" + str(p.get("key", "")))}<td class="{cls}">{_e(p.get("status"))}</td>'
-                        f"<td>{_e(p['entry_id'])}</td><td>{p.get('entry') or 0:.6g}</td><td>{p['stop']:.6g}</td>"
+                        f'{_usdt_cell(usdt, pos_id=pid)}{_price_cells(pid, p.get("mark"), p["stop"], p.get("side"))}'
+                        f'<td class="{cls}">{_e(p.get("status"))}</td>'
+                        f"<td>{_e(p['entry_id'])}</td><td>{p.get('entry') or 0:.6g}</td>"
                         f'<td>{_prob(p.get("ai_prob"))}</td></tr>')
     if not rows:
         return "<p class=muted>No open positions.</p>"
     foot = (f'<tr><td colspan="2"><b>Total now</b> <span class="muted" id="pos-live">at the last closed candle</span></td>'
-            f'{_usdt_cell(total if counted else None, bold=True, pos_id="total")}<td colspan="5"></td></tr>')
-    return ("<table><tr><th>Where</th><th>Market</th><th>Now USDT</th><th>R (last candle)</th><th>Strategy</th><th>Entry</th>"
-            f"<th>Stop</th><th>AI p</th></tr>{''.join(rows)}{foot}</table>")
+            f'{_usdt_cell(total if counted else None, bold=True, pos_id="total")}<td colspan="6"></td></tr>')
+    return ("<table><tr><th>Where</th><th>Market</th><th>Now USDT</th><th>Price now</th><th>Stop loss</th>"
+            "<th>R (last candle)</th><th>Strategy</th><th>Entry</th>"
+            f"<th>AI p</th></tr>{''.join(rows)}{foot}</table>")
+
+
+def stop_distance(price: float | None, stop: float, side) -> float | None:
+    """How far the price is from the stop, in % of the price: above 0 while the stop hasn't been
+    reached (below the price for a long, above it for a short)."""
+    if not price or not stop:
+        return None
+    gap = (stop - price) if side in ("sell", "short") else (price - stop)
+    return 100 * gap / price
+
+
+def _price_cells(pos_id: str, price: float | None, stop: float, side) -> str:
+    """The "Price now" and "Stop loss" cells; static/positions.js keeps both live."""
+    d = stop_distance(price, stop, side)
+    away = "" if d is None else f' <span class="small {"muted" if d > 0 else "bad"}">{d:.2f}% away</span>'
+    short = "1" if side in ("sell", "short") else ""
+    return (f'<td data-px="{_e(pos_id)}">{"-" if not price else f"{price:.6g}"}</td>'
+            f'<td data-stop="{_e(pos_id)}" data-level="{stop:.10g}" data-short="{short}">{stop:.6g}{away}</td>')
 
 
 def _paper_usdt(p: dict) -> float | None:
@@ -874,9 +898,12 @@ def live_position_usdt(paper: dict, execs: dict, prices: dict, source: str = "")
     like the table's cells, plus the total. Before exit fees; a position without a price is left
     out (its cell keeps what it showed)."""
     rows: dict[str, float] = {}
+    px_by_pos: dict[str, float] = {}  # each position's live price, for the Price now column
     for key, p in paper.get("open", {}).items():
         sym = (key.split("|") + ["", "", ""])[2]
         px, units, entry = prices.get(sym), p.get("units"), p.get("entry")
+        if px:
+            px_by_pos["paper|" + key] = px
         if not p.get("filled") or not px or not units or not entry:
             continue
         short = (p.get("signal") or {}).get("side") == "sell"
@@ -889,8 +916,9 @@ def live_position_usdt(paper: dict, execs: dict, prices: dict, source: str = "")
             u = _live_usdt({**p, "mark": px})
             if u is not None:
                 rows[f"{mode}|{p.get('key', '')}"] = u
+            px_by_pos[f"{mode}|{p.get('key', '')}"] = px
     return {"source": source, "rows": {k: round(v, 4) for k, v in rows.items()},
-            "total": round(sum(rows.values()), 4) if rows else None}
+            "total": round(sum(rows.values()), 4) if rows else None, "prices": px_by_pos}
 
 
 def _short(side) -> str:

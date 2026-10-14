@@ -530,6 +530,8 @@ def test_kill_and_close_all_close_paper_positions(tmp_path):
         raise AssertionError("no position opened")
 
     until_filled()
+    marked = [p for p in trader.state["open"].values() if p["filled"]]
+    assert marked and all(p["mark"] in set(df.close) for p in marked)  # the price it was marked at, for the page
     control.kill("test")
     ev = trader.tick(now_ms=next(ticks))
     assert ev["closed"] and trader.state["open"] == {} and not ev["opened"]
