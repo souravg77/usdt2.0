@@ -125,6 +125,11 @@
           progText.textContent = "Waiting: another job is running first" + (d.ahead ? " (" + d.ahead + ")" : "") + ". " + counts + " saved.";
         } else if (d.status === "running") {
           progText.innerHTML = "<b>Downloading from Bybit: " + d.pct + "%</b> · " + esc(counts) + " saved.";
+        } else if (d.status === "done" && !d.have) {
+          progFill.style.width = "0%";
+          progText.innerHTML = "Bybit sent no prices for that period. <a href=\"/jobs/" + encodeURIComponent(jobId) +
+            "\">See what the download said</a>.";
+          return;
         } else if (d.status === "done") {
           progText.innerHTML = "<b>Download complete: 100%</b> · " + esc(counts) + " saved. Loading the replay…";
           var p = new URLSearchParams(location.search); p.delete("download");

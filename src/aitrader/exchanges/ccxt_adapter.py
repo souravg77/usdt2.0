@@ -17,6 +17,7 @@ from ..models import (
     OrderStatus,
     OrderType,
     Position,
+    TIMEFRAME_MS,
     Side,
 )
 from ..safety import assert_live_allowed
@@ -68,7 +69,14 @@ class CcxtAdapter(ExchangeAdapter):
 
     async def get_candles(self, symbol, timeframe, since=None, limit=500):
         await self.throttle.acquire()
-        rows = await self.client.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
+        if since is None or timeframe not in TIMEFRAME_MS:
+            rows = await self.client.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
+        else:
+            # Bybit answers a request with only a start with its newest bars, so an old month came
+            # back empty: give each page its end too (start + limit bars)
+            until = since + limit * TIMEFRAME_MS[timeframe] - 1
+            rows = await self.client.fetch_ohlcv(symbol, timeframe, since=since, limit=limit,
+                                                 params={"until": until})
         return [
             Candle(
                 exchange=self.name,
