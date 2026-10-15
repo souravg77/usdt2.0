@@ -220,7 +220,9 @@ def test_futures_mode_switches_the_whole_dashboard(tmp_path, monkeypatch):
     c = TestClient(app)
     c.post("/login", data={"user": "admin", "password": "correct horse battery"})
     page = c.get("/trading").text
-    assert 'action="/market-mode"' in page and "Spot AI workspace" in page and "Turn Futures AI off" in page
+    assert 'action="/market-mode"' in page and "Spot AI workspace" in page and "Turn Spot AI off" in page
+    # the Spot view shows only Spot AI's controls
+    assert "Turn Futures AI" not in page and "Set leverage" not in page
     # the Spot view hides the futures position; the Futures view shows it with its liquidation price
     assert "<th>Liquidation</th>" not in page and "long (perp)" not in page
     csrf = Auth("admin", "correct horse battery", "k").csrf(c.cookies.get(COOKIE))
@@ -234,6 +236,7 @@ def test_futures_mode_switches_the_whole_dashboard(tmp_path, monkeypatch):
     assert r.headers["location"].startswith("/trading?")
     page = c.get("/trading").text
     assert "Futures AI 1x" in page and "Futures AI workspace" in page and "<th>Liquidation</th>" in page
+    assert "Turn Futures AI off" in page and "Set leverage" in page and "Turn Spot AI" not in page
     assert "long (perp)" in page and "Futures AI paper wallet" in page
     assert "50.5" in page  # a 2x long from 100: liquidation about 100 x (1 - 1/2 + 0.005)
     # Bybit's leverage choices for paper futures, 1x-100x

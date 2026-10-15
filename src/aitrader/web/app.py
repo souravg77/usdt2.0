@@ -403,7 +403,7 @@ paper trading. Nothing trades real money.</p>
         full = paper
         paper, execs = _workspace(paper, ws), {m: _workspace(st, ws) for m, st in execs.items()}
         body = [note, _workspace_note(ws), _trading_stats(c, settings, paths, paper, events, acct, ws),
-                '<div class="grid">', _market_card(paths, full, csrf), _wallet_card(paths, paper, csrf, ws), _account_card(acct, csrf), _paper_switch_card(c, paths, events, jobs.list(), csrf),
+                '<div class="grid">', _market_card(paths, full, csrf, ws), _wallet_card(paths, paper, csrf, ws), _account_card(acct, csrf), _paper_switch_card(c, paths, events, jobs.list(), csrf),
                 _ai_card(paths, jobs.list(), csrf), _live_card(settings, paths, events), "</div>",
                 '<div class="grid">', controls, _gate_card(paths, csrf), "</div>",
                 "<h2>Equity</h2>", _equity_svg(paper, execs),
@@ -979,10 +979,14 @@ def _paper_card(paths: Paths) -> str:
     recent = [t for t in trades if t.get("exit_ts", 0) >= week]
     from ..learn import wallet
 
-    spot = wallet.balance(st, wallet.load(wallet.wallet_path(paths.paper_state)), "spot")
-    fut = wallet.balance(st, wallet.load(wallet.wallet_path(paths.paper_state, "futures")), "futures")
-    return (f'<div class="card"><h3>Paper trading</h3><p>Spot AI wallet <b>{spot:,.2f} USDT</b> · '
-            f'Futures AI wallet <b>{fut:,.2f} USDT</b><br>'
+    ws = "futures" if _futures_state(paths)[0] else "spot"  # only the workspace shown
+    st = _workspace(st, ws)
+    trades = st.get("trades", [])
+    total = sum(t.get("pnl_usdt", 0) for t in trades)
+    recent = [t for t in trades if t.get("exit_ts", 0) >= week]
+    bal = wallet.balance(st, wallet.load(wallet.wallet_path(paths.paper_state, ws)), ws)
+    name = "Futures AI" if ws == "futures" else "Spot AI"
+    return (f'<div class="card"><h3>{name} paper trading</h3><p>Wallet <b>{bal:,.2f} USDT</b><br>'
             f'{len(st.get("open", {}))} open · '
             f'{len(trades)} closed<br>P&amp;L {total:+,.2f} USDT · last 7 days {len(recent)} trades, '
             f'{sum(t.get("r", 0) for t in recent):+.2f}R<br>'
@@ -1473,67 +1477,63 @@ def _market_switch(paths: Paths, auth, token, title: str) -> str:
             f'<input type="hidden" name="back" value="{_e(back)}">{spot}{fut}</form>')
 
 
-def _market_card(paths: Paths, paper: dict, csrf: str) -> str:
-    """The two paper engines, Spot AI and Futures AI: each on or off, with its open positions, and
-    the leverage Futures AI uses."""
+def _market_card(paths: Paths, paper: dict, csrf: str, ws: str = "spot") -> str:
+    """The engine of the workspace shown: Spot AI (on/off, limits) or Futures AI (on/off, limits,
+    leverage). The other engine's controls are only on its own workspace."""
     from ..learn import wallet
     from ..trade import futures
 
     _on, lev = _futures_state(paths)
-    eng = wallet.engines(wallet.engines_path(paths.paper_state))
-    open_pos = [p for p in (paper.get("open") or {}).values() if p.get("filled")] if isinstance(paper, dict) else []
-    perps = [p for p in open_pos if wallet.market_of(p) == "futures"]
-    spots = len(open_pos) - len(perps)
-    margin = sum(p.get("units", 0) * p.get("entry", 0) / p.get("leverage", 1.0) for p in perps)
-    longs = sum(1 for p in perps if (p.get("signal") or {}).get("side") != "sell")
-
-    lims = wallet.limits(wallet.limits_path(paths.paper_state))
+    on = wallet.engines(wallet.engines_path(paths.paper_state))[ws]
+    lim = wallet.limits(wallet.limits_path(paths.paper_state))[ws]
     now_ms = int(time.time() * 1000)
     st = paper if isinstance(paper, dict) else {}
-
-    def row(market: str, name: str, what: str) -> str:
-        on = eng[market]
-        lim = lims[market]
-        block = wallet.entry_block(st, wallet.load(wallet.wallet_path(paths.paper_state, market)), market, lim, now_ms)
-        state = ('<b class="bad">OFF</b>' if not on else f'<b class="warn">PAUSED</b> ({_e(block)})' if block
-                 else '<b class="good">ON</b>')
-        today = wallet.today_pnl(st, market, now_ms)
-        btn = (f'<input type="hidden" name="market" value="{market}"><input type="hidden" name="on" value="{"0" if on else "1"}">'
-               f'<button class="{"ghost" if on else ""}">Turn {name} {"off" if on else "on"}</button>')
-        return (f'<p><b>{name}</b> {state}: {what} Today <span class="{"good" if today >= 0 else "bad"}">'
-                f'{today:+,.2f} USDT</span>.</p>'
-                f'<form method="post" action="/trading/paper/market" class="row">{csrf}{btn}</form>'
-                f'<form method="post" action="/trading/paper/limits" class="row">{csrf}'
-                f'<input type="hidden" name="market" value="{market}">'
-                f'<label class="small">Daily loss limit % <input name="loss" type="number" inputmode="decimal" step="any" '
-                f'min="{wallet.DAILY_LOSS_RANGE[0]:g}" max="{wallet.DAILY_LOSS_RANGE[1]:g}" value="{lim["daily_loss_pct"]:g}" '
-                'style="width:5em"></label>'
-                f'<label class="small">Max open <input name="max_open" type="number" min="{wallet.MAX_OPEN_RANGE[0]}" '
-                f'max="{wallet.MAX_OPEN_RANGE[1]}" value="{lim["max_open"]}" style="width:5em"></label>'
-                '<button class="ghost">Set limits</button></form>')
-
-    choices = sorted(set(futures.PAPER_LEVERAGE_CHOICES) | {lev})
-    opts = "".join(f'<option value="{x:g}"{" selected" if abs(x - lev) < 1e-9 else ""}>{x:g}x</option>'
-                   for x in choices)
-    return ('<div class="card"><h3>Spot AI / Futures AI</h3>'
-            '<p class="small">Two paper engines run side by side, each with its own wallet, positions and results. '
-            'The Spot / Futures switch in the header only chooses which one the pages show; it never turns a '
-            'spot holding into a futures position or the other way round.</p>'
-            + row("spot", "Spot AI", f"buys coins, long only, no leverage. {spots} open.")
-            + row("futures", "Futures AI", f"USDT perpetual futures, long and short, at <b>{lev:g}x</b> isolated "
-                  f"margin. {len(perps)} open ({longs} long, {len(perps) - longs} short), margin in use "
-                  f"{margin:,.2f} USDT.")
-            + f'<form method="post" action="/trading/paper/leverage" class="row">{csrf}'
-            f'<label class="small">Futures AI leverage <select name="lev" style="width:6em">{opts}</select></label>'
-            '<button class="ghost">Set leverage</button></form>'
-            '<p class="small muted">A long signal opens a spot buy on Spot AI and a perpetual long on Futures AI; '
-            'a short signal trades on Futures AI only. Each engine stops opening trades for the rest of the day '
-            '(until midnight) once it has lost its daily limit, and while it holds its maximum of open positions. '
-            'Turning an engine off stops its new trades; its open '
-            'trades still run to their exits. Leverage choices are Bybit\'s (1x to 100x), cut to each coin\'s own '
-            'Bybit maximum. Higher leverage does not change the risk per trade (the stop sets that) but brings '
-            'liquidation much closer, so a trade whose stop is too near it is skipped. Paper only: the live trader '
-            f'keeps its {futures.MAX_LEVERAGE:g}x safety limit (AITRADER_LEVERAGE) and stays locked.</p></div>')
+    mine = [p for k, p in (st.get("open") or {}).items()
+            if p.get("filled") and (wallet.market_of(p) == "futures" or k.endswith("|futures")) == (ws == "futures")]
+    name = "Futures AI" if ws == "futures" else "Spot AI"
+    block = wallet.entry_block(st, wallet.load(wallet.wallet_path(paths.paper_state, ws)), ws, lim, now_ms)
+    state = ('<b class="bad">OFF</b>' if not on else f'<b class="warn">PAUSED</b> ({_e(block)})' if block
+             else '<b class="good">ON</b>')
+    today = wallet.today_pnl(st, ws, now_ms)
+    if ws == "futures":
+        margin = sum(p.get("units", 0) * p.get("entry", 0) / p.get("leverage", 1.0) for p in mine)
+        longs = sum(1 for p in mine if (p.get("signal") or {}).get("side") != "sell")
+        what = (f"USDT perpetual futures, long and short, at <b>{lev:g}x</b> isolated margin. {len(mine)} open "
+                f"({longs} long, {len(mine) - longs} short), margin in use {margin:,.2f} USDT.")
+    else:
+        what = f"buys coins, long only, no leverage, never short. {len(mine)} open."
+    btn = (f'<input type="hidden" name="market" value="{ws}"><input type="hidden" name="on" value="{"0" if on else "1"}">'
+           f'<button class="{"ghost" if on else ""}">Turn {name} {"off" if on else "on"}</button>')
+    out = (f'<div class="card"><h3>{name}</h3>'
+           f'<p>{state}: {what} Today <span class="{"good" if today >= 0 else "bad"}">{today:+,.2f} USDT</span>.</p>'
+           f'<form method="post" action="/trading/paper/market" class="row">{csrf}{btn}</form>'
+           f'<form method="post" action="/trading/paper/limits" class="row">{csrf}'
+           f'<input type="hidden" name="market" value="{ws}">'
+           f'<label class="small">Daily loss limit % <input name="loss" type="number" inputmode="decimal" step="any" '
+           f'min="{wallet.DAILY_LOSS_RANGE[0]:g}" max="{wallet.DAILY_LOSS_RANGE[1]:g}" value="{lim["daily_loss_pct"]:g}" '
+           'style="width:5em"></label>'
+           f'<label class="small">Max open <input name="max_open" type="number" min="{wallet.MAX_OPEN_RANGE[0]}" '
+           f'max="{wallet.MAX_OPEN_RANGE[1]}" value="{lim["max_open"]}" style="width:5em"></label>'
+           '<button class="ghost">Set limits</button></form>')
+    if ws == "futures":
+        choices = sorted(set(futures.PAPER_LEVERAGE_CHOICES) | {lev})
+        opts = "".join(f'<option value="{x:g}"{" selected" if abs(x - lev) < 1e-9 else ""}>{x:g}x</option>'
+                       for x in choices)
+        out += (f'<form method="post" action="/trading/paper/leverage" class="row">{csrf}'
+                f'<label class="small">Leverage <select name="lev" style="width:6em">{opts}</select></label>'
+                '<button class="ghost">Set leverage</button></form>'
+                '<p class="small muted">Futures AI opens a perpetual long on a long signal and a perpetual short on '
+                'a short signal. Leverage choices are Bybit\'s (1x to 100x), cut to each coin\'s own Bybit maximum. '
+                'Higher leverage does not change the risk per trade (the stop sets that) but brings liquidation much '
+                'closer, so a trade whose stop is too near it is skipped. Paper only: the live trader keeps its '
+                f'{futures.MAX_LEVERAGE:g}x safety limit and stays locked.</p>')
+    else:
+        out += ('<p class="small muted">Spot AI buys the coin on a long signal and sells it at the exit. It ignores '
+                'short signals, which only Futures AI trades.</p>')
+    out += ('<p class="small muted">It stops opening trades for the rest of the day (until midnight) once it has '
+            'lost its daily limit, and while it holds its maximum of open positions. Turning it off stops new '
+            f'trades; open ones still run to their exits. Its controls are only here, on the {name} workspace.</p></div>')
+    return out
 
 
 def _winners_only_form(only: bool, wins: int, csrf: str) -> str:
