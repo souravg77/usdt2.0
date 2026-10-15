@@ -867,6 +867,57 @@ def test_spot_and_futures_engines_trade_independently(tmp_path, monkeypatch):
     assert only_fut["trades"] and all(t["market"] == "futures" for t in only_fut["trades"])
 
 
+def test_each_engine_judges_and_filters_strategies_on_its_own(tmp_path):
+    """Losing on Futures AI stops a strategy there only; Spot AI keeps trading it. WIN strategies
+    only on one engine leaves the other's strategies alone."""
+    from aitrader.learn import RetireRule, picks, wallet
+
+    reg_path = str(tmp_path / "reg.json")
+    reg = Registry(reg_path)
+    up = Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR), status="paper")
+    reg.add(up)
+    reg.save()
+    state = str(tmp_path / "s.json")
+    trader = PaperTrader(None, reg_path, ["bybit"], ["BTC/USDT"],
+                         PaperConfig(retire=RetireRule(min_trades=3, min_expectancy=0.0)), state_path=state)
+
+    def row(r, market):
+        return {"entry_id": "up", "strategy": "up", "symbol": "BTC/USDT", "timeframe": "1h", "signal_ts": 1,
+                "entry_ts": 1, "entry": 1.0, "stop": 0.9, "target": None, "exit_ts": 2, "r": r, "market": market,
+                "perp": market == "futures"}
+    trader.state["trades"] = [row(1.0, "spot")] * 4 + [row(-1.0, "futures")] * 4
+    events = {"retired": []}
+    reg = Registry(reg_path)
+    trader._score(reg, events)
+    assert events["retired"] == [] and reg.get("up").status == "paper"
+    assert "up" in trader.state["benched"]["futures"] and "up" not in trader.state["benched"]["spot"]
+    trader.state["trades"] += [row(-3.0, "spot")] * 4  # now Spot AI loses on it too: it retires
+    trader._score(reg, events)
+    assert events["retired"] == ["up"] and "Spot AI" in reg.get("up").history[-1]["why"]
+
+    # WIN strategies only on Spot AI: Futures AI still trades every strategy
+    picks.set_winners_only(reg_path, True, market="spot")
+    reg = Registry(reg_path)
+    win = picks.pick_copy(up, "1h")
+    win.status = "paper"
+    reg.add(win)
+    reg.get("up").status = "paper"
+    reg.save()
+    df = synthetic(n=700)
+    store = CandleStore(str(tmp_path / "c.db"))
+    fill_store(store, df)
+    trader = PaperTrader(store, reg_path, ["bybit"], ["BTC/USDT"], state_path=str(tmp_path / "s2.json"))
+    opened = []
+    for i in range(600, 660):
+        opened += trader.tick(now_ms=int(df.ts.iloc[i]) + H)["opened"]
+    spot = [k for k in opened if not k.endswith("|futures")]
+    fut = [k for k in opened if k.endswith("|futures")]
+    assert spot and all(k.startswith(win.id + "|") for k in spot)
+    assert any(k.startswith("up|") for k in fut)
+    assert wallet.engines(wallet.engines_path(str(tmp_path / "s2.json"))) == {"spot": True, "futures": True}
+    store.close()
+
+
 def test_each_engine_trades_only_its_own_pairs(tmp_path):
     """A Futures scanner gainer is traded by Futures AI only, not bought on Spot AI."""
     df = synthetic(n=700)

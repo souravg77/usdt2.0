@@ -17,9 +17,9 @@ What a pick changes, in paper trading and on the Replay page:
 The backtest report and keep-top still test everything, so a later pick can change its mind.
 ``learn pick-timeframe 4h --clear`` undoes it. The picks are a JSON file next to the registry.
 
-"Winners only" (a switch on the Trading page, ``winners_only.json`` next to the registry): paper
-trading then opens trades for the WIN copies only, so the best-N strategies of keep-top stop
-opening their own. Their open trades still close normally, and switching it off brings them back.
+"Winners only" (a switch on the Trading page, ``winners_only.json`` next to the registry, one per
+engine): that engine's paper trading then opens trades for the WIN copies only, so the best-N
+strategies of keep-top stop opening their own there. Their open trades still close normally, and switching it off brings them back.
 """
 
 from __future__ import annotations
@@ -66,20 +66,32 @@ def winners_only_path(registry_path: str) -> str:
     return os.path.join(os.path.dirname(os.path.abspath(registry_path)), "winners_only.json")
 
 
-def winners_only(registry_path: str) -> bool:
+def winners_only(registry_path: str, market: str = "spot") -> bool:
+    """Whether ``market``'s engine (Spot AI or Futures AI) trades only the WIN strategies. An older
+    file with one "on" for both counts for each engine until one is set on its own."""
     try:
         with open(winners_only_path(registry_path), encoding="utf-8") as fh:
-            return bool(json.load(fh).get("on"))
-    except (OSError, ValueError, AttributeError):
+            data = json.load(fh)
+    except (OSError, ValueError):
         return False
+    if not isinstance(data, dict):
+        return False
+    if market in data:
+        return bool(data[market])
+    return bool(data.get("on"))
 
 
-def set_winners_only(registry_path: str, on: bool, by: str = "") -> None:
+def set_winners_only(registry_path: str, on: bool, by: str = "", market: str | None = None) -> None:
+    """Switch WIN strategies only for one engine (``market``), or for both when it is None."""
     path = winners_only_path(registry_path)
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    data = {m: winners_only(registry_path, m) for m in ("spot", "futures")}
+    for m in ([market] if market else ["spot", "futures"]):
+        data[m] = bool(on)
+    data.update({"by": by, "at": int(time.time() * 1000)})
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump({"on": bool(on), "by": by, "at": int(time.time() * 1000)}, fh)
+        json.dump(data, fh)
     os.replace(tmp, path)
 
 

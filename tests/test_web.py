@@ -219,17 +219,21 @@ def test_paper_switch_and_live_card(web, monkeypatch):
     monkeypatch.setattr(runner, "submit", lambda title, steps, meta=None: submitted.append((steps, meta)) or "j1")
     csrf = auth.csrf(login(client))
     r = client.get("/trading")
-    assert "Paper trading <b class=\"bad\">OFF</b>" in r.text and "Turn paper trading on" in r.text
+    assert "Spot AI paper trading <b class=\"bad\">OFF</b>" in r.text and "Turn Spot AI paper trading on" in r.text
     assert "Live trading <b class=\"bad\">OFF</b>" in r.text and "no switch for this on the website" in r.text
     assert "/trading/live" not in r.text  # live is never switched on from the website
 
-    client.post("/trading/paper/off", data={"csrf": csrf})
-    assert json.load(open("data/trade/control.json"))["paused"]
+    from aitrader.learn import wallet
+
+    epath = wallet.engines_path(paths.paper_state)
+    client.post("/trading/paper/off", data={"csrf": csrf, "market": "spot"})
+    assert wallet.engines(epath) == {"spot": False, "futures": True}  # Futures AI keeps trading
+    assert not os.path.exists("data/trade/control.json") or not json.load(open("data/trade/control.json"))["paused"]
     assert client.post("/trading/paper/on", data={}, follow_redirects=False).status_code == 403
-    r = client.post("/trading/paper/on", data={"csrf": csrf}, follow_redirects=False)
-    assert "Paper+trading+is+on" in r.headers["location"] or "Paper%20trading%20is%20on" in r.headers["location"]
-    assert not json.load(open("data/trade/control.json"))["paused"]
-    steps, meta = submitted[0]
+    r = client.post("/trading/paper/on", data={"csrf": csrf, "market": "spot"}, follow_redirects=False)
+    assert "Spot+AI+paper+trading+is+on" in r.headers["location"] or "Spot%20AI%20paper%20trading%20is%20on" in r.headers["location"]
+    assert wallet.engines(epath) == {"spot": True, "futures": True}
+    steps, meta = submitted[0]  # no strategy was paper trading yet: every one is loaded
     assert meta == {"kind": "paper-start"}
     assert steps[:5] == [["learn", "add-library"], ["learn", "add-builtin"], ["learn", "add-timeframe", "30m"],
                          ["learn", "add-shorts"], ["learn", "paper-all"]]
@@ -248,7 +252,60 @@ def test_paper_switch_and_live_card(web, monkeypatch):
     from aitrader.ops import EventLog
 
     EventLog(paths.events, service="paper").emit("heartbeat", "alive")
-    assert "Paper trading <b class=\"good\">ON</b>" in client.get("/trading").text
+    assert "Spot AI paper trading <b class=\"good\">ON</b>" in client.get("/trading").text
+
+
+def test_turning_one_engine_off_leaves_the_other_running(web, monkeypatch):
+    """Shawn: stopping Spot AI paper trading must not stop Futures AI, and the other way round."""
+    client, auth, runner, paths = web
+    monkeypatch.setattr(runner, "submit", lambda title, steps, meta=None: "j1")
+    csrf = auth.csrf(login(client))
+    from aitrader.learn import picks, wallet
+
+    epath = wallet.engines_path(paths.paper_state)
+    client.post("/trading/paper/off", data={"csrf": csrf, "market": "futures"})
+    assert wallet.engines(epath) == {"spot": True, "futures": False}
+    client.post("/trading/paper/off", data={"csrf": csrf, "market": "spot"})
+    client.post("/trading/paper/on", data={"csrf": csrf, "market": "futures"})
+    assert wallet.engines(epath) == {"spot": False, "futures": True}
+    # without a market field the form acts on the workspace shown (Spot here)
+    client.post("/trading/paper/on", data={"csrf": csrf})
+    assert wallet.engines(epath) == {"spot": True, "futures": True}
+
+    # WIN strategies only, the AI filter and the teacher: each engine chooses for itself
+    client.post("/trading/paper/winners-only", data={"csrf": csrf, "market": "spot", "on": "1"})
+    assert picks.winners_only(paths.registry, "spot") and not picks.winners_only(paths.registry, "futures")
+    fpath = wallet.filters_path(paths.paper_state)
+    client.post("/trading/paper/filter", data={"csrf": csrf, "market": "futures", "name": "ai", "on": "0"})
+    client.post("/trading/paper/filter", data={"csrf": csrf, "market": "spot", "name": "teacher", "on": "0"})
+    assert wallet.filters(fpath) == {"spot": {"ai": True, "teacher": False}, "futures": {"ai": False, "teacher": True}}
+    r = client.post("/trading/paper/filter", data={"csrf": csrf, "market": "spot", "name": "x", "on": "0"},
+                    follow_redirects=False)
+    assert "bad=1" in r.headers["location"]
+    page = client.get("/trading").text
+    assert "Spot AI uses the backtest teacher: <b class=\"muted\">NO</b>" in page
+    assert "Turn Spot AI paper trading off" in page and "Turn Futures AI paper trading off" not in page
+
+    # Pause everything is the emergency stop for both; turning one engine on doesn't lift it
+    client.post("/trading/pause", data={"csrf": csrf})
+    r = client.post("/trading/paper/on", data={"csrf": csrf, "market": "spot"}, follow_redirects=False)
+    assert "bad=1" in r.headers["location"] and json.load(open("data/trade/control.json"))["paused"]
+
+
+def test_an_old_paper_off_pause_comes_back_for_one_engine_only(web, monkeypatch):
+    """Before this change "Turn paper trading off" paused both engines: turning one on lifts that
+    pause and leaves the other off, as it was."""
+    client, auth, runner, paths = web
+    monkeypatch.setattr(runner, "submit", lambda title, steps, meta=None: "j1")
+    csrf = auth.csrf(login(client))
+    from aitrader.learn import wallet
+    from aitrader.trade import Control
+
+    Control("data/trade/control.json").pause("paper trading turned off from the dashboard by admin", by="admin")
+    r = client.post("/trading/paper/on", data={"csrf": csrf, "market": "futures"}, follow_redirects=False)
+    assert "Spot+AI+stays+off" in r.headers["location"] or "Spot%20AI%20stays%20off" in r.headers["location"]
+    assert not Control("data/trade/control.json").paused
+    assert wallet.engines(wallet.engines_path(paths.paper_state)) == {"spot": False, "futures": True}
 
 
 def test_keep_only_the_best_from_the_trading_page(web, monkeypatch):
