@@ -198,8 +198,16 @@ def test_trading_page_winners_only_button(tmp_path, monkeypatch):
     assert picks.winners_only(reg_path) and not picks.winners_only(reg_path, "futures")  # Spot AI's switch only
     page = c.get("/trading").text
     assert "Trade the best strategies too" in page and '<span class="v good">1</span>' in page
+    assert "has no WIN strategies yet" not in page and "{name}" not in page
     c.post("/trading/paper/winners-only", data={"csrf": csrf, "on": "0"})
     assert not picks.winners_only(reg_path)
+    # Futures AI with WIN-only on and no Futures picks: it opens nothing, and the card says so
+    from aitrader.learn import wallet
+
+    picks.set_winners_only(reg_path, True, market="futures")
+    wallet.set_market(wallet.market_path("data/learn/paper_state.json"), True)
+    page = c.get("/trading").text
+    assert "Futures AI has no WIN strategies yet, so it opens no new trades" in page
 
 
 def test_winners_only_is_per_engine_and_reads_the_old_file(tmp_path):
@@ -395,3 +403,49 @@ def test_a_futures_pick_keeps_its_own_copies_and_leaves_spot_alone(tmp_path):
     assert again["dropped"] == ["fwin4h-up"] and Registry(reg.path).entries["win4h-up"].status == "paper"
     assert picks.clear(Registry(reg.path), "4h", fut_file, "futures") == []
     assert picks.load(spot_file)["4h"]["picked"] == ["up"]
+
+
+def test_keep_the_winners_on_every_timeframe_in_the_futures_view(tmp_path, monkeypatch):
+    """Shawn: Futures had no WIN strategies after the per-engine picks; one button picks every timeframe."""
+    import time
+
+    from aitrader.learn import wallet
+
+    monkeypatch.chdir(tmp_path)
+    fut = str(tmp_path / "gainers.json")
+    with open(fut, "w") as fh:
+        json.dump({"on": True, "generated": int(time.time() * 1000), "pairs": [{"symbol": "ZK/USDT"}]}, fh)
+    monkeypatch.setenv("AITRADER_GAINERS_FILE", fut)
+    runner = JobRunner(str(tmp_path / "jobs"), env_file=str(tmp_path / "none.env"))
+    submitted = []
+    monkeypatch.setattr(runner, "submit", lambda title, steps, meta=None: submitted.append((title, steps, meta)) or "j1")
+    app = create_app(Settings(db_path=str(tmp_path / "x.db"), symbols=["BTC/USDT"]),
+                     Auth("admin", "correct horse battery", "k"), runner,
+                     Paths(report=str(tmp_path / "none.json"), registry=str(tmp_path / "registry.json")))
+    wallet.set_market(wallet.market_path("data/learn/paper_state.json"), True)
+    c = TestClient(app)
+    c.post("/login", data={"user": "admin", "password": "correct horse battery"})
+    assert "Keep the winners on every timeframe" in c.get("/replay").text
+    csrf = Auth("admin", "correct horse battery", "k").csrf(c.cookies.get(COOKIE))
+    c.post("/replay/pick", data={"csrf": csrf, "tf": "all"})
+    title, steps, meta = submitted[0]
+    assert title == "Keep only the winners on every timeframe on Futures AI pairs" and meta["market"] == "futures"
+    picked = [s[4] for s in steps if s[0] == "learn"]
+    assert picked == ["1d", "4h", "1h", "30m", "15m", "5m"] and len(steps) == 12
+    assert all(s[-3:] == ["--market", "futures", "--skip-empty"] for s in steps if s[0] == "learn")
+    assert all("BTC/USDT" not in s and "ZK/USDT" in s for s in steps)
+    # undo never takes "all"
+    c.post("/replay/pick", data={"csrf": csrf, "tf": "all", "undo": "1"})
+    assert len(submitted) == 1
+
+
+def test_cli_pick_skips_an_empty_timeframe_when_asked(tmp_path, monkeypatch):
+    from aitrader.cli import main
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "data").mkdir()
+    make_store(tmp_path / "data" / "aitrader.db").close()
+    args = ["--env-file", "none", "learn", "--symbol", "BTC/USDT", "pick-timeframe", "1d", "--years", "0.1"]
+    assert main(args) == 1  # nothing to test on 1d
+    assert main(args + ["--skip-empty"]) == 0
+    assert picks.load("data/learn/timeframe_picks.json") == {}

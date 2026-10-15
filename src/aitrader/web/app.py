@@ -1673,13 +1673,16 @@ def _winners_only_form(only: bool, wins: int, csrf: str, ws: str = "spot") -> st
         head = (f'<p><b>{name} WIN strategies only: <span class="good">ON</span></b>. Only the {wins} WIN strategies '
                 f'open {name} trades.')
         btn = hidden + '<input type="hidden" name="on" value="0"><button class="ghost">Trade the best strategies too</button>'
+        if not wins:
+            head += (f'</p><p class="warn">{name} has no WIN strategies yet, so it opens no new trades. On the Replay page '
+                     f'in the {name} view press Keep the winners on every timeframe, or turn this off.')
     else:
         head = (f'<p><b>{name} WIN strategies only: <span class="muted">OFF</span></b>. The best strategies and the '
                 f'{wins} WIN strategies all open {name} trades.')
         btn = hidden + '<input type="hidden" name="on" value="1"><button>Trade only the WIN strategies</button>'
     return (head + f'</p><p class="small muted">{name}\'s WIN strategies are the ones kept by Keep only the winners on '
             f'the Replay page while it shows the {name} workspace (the other engine\'s picks never trade here). '
-            'When this is on, the best strategies above stop opening {name} trades; their open trades still '
+            f'When this is on, the best strategies above stop opening {name} trades; their open trades still '
             'close normally. The other engine has its own switch on its workspace.</p>'
             f'<form method="post" action="/trading/paper/winners-only" class="row">{csrf}{btn}</form>')
 
