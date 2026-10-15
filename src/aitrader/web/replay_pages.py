@@ -27,6 +27,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse,
 from .. import clock
 from ..config import EXCHANGE
 from ..backtest import BacktestConfig
+from ..backtest.engine import as_perp
 from ..data.store import CandleStore
 from ..learn import keep, picks
 from ..learn.registry import Registry
@@ -109,13 +110,20 @@ def _add_months(d: datetime, n: int) -> datetime:
 
 
 def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: str,
-                      report_path: str = "data/reports/backtest.json", exchange: str = EXCHANGE) -> None:
+                      report_path: str = "data/reports/backtest.json", exchange: str = EXCHANGE,
+                      paper_state: str = "") -> None:
     symbols = list(settings.symbols)
     cache: OrderedDict = OrderedDict()
 
+    def futures_mode() -> bool:
+        from ..learn import wallet
+
+        return bool(paper_state) and wallet.futures_on(wallet.market_path(paper_state))
+
     def cfg() -> BacktestConfig:
-        return BacktestConfig(taker_fee=settings.paper_taker_fee, maker_fee=settings.paper_maker_fee,
+        base = BacktestConfig(taker_fee=settings.paper_taker_fee, maker_fee=settings.paper_maker_fee,
                               slippage_bps=settings.paper_slippage_bps, max_cost_r=settings.max_cost_r)
+        return as_perp(base) if futures_mode() else base  # Futures mode: longs costed as perpetuals too
 
     def report_rows() -> list[dict]:
         try:
@@ -150,7 +158,7 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
 
     def compute(symbol: str, tf: str, start: datetime, months: int, strategy: str) -> dict:
         tf_picks = picks.load(picks_file)
-        key = (symbol, tf, start, months, strategy, (tf_picks.get(tf) or {}).get("at"))
+        key = (symbol, tf, start, months, strategy, (tf_picks.get(tf) or {}).get("at"), futures_mode())
         if key in cache:
             cache.move_to_end(key)
             return cache[key]

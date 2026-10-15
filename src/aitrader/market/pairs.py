@@ -257,7 +257,7 @@ def validated_results(registry_path: str | None, paper_state: str | None) -> dic
                 add(mk["symbol"], "oos_trades", n, n * float(mk.get("exp_oos") or 0))
     for t in (_read(paper_state).get("trades", []) if paper_state else []):
         parts = str(t.get("key", "")).split("|")
-        if len(parts) == 4:
+        if len(parts) >= 4:
             add(parts[2], "paper_trades", 1, float(t.get("r") or 0))
     out = {}
     for sym, a in acc.items():
@@ -302,10 +302,12 @@ def ranked_symbols(path: str = DEFAULT_PATH, top: int = 20, max_age_hours: float
 
 
 def configured_symbols(fallback: list[str], env=None, path: str | None = None,
-                       now_ms: int | None = None, keep: list[str] | None = None) -> list[str]:
+                       now_ms: int | None = None, keep: list[str] | None = None,
+                       market: str | None = None) -> list[str]:
     """The pairs to trade: the fixed list unless ``AITRADER_PAIRS=ranked`` and a fresh ranking
-    exists, plus today's top gainers while that switch is on (``market.gainers``). ``keep`` (e.g.
-    pairs with open paper positions) is always added."""
+    exists, plus today's top gainers while that switch is on (``market.gainers``): the Spot
+    scanner's for ``market="spot"``, the Futures scanner's for ``"futures"``, both by default.
+    ``keep`` (e.g. pairs with open paper positions) is always added."""
     env = os.environ if env is None else env
     symbols = list(fallback)
     if (env.get("AITRADER_PAIRS") or "fixed").strip().lower() == "ranked":
@@ -320,14 +322,17 @@ def configured_symbols(fallback: list[str], env=None, path: str | None = None,
                         "using the fixed list (run `aitrader pairs rank`)")
     from . import gainers  # the Pairs page's "Trade the top gainers" switch
 
-    hot = gainers.symbols(env.get("AITRADER_GAINERS_FILE") or gainers.DEFAULT_PATH, now_ms=now_ms)
+    files = {"spot": env.get("AITRADER_SPOT_GAINERS_FILE") or gainers.SPOT_PATH,
+             "futures": env.get("AITRADER_GAINERS_FILE") or gainers.DEFAULT_PATH}
+    hot = [s for m in ((market,) if market in files else ("spot", "futures"))
+           for s in gainers.symbols(files[m], now_ms=now_ms)]
     return list(dict.fromkeys([*symbols, *hot, *(keep or [])]))
 
 
 def open_paper_symbols(state_path: str) -> list[str]:
     """Symbols with open paper positions: they keep getting candles after leaving the ranking."""
     keys = (_read(state_path).get("open") or {}).keys()
-    return sorted({k.split("|")[2] for k in keys if k.count("|") == 3})
+    return sorted({k.split("|")[2] for k in keys if k.count("|") >= 3})
 
 
 def public_client(exchange_id: str = "bybit"):

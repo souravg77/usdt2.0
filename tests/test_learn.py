@@ -136,6 +136,13 @@ def test_claude_caller_needs_key(monkeypatch):
 # ---- backtest gate and paper trading -------------------------------------------------------------
 
 
+def spot_only(state_path):
+    """Turn the Futures AI paper engine off, for tests about the spot trades alone."""
+    from aitrader.learn import wallet
+
+    wallet.set_engine(wallet.engines_path(state_path), "futures", False)
+
+
 def fill_store(store, df, ex="bybit", sym="BTC/USDT", tf="1h"):
     store.upsert(Candle(ex, sym, tf, int(r.ts), r.open, r.high, r.low, r.close, r.volume)
                  for r in df.itertuples())
@@ -232,6 +239,7 @@ def test_paper_trading_matches_backtest(tmp_path):
     reg.save()
     cfg = PaperConfig(retire=__import__("aitrader.learn", fromlist=["RetireRule"]).RetireRule(
         min_trades=10_000, max_drawdown=1e9))
+    spot_only(str(tmp_path / "state.json"))
     trader = PaperTrader(store, reg_path, ["bybit"], ["BTC/USDT"], cfg,
                          state_path=str(tmp_path / "state.json"))
     start = 600
@@ -518,6 +526,7 @@ def test_kill_and_close_all_close_paper_positions(tmp_path):
     reg.add(Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR), status="paper"))
     reg.save()
     control = Control(str(tmp_path / "control.json"))
+    spot_only(str(tmp_path / "s.json"))
     trader = PaperTrader(store, reg_path, ["bybit"], ["BTC/USDT"], state_path=str(tmp_path / "s.json"),
                          control=control)
     ticks = iter(int(df.ts.iloc[i]) + H for i in range(600, 900))
@@ -598,6 +607,7 @@ def test_paper_skips_markets_without_a_new_candle(tmp_path):
     reg.add(Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR), status="paper"))
     reg.add(Entry(id="broken", kind="rule", name="x", spec={"bad": True}, status="paper"))
     reg.save()
+    spot_only(str(tmp_path / "s.json"))
     trader = PaperTrader(store, reg_path, ["bybit"], ["BTC/USDT"], state_path=str(tmp_path / "s.json"))
     now = int(df.ts.iloc[650]) + H
     trader.tick(now_ms=now)  # the broken strategy is skipped, not fatal
@@ -803,7 +813,7 @@ def test_paper_winners_only_trades_just_the_win_copies(tmp_path):
     store.close()
 
 
-def test_paper_futures_mode_trades_longs_as_perpetuals(tmp_path, monkeypatch):
+def test_spot_and_futures_engines_trade_independently(tmp_path, monkeypatch):
     from aitrader.backtest.engine import as_perp
     from aitrader.learn import wallet
     from aitrader.trade import futures
@@ -814,7 +824,8 @@ def test_paper_futures_mode_trades_longs_as_perpetuals(tmp_path, monkeypatch):
     cfg = as_perp(BacktestConfig())
     assert cfg.taker_fee == cfg.perp_taker_fee and cfg.funding_rate_8h == cfg.perp_funding_8h
 
-    def run(on: bool, d):
+    def run(d, spot=True, fut=True, futures_start=None):
+        d.mkdir()
         df = synthetic(n=700)
         store = CandleStore(str(d / "c.db"))
         fill_store(store, df)
@@ -823,23 +834,92 @@ def test_paper_futures_mode_trades_longs_as_perpetuals(tmp_path, monkeypatch):
         reg.add(Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR), status="paper"))
         reg.save()
         state = str(d / "s.json")
-        wallet.set_market(wallet.market_path(state), on)
+        wallet.set_engine(wallet.engines_path(state), "spot", spot)
+        wallet.set_engine(wallet.engines_path(state), "futures", fut)
+        if futures_start:
+            wallet.save(wallet.wallet_path(state, "futures"), futures_start, now_ms=0)
+        wallet.set_market(wallet.market_path(state), True)  # the pages' view: changes no trade
         trader = PaperTrader(store, reg_path, ["bybit"], ["BTC/USDT"], state_path=state)
         for i in range(600, 700):
             trader.tick(now_ms=int(df.ts.iloc[i]) + H)
         store.close()
         return trader.state
 
-    (tmp_path / "spot").mkdir()
-    (tmp_path / "perp").mkdir()
-    spot, perp = run(False, tmp_path / "spot"), run(True, tmp_path / "perp")
-    assert spot["trades"] and perp["trades"]
-    assert not any(t["perp"] for t in spot["trades"]) and all(t["perp"] for t in perp["trades"])
-    # the same trades, with the cheaper perpetual fees
-    assert [t["signal_ts"] for t in spot["trades"]] == [t["signal_ts"] for t in perp["trades"]]
-    assert perp["trades"][0]["fee_r"] < spot["trades"][0]["fee_r"]
-    opened = [p for p in perp["open"].values() if p.get("filled")]
-    assert all(p["perp"] and p["leverage"] == 2.0 for p in opened)
+    both = run(tmp_path / "both", futures_start=500)
+    spot = [t for t in both["trades"] if t["market"] == "spot"]
+    perp = [t for t in both["trades"] if t["market"] == "futures"]
+    assert spot and perp
+    assert not any(t["perp"] for t in spot) and all(t["perp"] and t["key"].endswith("|futures") for t in perp)
+    # the same signals on both, the perpetuals with their cheaper fees
+    assert [t["signal_ts"] for t in spot] == [t["signal_ts"] for t in perp]
+    assert perp[0]["fee_r"] < spot[0]["fee_r"]
+    # each sized from its own wallet: 10,000 USDT spot, 500 USDT futures
+    assert spot[0]["units"] > 10 * perp[0]["units"]
+    assert wallet.balance(both, wallet.load(str(tmp_path / "both" / "paper_wallet_futures.json")), "futures") == \
+        pytest.approx(500 + sum(t["pnl_usdt"] for t in perp))
+    assert wallet.balance(both, wallet.load(str(tmp_path / "both" / "paper_wallet.json")), "spot") == \
+        pytest.approx(10_000 + sum(t["pnl_usdt"] for t in spot))
+    opened = [p for p in both["open"].values() if p.get("filled") and p["perp"]]
+    assert all(p["leverage"] == 2.0 for p in opened)
+
+    only_spot, only_fut = run(tmp_path / "s", fut=False), run(tmp_path / "f", spot=False)
+    assert only_spot["trades"] and all(t["market"] == "spot" for t in only_spot["trades"])
+    assert only_fut["trades"] and all(t["market"] == "futures" for t in only_fut["trades"])
+
+
+def test_each_engine_trades_only_its_own_pairs(tmp_path):
+    """A Futures scanner gainer is traded by Futures AI only, not bought on Spot AI."""
+    df = synthetic(n=700)
+    store = CandleStore(str(tmp_path / "c.db"))
+    fill_store(store, df)
+    reg_path = str(tmp_path / "reg.json")
+    reg = Registry(reg_path)
+    reg.add(Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR), status="paper"))
+    reg.save()
+    trader = PaperTrader(store, reg_path, ["bybit"], ["BTC/USDT"], state_path=str(tmp_path / "s.json"),
+                         market_symbols=lambda m: ["BTC/USDT"] if m == "futures" else ["ETH/USDT"])
+    for i in range(600, 700):
+        trader.tick(now_ms=int(df.ts.iloc[i]) + H)
+    store.close()
+    assert trader.state["trades"] and all(t["market"] == "futures" for t in trader.state["trades"])
+
+
+def test_engine_limits_and_stale_candles_stop_new_entries(tmp_path):
+    from aitrader.learn import wallet
+
+    df = synthetic(n=700)
+    store = CandleStore(str(tmp_path / "c.db"))
+    fill_store(store, df)
+    reg_path = str(tmp_path / "reg.json")
+    reg = Registry(reg_path)
+    for sid in ("a", "b", "c"):
+        reg.add(Entry(id=sid, kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR), status="paper"))
+    reg.save()
+    state = str(tmp_path / "s.json")
+    wallet.set_limits(wallet.limits_path(state), "spot", 5, 1)  # Spot AI: one position at a time
+    trader = PaperTrader(store, reg_path, ["bybit"], ["BTC/USDT"], state_path=state)
+    for i in range(600, 640):
+        trader.tick(now_ms=int(df.ts.iloc[i]) + H)
+        assert sum(1 for k, p in trader.state["open"].items() if wallet.market_of({**p, "key": k}) == "spot"
+                   and not k.endswith("|futures")) <= 1
+    futs = [k for k in trader.state["open"] if k.endswith("|futures")]
+    assert len(futs) > 1  # Futures AI keeps its own limit (30)
+    assert any(s["skipped"] == "engine limit" and "Spot AI has 1 open" in s["detail"] for s in trader.state["signals"])
+    # a daily loss over the limit stops that engine until midnight
+    now = int(df.ts.iloc[640]) + H
+    st = {"open": {}, "trades": [{"exit_ts": now - 1000, "pnl_usdt": -600.0, "side": "buy"}]}
+    lim = {"daily_loss_pct": 5.0, "max_open": 30}
+    assert "daily limit of 5%" in wallet.entry_block(st, {"start": 10_000.0, "since": 0}, "spot", lim, now)
+    assert wallet.entry_block(st, {"start": 10_000.0, "since": 0}, "futures", lim, now) == ""
+    # a candle that arrives late (the collector was down) gives no trade
+    store.close()
+    late = CandleStore(str(tmp_path / "late.db"))
+    fill_store(late, df.iloc[:651])  # nothing newer than bar 650 has arrived
+    trader2 = PaperTrader(late, reg_path, ["bybit"], ["BTC/USDT"], state_path=str(tmp_path / "s2.json"))
+    trader2.tick(now_ms=int(df.ts.iloc[650]) + H + 2 * H)
+    assert not trader2.state["open"] and trader2.state.get("signals")
+    assert all(s["skipped"] == "stale prices" for s in trader2.state["signals"])
+    late.close()
 
 
 def test_a_missing_entry_candle_doesnt_keep_a_paper_trade_open_forever(tmp_path, monkeypatch):

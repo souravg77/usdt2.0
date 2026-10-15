@@ -13,13 +13,17 @@ the regime never blocks a paper trade here. When a person has turned on the back
 lessons (``learn.teacher``), a signal in a market situation the strategy lost in is skipped, and a
 1R profit-take is added where the lessons found it caught more. No exchange order is ever sent from here.
 
-Short signals (the short twins, ``strategies.mirror``) are paper-traded as Bybit USDT perpetual
-shorts: perp fees and funding in the result, isolated margin at ``AITRADER_LEVERAGE`` (only the
-margin counts against the wallet), and a short whose stop is too close to the
-liquidation price is skipped. The AI trade filter learned from long trades, so it doesn't judge
-shorts. With the Trading page's market switch on Futures (``wallet.futures_on``), long signals
-are paper-traded as USDT perpetual longs the same way (perp fees and funding, margin at
-``AITRADER_LEVERAGE``, liquidation check); each position keeps the market it opened with.
+Two engines run side by side, each with its own wallet (``learn.wallet``), positions and results,
+and each can be turned off on the Trading page:
+
+- **Spot AI** paper-trades long signals as spot buys (no leverage, no shorts).
+- **Futures AI** paper-trades USDT perpetual futures: short signals (the short twins,
+  ``strategies.mirror``) as perp shorts, and long signals as perp longs (key suffix ``|futures``,
+  so the same strategy can hold a spot buy and a perp long at once). Perp fees and funding are in
+  the result, isolated margin at the chosen leverage (only the margin counts against the futures
+  wallet), and a trade whose stop is too close to the liquidation price is skipped.
+
+The AI trade filter learned from long trades, so it doesn't judge shorts.
 """
 
 from __future__ import annotations
@@ -35,6 +39,7 @@ from ..backtest import BacktestConfig, metrics
 from ..backtest.engine import Trade, as_perp, cost_r, simulate_signal, too_costly
 from ..data.store import CandleStore
 from ..indicators import candles_to_frame
+from ..market import perp_limits
 from ..market.regime import breakdown, classify
 from ..models import TIMEFRAME_MS, Side
 from ..strategies.base import Signal
@@ -48,6 +53,16 @@ log = logging.getLogger(__name__)
 DEFAULT_STATE = "data/learn/paper_state.json"
 WINDOW_BARS = 1000  # history loaded per market, enough to warm up EMA200 and friends
 MIN_BARS = 250
+MAX_DATA_AGE_MS = 15 * 60_000  # a signal on a candle that closed longer ago than this (or a bar) is not taken
+
+
+def max_data_age(tf: str) -> int:
+    """How old a just-arrived candle may be before its signal is skipped as stale: 15 minutes, or one
+    bar on longer timeframes, at most an hour."""
+    return max(MAX_DATA_AGE_MS, min(TIMEFRAME_MS[tf], 3_600_000))
+
+
+FUTURES_SUFFIX = "|futures"  # a perp long's position key: the same signal's spot buy keeps the plain key
 MISSING_ENTRY_BARS = 3  # bars to wait for a missing entry candle to be filled in before moving on
 
 
@@ -78,14 +93,22 @@ class PaperTrader:
     def __init__(self, store: CandleStore, registry_path: str, exchanges: list[str],
                  symbols: list[str], cfg: PaperConfig | None = None,
                  state_path: str = DEFAULT_STATE, calendar=None, ai_filter=None, control=None,
-                 context=None, events=None, news=None, teacher=None):
+                 context=None, events=None, news=None, teacher=None, market_symbols=None):
         self.store, self.registry_path = store, registry_path
         # ``symbols`` may be a function returning the list (the pair ranking, read each tick)
         self.exchanges, self.symbols = exchanges, symbols
+        # ``market_symbols(market)``: the pairs Spot AI or Futures AI may open on (each adds its own
+        # scanner's top gainers); None means both use ``symbols``
+        self.market_symbols = market_symbols
         self.cfg = cfg or PaperConfig()
         self.state_path, self.calendar = state_path, calendar
-        self.wallet_path = wallet.wallet_path(state_path)  # the starting amount you chose
-        self.market_path = wallet.market_path(state_path)  # Spot or Futures for longs
+        self.wallet_path = wallet.wallet_path(state_path)  # the Spot wallet's starting amount
+        self.futures_wallet_path = wallet.wallet_path(state_path, "futures")
+        self.market_path = wallet.market_path(state_path)  # the futures leverage chosen
+        self.engines_path = wallet.engines_path(state_path)  # Spot AI / Futures AI on or off
+        self.limits_path = wallet.limits_path(state_path)  # each engine's daily loss and open-position limits
+        self._now = 0
+        self.perp_limits_path = perp_limits.DEFAULT_PATH  # each coin's maximum leverage on Bybit
         self.ai_filter = ai_filter  # Phase 4 trade filter (aitrader.ai.LiveFilter) or None
         self.control = control  # trade.Control: pause / kill switch, or None
         self.context = context  # market-context filter (funding, open interest...), or None
@@ -104,6 +127,7 @@ class PaperTrader:
         now_ms = now_ms or int(time.time() * 1000)
         reg = Registry(self.registry_path)  # re-read: `learn` commands may have changed it
         events = {"opened": [], "closed": [], "retired": [], "filtered": []}
+        self._now = now_ms
         self._manage_open(reg, now_ms, events)
         allow, size_mult, cal_why = self._calendar(now_ms)
         blocked = "" if allow else f"the economic-calendar filter: {cal_why}"
@@ -115,8 +139,9 @@ class PaperTrader:
         frames: dict = {}  # (exchange, symbol, timeframe) -> (frame, newest close, new candle since last tick)
         regimes: dict = {}  # (exchange, symbol, timeframe) -> regime of the newest closed bar
         symbols = self._symbols()
+        per_market = {m: set(symbols if self.market_symbols is None else self._symbols(m)) for m in wallet.MARKETS}
         tf_picks = picks.load(picks.picks_path(self.registry_path))  # timeframes kept for their winners
-        perp_longs = wallet.futures_on(self.market_path)  # the Trading page's Spot / Futures switch
+        engines = wallet.engines(self.engines_path)  # the Trading page's Spot AI / Futures AI switches
         only_winners = picks.winners_only(self.registry_path)  # the Trading page's "WIN strategies only"
         built, broken, checks = 0, 0, 0  # what this pass looked at, for the dashboard
         for entry in reg.with_status("paper"):
@@ -131,9 +156,13 @@ class PaperTrader:
             built += 1
             for ex in self.exchanges:
                 for sym in symbols:
+                    on = {m: engines[m] and sym in per_market[m] for m in wallet.MARKETS}
                     for tf in picks.allowed(entry, strat.spec.timeframes, tf_picks):
                         key = f"{entry.id}|{ex}|{sym}|{tf}"
-                        if key in self.state["open"] or not allow:
+                        # a long takes the plain key on Spot and key|futures on Futures; a short
+                        # (Futures only) takes the plain key
+                        slots = ([key] if on["spot"] else []) + ([key, key + FUTURES_SUFFIX] if on["futures"] else [])
+                        if not allow or all(k in self.state["open"] for k in slots):
                             continue
                         market = (ex, sym, tf)
                         if market not in frames:
@@ -155,58 +184,49 @@ class PaperTrader:
                             continue
                         sig = sigs[-1]
                         self.state["last_signal"][key] = sig.ts
-                        if sig.side is Side.SELL and not futures.short_stop_ok(sig.entry, sig.stop, self._lev()):
-                            self._log_signal(key, sig, "stop too close to liquidation")
+                        late = now_ms - newest_close
+                        if late > max_data_age(tf):  # the candle arrived late: its prices are old now
+                            self._log_signal(key, sig, "stale prices",
+                                             f"the candle closed {late / 60_000:.0f} min ago")
                             events["filtered"].append(key)
-                            log.info("paper short %s skipped: stop %.6g too close to liquidation at %gx",
-                                     key, sig.stop, self._lev())
                             continue
-                        perp = perp_longs and sig.side is Side.BUY  # a long as a perpetual future
-                        if perp and not futures.long_stop_ok(sig.entry, sig.stop, self._lev()):
-                            self._log_signal(key, sig, "stop too close to liquidation")
-                            events["filtered"].append(key)
-                            log.info("paper perp long %s skipped: stop %.6g too close to liquidation at %gx",
-                                     key, sig.stop, self._lev())
-                            continue
-                        bcfg = as_perp(self.cfg.backtest) if perp else self.cfg.backtest
-                        if too_costly(sig, bcfg):  # fees would eat too much of the risk
-                            self._log_signal(key, sig, "fees too high for the stop",
-                                             f"fees and slippage {cost_r(sig, bcfg):.2f}R of the risk, "
-                                             f"limit {bcfg.max_cost_r:.2f}R")
-                            events["filtered"].append(key)
-                            log.info("paper signal %s skipped: fees and slippage are %.2fR of the risk "
-                                     "(limit %.2fR)", key, cost_r(sig, bcfg), bcfg.max_cost_r)
+                        legs = self._legs(key, sig, sym, on, events)
+                        if not legs:
                             continue
                         ctx_mult = self._context(ex, sym, now_ms)
                         if ctx_mult <= 0:
-                            self._log_signal(key, sig, "market context or news filter")
-                            events["filtered"].append(key)
+                            for k, _perp in legs:
+                                self._log_signal(k, sig, "market context or news filter")
+                                events["filtered"].append(k)
                             continue
                         ai = self._ai_check(sig, entry.id, df)
                         if not ai["take"]:
                             self._note_filtered(key, sig, ai)
-                            self._log_signal(key, sig, "AI filter")
-                            events["filtered"].append(key)
+                            for k, _perp in legs:
+                                self._log_signal(k, sig, "AI filter")
+                                events["filtered"].append(k)
                             continue
                         tch = self._teacher_check(sig, entry.id, df)
                         if not tch["take"]:
-                            self._log_signal(key, sig, "backtest teacher")
-                            events["filtered"].append(key)
+                            for k, _perp in legs:
+                                self._log_signal(k, sig, "backtest teacher")
+                                events["filtered"].append(k)
                             log.info("paper signal %s skipped: the backtest teacher %s says avoid %s",
                                      key, tch["version"], tch["situation"])
                             continue
                         sig = tch["signal"]
                         if market not in regimes:
                             regimes[market] = _regime(df, tf)
-                        self.state["open"][key] = {"entry_id": entry.id, "signal": _sig_dict(sig),
-                                                   "situation": tch["situation"], "teacher": tch["version"],
-                                                   "size_mult": size_mult * ctx_mult * ai["size"], "filled": False,
-                                                   "ai_prob": ai["prob"], "ai_version": ai["version"],
-                                                   "regime": regimes[market], "perp": perp}
-                        events["opened"].append(key)
-                        self._log_signal(key, sig, "")
-                        log.info("paper signal %s entry~%.6g stop %.6g ai p=%s size x%.2f regime %s", key,
-                                 sig.entry, sig.stop, ai["prob"], ai["size"], (regimes[market] or {}).get("label"))
+                        for k, perp in legs:
+                            self.state["open"][k] = {"entry_id": entry.id, "signal": _sig_dict(sig),
+                                                     "situation": tch["situation"], "teacher": tch["version"],
+                                                     "size_mult": size_mult * ctx_mult * ai["size"], "filled": False,
+                                                     "ai_prob": ai["prob"], "ai_version": ai["version"],
+                                                     "regime": regimes[market], "perp": perp}
+                            events["opened"].append(k)
+                            self._log_signal(k, sig, "")
+                            log.info("paper signal %s entry~%.6g stop %.6g ai p=%s size x%.2f regime %s", k,
+                                     sig.entry, sig.stop, ai["prob"], ai["size"], (regimes[market] or {}).get("label"))
         for market, (_df, close, _fresh) in frames.items():
             self._seen[market] = close
         newest = max((c for _d, c, _f in frames.values() if c), default=None)
@@ -251,11 +271,12 @@ class PaperTrader:
 
     # ---- internals ------------------------------------------------------------------------------
 
-    def _symbols(self) -> list[str]:
-        if not callable(self.symbols):
-            return self.symbols
+    def _symbols(self, market: str | None = None) -> list[str]:
+        src = self.symbols if market is None else (lambda: self.market_symbols(market))
+        if not callable(src):
+            return list(src)
         try:
-            return list(self.symbols())
+            return list(src())
         except Exception:  # a broken ranking file must not stop paper trading
             log.exception("can't read the pair list; skipping new entries this tick")
             return []
@@ -289,7 +310,8 @@ class PaperTrader:
             sig = self.state["open"][key]["signal"]
             ai = self.state["open"][key].get("ai_prob")
             regime = (self.state["open"][key].get("regime") or {}).get("label")
-            side = "SELL (short, perp)" if sig.get("side") == Side.SELL.value else "BUY"
+            side = ("SELL (short, perp)" if sig.get("side") == Side.SELL.value else
+                    "BUY (perp)" if self.state["open"][key].get("perp") else "BUY")
             self.events.emit("trade_open", f"paper {side} signal {key} entry~{sig['entry']:.6g} "
                              f"stop {sig['stop']:.6g}" + (f" (AI p={ai:.2f})" if ai is not None else "")
                              + (f" regime {regime}" if regime else ""),
@@ -302,8 +324,59 @@ class PaperTrader:
         for sid in events["retired"]:
             self.events.emit("error", f"paper: strategy {sid} retired by its results", level="warning")
 
-    def _lev(self) -> float:
-        return futures.leverage()
+    def _wallet(self, market: str) -> dict:
+        return wallet.load(self.wallet_path if market == "spot" else self.futures_wallet_path)
+
+    def _legs(self, key: str, sig: Signal, sym: str, engines: dict, events: dict) -> list[tuple[str, bool]]:
+        """Where a signal is traded: [(position key, perp)]. A long is a spot buy on Spot AI and a
+        perp long on Futures AI; a short is a perp short on Futures AI only. A leg is left out when
+        its engine is off, its slot is taken, its stop is too near liquidation, or fees would eat
+        too much of the risk (each skip is logged)."""
+        short = sig.side is Side.SELL
+        wanted = []
+        if engines["futures"]:
+            wanted.append((key if short else key + FUTURES_SUFFIX, True))
+        if engines["spot"] and not short:
+            wanted.insert(0, (key, False))
+        legs = []
+        lim = wallet.limits(self.limits_path)
+        for k, perp in wanted:
+            if k in self.state["open"]:
+                continue
+            mkt = "futures" if perp else "spot"
+            why = wallet.entry_block(self.state, self._wallet(mkt), mkt, lim[mkt], self._now or int(time.time() * 1000))
+            if why:
+                self._log_signal(k, sig, "engine limit", why)
+                events["filtered"].append(k)
+                continue
+            if perp:
+                lev = self._lev(sym)
+                ok = futures.short_stop_ok if short else futures.long_stop_ok
+                if not ok(sig.entry, sig.stop, lev):
+                    self._log_signal(k, sig, "stop too close to liquidation")
+                    events["filtered"].append(k)
+                    log.info("paper %s %s skipped: stop %.6g too close to liquidation at %gx",
+                             "short" if short else "perp long", k, sig.stop, lev)
+                    continue
+            bcfg = as_perp(self.cfg.backtest) if perp else self.cfg.backtest
+            if too_costly(sig, bcfg):  # fees would eat too much of the risk
+                self._log_signal(k, sig, "fees too high for the stop",
+                                 f"fees and slippage {cost_r(sig, bcfg):.2f}R of the risk, "
+                                 f"limit {bcfg.max_cost_r:.2f}R")
+                events["filtered"].append(k)
+                log.info("paper signal %s skipped: fees and slippage are %.2fR of the risk (limit %.2fR)",
+                         k, cost_r(sig, bcfg), bcfg.max_cost_r)
+                continue
+            legs.append((k, perp))
+        return legs
+
+    def _lev(self, symbol: str = "") -> float:
+        """The Trading page's paper leverage when chosen (up to Bybit's maximum for ``symbol``),
+        else AITRADER_LEVERAGE (1x-3x)."""
+        chosen = wallet.paper_leverage(self.market_path)
+        if not chosen:
+            return futures.leverage()
+        return futures.clamp_paper_leverage(chosen, perp_limits.max_leverage(symbol, self.perp_limits_path))
 
     def _ai_check(self, sig: Signal, entry_id: str, df) -> dict:
         if self.ai_filter is None or sig.side is Side.SELL:
@@ -359,7 +432,7 @@ class PaperTrader:
         close_one = one() if callable(one) else {}
         left = 0  # positions the close request covers that couldn't be priced this pass
         for key, pos in list(self.state["open"].items()):
-            entry_id, ex, sym, tf = key.split("|")
+            entry_id, ex, sym, tf = key.split("|")[:4]
             # a close request covers the positions opened before it, not those opened after
             closing = killed or (close_req is not None and pos["signal"]["ts"] <= close_req * 1000)
             reason = why
@@ -405,16 +478,17 @@ class PaperTrader:
                 continue
             equity = self.state["equity"].get(entry_id, self.cfg.start_equity)
             short = sig.side is Side.SELL
+            mkt = "futures" if short or pos.get("perp") else "spot"
             if not pos["filled"]:
-                # sized from the one paper wallet every strategy shares (learn.wallet)
-                bal = wallet.balance(self.state, wallet.load(self.wallet_path))
-                lev = self._lev() if short or pos.get("perp") else 1.0
+                # sized from its workspace's paper wallet (learn.wallet): Spot or Futures
+                bal = wallet.balance(self.state, self._wallet(mkt), mkt)
+                lev = self._lev(sym) if short or pos.get("perp") else 1.0
                 risk_usdt = bal * sig.risk_pct * pos.get("size_mult", 1.0)
                 units = risk_usdt / abs(sig.entry - sig.stop)
                 units = min(units, bal * self.cfg.max_position_frac / t.entry)
                 # all open positions together may not tie up more than the wallet
                 # (a spot position ties up what it cost; a perp position only its margin)
-                units = min(units, max(0.0, bal - wallet.in_use(self.state, skip=key)) * lev / t.entry)
+                units = min(units, max(0.0, bal - wallet.in_use(self.state, skip=key, market=mkt)) * lev / t.entry)
                 skip = ("the wallet's money is all in open positions" if units <= 0 else
                         f"below Bybit's {wallet.MIN_ORDER_USDT:g} USDT minimum order"
                         if units * t.entry < wallet.MIN_ORDER_USDT else "")
@@ -438,7 +512,8 @@ class PaperTrader:
             row = {**_trade_dict(t), "key": key, "entry_id": entry_id, "units": pos["units"],
                    "side": sig.side.value, "perp": short or bool(pos.get("perp")),
                    "pnl_usdt": pnl, "equity_after": equity + pnl,
-                   "wallet_after": wallet.balance(self.state, wallet.load(self.wallet_path)) + pnl,
+                   "market": mkt,
+                   "wallet_after": wallet.balance(self.state, self._wallet(mkt), mkt) + pnl,
                    "ai_prob": pos.get("ai_prob"), "ai_version": pos.get("ai_version"),
                    "regime": (pos.get("regime") or {}).get("label")}
             self.state["trades"].append(row)

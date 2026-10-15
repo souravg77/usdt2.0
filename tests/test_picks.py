@@ -197,23 +197,115 @@ def test_trading_page_winners_only_button(tmp_path, monkeypatch):
     assert not picks.winners_only(reg_path)
 
 
-def test_trading_page_spot_futures_switch(tmp_path, monkeypatch):
+def test_futures_mode_switches_the_whole_dashboard(tmp_path, monkeypatch):
+    import asyncio
+    import json
+
     from aitrader.learn import wallet
+    from aitrader.web.live import LiveMarket
 
     monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("AITRADER_LEVERAGE", raising=False)
     runner = JobRunner(str(tmp_path / "jobs"), env_file=str(tmp_path / "none.env"))
     paths = Paths(report=str(tmp_path / "none.json"), registry=str(tmp_path / "registry.json"),
                   paper_state=str(tmp_path / "learn" / "paper_state.json"))
+    (tmp_path / "learn").mkdir()
+    key = "s1|bybit|BTC/USDT|1h"
+    json.dump({"open": {key: {"entry_id": "s1", "filled": True, "entry": 100.0, "units": 1.0, "mark": 101.0,
+                              "mark_r": 0.2, "perp": True, "leverage": 2.0,
+                              "signal": {"ts": 1, "entry": 100.0, "stop": 95.0, "side": "buy"}}}},
+              open(paths.paper_state, "w"))
     app = create_app(Settings(db_path=str(tmp_path / "x.db"), symbols=["BTC/USDT"]),
                      Auth("admin", "correct horse battery", "k"), runner, paths)
     c = TestClient(app)
     c.post("/login", data={"user": "admin", "password": "correct horse battery"})
-    assert "Switch to futures trading" in c.get("/trading").text
+    page = c.get("/trading").text
+    assert 'action="/market-mode"' in page and "Spot AI workspace" in page and "Turn Futures AI off" in page
+    # the Spot view hides the futures position; the Futures view shows it with its liquidation price
+    assert "<th>Liquidation</th>" not in page and "long (perp)" not in page
     csrf = Auth("admin", "correct horse battery", "k").csrf(c.cookies.get(COOKIE))
-    assert c.post("/trading/paper/market", data={"csrf": "x", "market": "futures"}).status_code == 403
-    r = c.post("/trading/paper/market", data={"csrf": csrf, "market": "futures"}, follow_redirects=False)
-    assert "Futures%20on" in r.headers["location"]
-    assert wallet.futures_on(wallet.market_path(paths.paper_state))
-    assert "Switch longs to spot" in c.get("/trading").text
-    c.post("/trading/paper/market", data={"csrf": csrf, "market": "spot"})
-    assert not wallet.futures_on(wallet.market_path(paths.paper_state))
+    path = wallet.market_path(paths.paper_state)
+    # the header switch, from any page, back to the same page
+    assert c.post("/market-mode", data={"csrf": "x", "market": "futures"}).status_code == 403
+    r = c.post("/market-mode", data={"csrf": csrf, "market": "futures", "back": "/pairs"}, follow_redirects=False)
+    assert r.headers["location"].startswith("/pairs?msg=Showing") and wallet.futures_on(path)
+    r = c.post("/market-mode", data={"csrf": csrf, "market": "futures", "back": "https://evil.example"},
+               follow_redirects=False)
+    assert r.headers["location"].startswith("/trading?")
+    page = c.get("/trading").text
+    assert "Futures AI 1x" in page and "Futures AI workspace" in page and "<th>Liquidation</th>" in page
+    assert "long (perp)" in page and "Futures AI paper wallet" in page
+    assert "50.5" in page  # a 2x long from 100: liquidation about 100 x (1 - 1/2 + 0.005)
+    # Bybit's leverage choices for paper futures, 1x-100x
+    assert '<option value="50">50x</option>' in page and '<option value="100">100x</option>' in page
+    c.post("/trading/paper/leverage", data={"csrf": csrf, "lev": "500"})
+    assert wallet.paper_leverage(path) == 100.0
+    c.post("/trading/paper/leverage", data={"csrf": csrf, "lev": "25"})
+    assert wallet.paper_leverage(path) == 25.0 and "Futures AI 25x" in c.get("/markets").text
+    assert "perpetual" in c.get("/markets").text
+    # each wallet keeps its own starting amount
+    c.post("/trading/paper/wallet", data={"csrf": csrf, "amount": "500", "market": "futures"})
+    assert wallet.load(wallet.wallet_path(paths.paper_state, "futures"))["start"] == 500.0
+    assert wallet.load(wallet.wallet_path(paths.paper_state))["start"] == 10_000.0
+    # the engines turn on and off one at a time
+    eng = wallet.engines_path(paths.paper_state)
+    c.post("/trading/paper/market", data={"csrf": csrf, "market": "futures", "on": "0"})
+    assert wallet.engines(eng) == {"spot": True, "futures": False} and "Turn Futures AI on" in c.get("/trading").text
+    c.post("/trading/paper/market", data={"csrf": csrf, "market": "futures", "on": "1"})
+    assert wallet.engines(eng) == {"spot": True, "futures": True}
+    # each engine's own limits
+    c.post("/trading/paper/limits", data={"csrf": csrf, "market": "futures", "loss": "2.5", "max_open": "1"})
+    assert wallet.limits(wallet.limits_path(paths.paper_state))["futures"] == {"daily_loss_pct": 2.5, "max_open": 1}
+    assert wallet.limits(wallet.limits_path(paths.paper_state))["spot"]["max_open"] == wallet.DEFAULT_MAX_OPEN
+    assert "PAUSED" in c.get("/trading").text and "Futures AI has 1 open positions" in c.get("/trading").text
+    c.post("/market-mode", data={"csrf": csrf, "market": "spot"})
+    assert not wallet.futures_on(path) and "Spot AI workspace" in c.get("/trading").text
+
+    class Perps:
+        asked = []
+
+        async def fetch_tickers(self):
+            return {"BTC/USDT:USDT": {"last": 80000.0, "percentage": 1.0, "info": {"fundingRate": "0.0001"}}}
+
+        async def fetch_ohlcv(self, symbol, tf, limit=500):
+            self.asked.append(symbol)
+            return [[1, 1, 1, 1, 1, 1]]
+
+    feed = LiveMarket(str(tmp_path / "x.db"), client=Perps(), perp=True)
+    t = asyncio.run(feed.tickers(["BTC/USDT"]))
+    assert t["tickers"][0]["funding"] == 0.0001 and t["tickers"][0]["price"] == 80000.0
+    asyncio.run(feed.candles("BTC/USDT", "1h"))
+    assert Perps.asked == ["BTC/USDT:USDT"]
+
+
+def test_paper_leverage_is_cut_to_each_coins_bybit_maximum(tmp_path):
+    import asyncio
+
+    from aitrader.learn import wallet
+    from aitrader.learn.paper import PaperTrader
+    from aitrader.market import perp_limits
+    from aitrader.trade import futures
+
+    markets = {"BTC/USDT:USDT": {"swap": True, "linear": True, "quote": "USDT", "settle": "USDT", "base": "BTC",
+                                 "limits": {"leverage": {"max": 100}}},
+               "PEPE/USDT:USDT": {"swap": True, "linear": True, "quote": "USDT", "settle": "USDT", "base": "PEPE",
+                                  "limits": {"leverage": {"max": 25}}},
+               "PEPE/USDT": {"spot": True, "base": "PEPE", "quote": "USDT"}}
+
+    class Client:
+        async def load_markets(self):
+            return markets
+
+    lp = str(tmp_path / "limits.json")
+    assert perp_limits.due(lp)
+    asyncio.run(perp_limits.refresh(Client(), lp, now_ms=1000))
+    assert perp_limits.max_leverage("PEPE/USDT", lp) == 25.0 and perp_limits.max_leverage("XRP/USDT", lp) is None
+    assert not perp_limits.due(lp, now_ms=2000)
+    assert futures.clamp_paper_leverage(50, 25) == 25 and futures.clamp_paper_leverage(500) == 100
+    store = make_store(tmp_path / "c.db")
+    state = str(tmp_path / "s.json")
+    trader = PaperTrader(store, str(tmp_path / "reg.json"), ["bybit"], ["BTC/USDT"], state_path=state)
+    trader.perp_limits_path = lp
+    wallet.set_leverage(wallet.market_path(state), 50)
+    assert trader._lev("BTC/USDT") == 50 and trader._lev("PEPE/USDT") == 25 and trader._lev("XRP/USDT") == 50
+    store.close()

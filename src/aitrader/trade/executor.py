@@ -215,7 +215,10 @@ class Executor:
     async def _enter_new(self, paper: dict, out: dict) -> None:
         now_ms = int(self.clock() * 1000)
         for key, pos in paper.get("open", {}).items():
-            entry_id, ex, symbol, tf = key.split("|")
+            parts = key.split("|")
+            if len(parts) != 4:  # a Futures AI paper long (key|futures): live longs are spot buys only
+                continue
+            entry_id, ex, symbol, tf = parts
             sig = pos["signal"]
             mark = f"{key}|{sig['ts']}"
             if ex != self.exchange or key in self.state["positions"] or mark in self.state["skipped"]:

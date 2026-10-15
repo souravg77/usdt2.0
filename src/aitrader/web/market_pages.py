@@ -35,13 +35,27 @@ STATIC = os.path.join(os.path.dirname(__file__), "static")
 def add_market_routes(app, *, settings, page, guard, exchange: str = EXCHANGE, clock=None,
                       live: LiveMarket | None = None, paper_state: str = "", registry: str = "") -> None:
     live = live or LiveMarket(settings.db_path, exchange)
+    perp_live: list = []  # the Futures-mode feed, made on first use
+
+    def futures_mode() -> bool:
+        from ..learn import wallet
+
+        return bool(paper_state) and wallet.futures_on(wallet.market_path(paper_state))
+
+    def feed() -> LiveMarket:
+        """Perpetual prices in Futures mode, spot otherwise."""
+        if not futures_mode():
+            return live
+        if not perp_live:
+            perp_live.append(LiveMarket(settings.db_path, exchange, perp=True))
+        return perp_live[0]
     memo: dict[tuple, tuple[tuple, dict]] = {}  # (symbol, tf) -> (candle fingerprint, studies)
     tfs = CHART_TIMEFRAMES
 
     def current() -> list[str]:
         """The pairs being traded now: the usual list plus today's top gainers when that's on."""
         try:
-            return configured_symbols(settings.symbols)
+            return configured_symbols(settings.symbols, market="futures" if futures_mode() else "spot")
         except Exception:
             return list(settings.symbols)
 
@@ -60,7 +74,7 @@ def add_market_routes(app, *, settings, page, guard, exchange: str = EXCHANGE, c
         if bad:
             return bad
         symbol, tf = pick(symbol, tf)
-        return JSONResponse({"symbol": symbol, "tf": tf, **await live.candles(symbol, tf)})
+        return JSONResponse({"symbol": symbol, "tf": tf, **await feed().candles(symbol, tf)})
 
     @app.get("/api/market/studies")
     async def api_studies(request: Request, symbol: str = "", tf: str = "15m"):
@@ -70,7 +84,7 @@ def add_market_routes(app, *, settings, page, guard, exchange: str = EXCHANGE, c
         if bad:
             return bad
         symbol, tf = pick(symbol, tf)
-        data = await live.candles(symbol, tf)
+        data = await feed().candles(symbol, tf)
         rows = data.get("candles") or []
         mark = (len(rows), tuple(rows[0]) if rows else (), tuple(rows[-1]) if rows else ())
         hit = memo.get((symbol, tf))
@@ -84,8 +98,8 @@ def add_market_routes(app, *, settings, page, guard, exchange: str = EXCHANGE, c
         bad = api_guard(request)
         if bad:
             return bad
-        hot = set(gainers.symbols())
-        res = await live.tickers(current())
+        hot = set(gainers.symbols(gainers.path_for("futures" if futures_mode() else "spot")))
+        res = await feed().tickers(current())
         return JSONResponse({**res, "tickers": [{**t, "gainer": True} if t["symbol"] in hot else t
                                           for t in res.get("tickers", [])]})
 
@@ -111,7 +125,7 @@ def add_market_routes(app, *, settings, page, guard, exchange: str = EXCHANGE, c
         try:
             db = CandleStore(settings.db_path)
             try:
-                hot = set(gainers.symbols())
+                hot = set(gainers.symbols(gainers.path_for("futures" if futures_mode() else "spot")))
                 rows = [{**_ticker(db, exchange, s, now), "gainer": s in hot} for s in current()]
                 if symbol:
                     bars = db.load(exchange, symbol, tf, start=now - BARS * TF_MS.get(tf, 900_000))
@@ -126,6 +140,7 @@ def add_market_routes(app, *, settings, page, guard, exchange: str = EXCHANGE, c
             f'<div id="market" data-symbol="{_e(symbol)}" data-tf="{_e(tf)}">'
             f'<div id="tickers" class="tickers">{_ticker_buttons(rows, symbol)}</div>'
             f'<div class="card chart-card"><div class="chart-head"><h2 id="chart-title">{_e(symbol)}</h2>'
+            f'{"<span class=badge>perpetual</span>" if futures_mode() else ""}'
             f'<div class="segs js-only">{tabs}</div></div>'
             f'<div id="studies" class="studies js-only" aria-label="indicators">{_study_chips(used)}</div>'
             f'{_used_line(used)}'

@@ -122,10 +122,14 @@
   function status() {
     if (!state.lastOk) { statusEl.innerHTML = '<span class="dot"></span> Connecting…'; return; }
     var age = (Date.now() - state.lastOk) / 1000;
-    var live = state.source === "live" && age < 10;
-    statusEl.className = "live-status " + (live ? "on" : "off");
-    statusEl.innerHTML = '<span class="dot"></span> ' +
-      (live ? "Live · Bybit" : state.source === "database" ? "Saved prices" : "Reconnecting") +
+    // LIVE: Bybit answered in the last 10 s; DELAYED: under a minute ago; STALE: saved prices or
+    // older; DISCONNECTED: nothing for 3 minutes
+    var label = age > 180 ? "DISCONNECTED" : state.source !== "live" || age >= 60 ? "STALE"
+      : age >= 10 ? "DELAYED" : "LIVE";
+    var live = label === "LIVE";
+    statusEl.className = "live-status " + (live ? "on" : "off") + (label === "DISCONNECTED" ? " down" : "");
+    statusEl.innerHTML = '<span class="dot"></span> <b>' + label + "</b> · " +
+      (live ? "Bybit" : state.source === "database" ? "saved prices" : label === "DELAYED" ? "Bybit" : "reconnecting") +
       " · updated " + (age < 1 ? "just now" : age.toFixed(0) + "s ago") +
       (state.note ? '<span class="muted"> · ' + escapeHtml(state.note) + "</span>" : "") +
       (state.tickerSource === "database" && state.source === "live"

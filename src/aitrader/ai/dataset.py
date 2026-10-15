@@ -173,7 +173,7 @@ def paper_rows(store, state_path: str, cfg: BacktestConfig | None = None) -> lis
         trades = json.load(fh).get("trades", [])
     rows = []
     for t in trades:
-        sid, ex, sym, tf = t["key"].split("|")
+        sid, ex, sym, tf = t["key"].split("|")[:4]
         step = TIMEFRAME_MS[tf]
         candles = store.load(ex, sym, tf, t["signal_ts"] - PAPER_WARMUP * step,
                              t["exit_ts"] + LABEL_HORIZON * step)

@@ -47,6 +47,7 @@ def test_paper_trades_are_sized_from_the_wallet(tmp_path):
         state = str(d / "paper_state.json")
         if start:
             wallet.save(wallet.wallet_path(state), start, now_ms=0)
+        wallet.set_engine(wallet.engines_path(state), "futures", False)  # the spot wallet alone
         trader = PaperTrader(store, str(d / "reg.json"), ["bybit"], ["BTC/USDT"], state_path=state)
         for i in range(600, 700):
             trader.tick(now_ms=int(df.ts.iloc[i]) + H)
@@ -101,7 +102,7 @@ def test_trading_page_sets_the_wallet(tmp_path, monkeypatch):
                                    paths))
     token = login(client)
     page = client.get("/trading").text
-    assert "Paper wallet (fake money)" in page and "10,012.50 USDT" in page  # default 10,000 + 12.50
+    assert "Spot AI paper wallet (fake money)" in page and "10,012.50 USDT" in page  # default 10,000 + 12.50
     csrf = page.split('name="csrf" value="')[1].split('"')[0]
     r = client.post("/trading/paper/wallet", data={"csrf": csrf, "amount": "50"}, follow_redirects=False)
     assert "bad=1" in r.headers["location"] and not os.path.exists("data/learn/paper_wallet.json")
@@ -110,5 +111,5 @@ def test_trading_page_sets_the_wallet(tmp_path, monkeypatch):
     assert wallet.load("data/learn/paper_wallet.json")["start"] == 1000.0
     page = client.get("/trading").text
     assert "Balance <b>1,000.00 USDT</b>" in page and 'value="1000"' in page
-    assert "Wallet <b>1,000.00 USDT</b>" in client.get("/").text
+    assert "Spot AI wallet <b>1,000.00 USDT</b>" in client.get("/").text
     assert token
