@@ -517,9 +517,10 @@ def test_open_positions_follow_the_live_price(tmp_path, monkeypatch):
     os.makedirs("data/learn", exist_ok=True)
     os.makedirs("data/trade", exist_ok=True)
     paper = {"open": {"a|bybit|BTC/USDT|1h": {"filled": True, "entry": 100.0, "units": 2.0, "mark_r": 0.1,
-                                              "signal": {"entry": 100.0, "stop": 95.0, "side": "buy"}},
+                                              "signal": {"entry": 100.0, "stop": 95.0, "side": "buy", "target": 110.0}},
                       "b|bybit|ETH/USDT|4h": {"filled": True, "entry": 50.0, "units": 3.0,
-                                              "signal": {"entry": 50.0, "stop": 52.0, "side": "sell"}},
+                                              "signal": {"entry": 50.0, "stop": 52.0, "side": "sell", "target": None,
+                                                         "trailing": "close_below_ema20"}},
                       "c|bybit|SOL/USDT|1h": {"filled": False, "signal": {"entry": 10.0, "stop": 9.0}}}}
     json.dump(paper, open(paths.paper_state, "w"))
     json.dump({"positions": {"k": {"key": "k", "entry_id": "a", "symbol": "BTC/USDT", "amount": 0.5, "entry": 100.0,
@@ -534,7 +535,10 @@ def test_open_positions_follow_the_live_price(tmp_path, monkeypatch):
     page = client.get("/trading").text
     # the price now and the stop loss with how far away it is, for longs and shorts
     for cell in ("<th>Price now</th>", "<th>Stop loss</th>", 'data-px="paper|a|bybit|BTC/USDT|1h"',
-                 'data-stop="paper|b|bybit|ETH/USDT|4h" data-level="52" data-short="1"'):
+                 'data-stop="paper|b|bybit|ETH/USDT|4h" data-level="52" data-short="1"',
+                 # the take-profit, or the exit rule when a strategy has no fixed target
+                 "<th>Take profit</th>", 'data-tp="paper|a|bybit|BTC/USDT|1h" data-level="110"',
+                 "exit rule: close_below_ema20", "no fixed target"):
         assert cell in page, cell
     for cell in ('data-pos="paper|a|bybit|BTC/USDT|1h"', 'data-pos="live|k"', 'data-pos="total"',
                  '<script src="/static/positions.js" defer></script>'):
@@ -542,6 +546,8 @@ def test_open_positions_follow_the_live_price(tmp_path, monkeypatch):
     js = client.get("/static/positions.js")
     assert js.status_code == 200 and "/api/positions" in js.text
     assert live_position_usdt(paper, {}, {})["rows"] == {}  # no price: cells keep what they showed
-    from aitrader.web.app import stop_distance
+    from aitrader.web.app import stop_distance, target_distance
+    assert target_distance(100.0, 110.0, "buy") == 10.0 and target_distance(50.0, 45.0, "sell") == 10.0
+    assert target_distance(111.0, 110.0, "buy") < 0 and target_distance(100.0, None, "buy") is None
     assert stop_distance(100.0, 95.0, "buy") == 5.0 and stop_distance(48.0, 52.0, "sell") == 100 * 4 / 48
     assert stop_distance(94.0, 95.0, "buy") < 0 and stop_distance(None, 95.0, "buy") is None
