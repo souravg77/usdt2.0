@@ -19,14 +19,16 @@ from ..accounts.live import gate_problems, live_stop_control, turn_off, turn_on
 from ..accounts.runner import user_control, user_dir
 from ..config import EXCHANGE, LIVE_CONFIRM_PHRASE
 from ..safety import live_gate_problems
-from .app import _csrf, _e, _equity_svg, _load_json, _positions_table, _q, _trades_table, _when, kill_confirmed
+from .app import (_csrf, _e, _equity_svg, _load_json, _positions_table, _q, _trades_table, _when, cross_site,
+                  kill_confirmed)
+from .auth import COOKIE
 
 SIGNUPS_PER_HOUR = 3
 USER_NAV = '<a href="/me">My account</a>'
 
 
 def add_user_routes(app, *, settings, auth, paths, users: UserStore, keys_secret: str, signup: bool,
-                    verifier, page, session, guard) -> None:
+                    verifier, page, session, guard, secure_cookie: bool = False) -> None:
     verifier = verifier or verify_keys
     users_dir = getattr(paths, "users_dir", "data/users")
     signups: dict[str, deque] = defaultdict(deque)
@@ -89,6 +91,8 @@ my account and I turn it on, and that I keep my exchange key without withdrawal 
                       password2: str = Form(""), agree: str = Form("")):
         if not signup:
             return RedirectResponse("/signup", status_code=303)
+        if cross_site(request):
+            return PlainTextResponse("sign up from this site's own page", status_code=403)
         ip = request.client.host if request.client else "?"
         q = signups[ip]
         while q and q[0] < time.time() - 3600:
@@ -252,10 +256,15 @@ stored encrypted and never shown again.</p>
         user, resp = checked(request, csrf)
         if resp:
             return resp
+        tries = f"password:{user.id}"
+        if auth.locked_out(tries):
+            return back(error="Live trading not turned on: too many wrong passwords. Try again in 15 minutes.")
         try:
             turn_on(users, settings, golive(), users_dir, user.id, password, confirm, budget,
                     actor=user.email, events=events())
         except AccountError as exc:
+            if str(exc) == "the password is wrong":
+                auth.record_failure(tries)
             return back(error=f"Live trading not turned on: {exc}")
         return back(msg="Live trading is ON. Turn it off here at any time.")
 
@@ -302,13 +311,21 @@ stored encrypted and never shown again.</p>
         user, resp = checked(request, csrf)
         if resp:
             return resp
+        tries = f"password:{user.id}"  # wrong current passwords count like wrong logins
+        if auth.locked_out(tries):
+            return back(error="Too many wrong passwords. Try again in 15 minutes.")
         if users.authenticate(user.email, current) is None:
+            auth.record_failure(tries)
             return back(error="The current password is wrong.")
         try:
             users.set_password(user.id, new)
         except AccountError as exc:
             return back(error=str(exc))
-        return back(msg="Password changed.")
+        auth.end_sessions(user.subject)  # logged out everywhere else; this browser gets a new session
+        resp = back(msg="Password changed. Other devices are logged out.")
+        resp.set_cookie(COOKIE, auth.issue("", user.subject), max_age=int(auth.session_s), httponly=True,
+                        samesite="strict", secure=secure_cookie)
+        return resp
 
     # ---- admin: users ---------------------------------------------------------------------------
 

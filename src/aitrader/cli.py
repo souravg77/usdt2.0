@@ -1107,7 +1107,9 @@ def cmd_web(s: Settings, args) -> int:
     except AuthError as exc:
         print(exc, file=sys.stderr)
         return 1
-    secure = e("AITRADER_WEB_SECURE_COOKIE", "false").strip().lower() in ("1", "true", "yes")
+    # served over HTTPS (AITRADER_SITE set): the session cookie never goes over plain http
+    https = bool((e("AITRADER_SITE") or "").strip()) and not (e("AITRADER_SITE") or "").strip().startswith("http://")
+    secure = e("AITRADER_WEB_SECURE_COOKIE", "true" if https else "false").strip().lower() in ("1", "true", "yes")
     from .accounts import UserStore
 
     signup = e("AITRADER_WEB_SIGNUP", "closed").strip().lower() in ("open", "true", "1", "yes")

@@ -260,7 +260,10 @@ def test_a_limit_entry_pays_the_maker_fee_or_misses_the_trade():
     from aitrader.backtest.engine import maker_fill
 
     cfg = BacktestConfig(taker_fee=0.001, maker_fee=0.0002, slippage_bps=5, max_cost_r=0)
-    df = _bars([(100, 100, 100, 100), (100, 104.5, 99.5, 104)])  # dips below 100 first, then the target
+    df = _bars([(100, 100, 100, 100), (100, 101, 99.5, 100.5), (100.5, 104.5, 100.5, 104)])  # fills, then the target
+    same = _bars([(100, 100, 100, 100), (100, 104.5, 99.5, 104)])  # target and fill in one candle
+    assert simulate_signal(_sig(), same, 1, BacktestConfig(**{**cfg.__dict__, "maker_entry": True}), {}).exit_reason \
+        != "target"  # the target may have come before the fill: not counted
     taker = simulate_signal(_sig(), df, 1, cfg, {})
     maker = simulate_signal(_sig(), df, 1, BacktestConfig(**{**cfg.__dict__, "maker_entry": True}), {})
     assert maker_fill(_sig(), df, 1) == 100.0 and maker.entry == 100.0 and taker.entry > 100.0
@@ -298,3 +301,36 @@ def test_the_paper_trader_says_when_a_limit_entry_was_not_filled(tmp_path, monke
     store.close()
     assert not trader.state["trades"]
     assert any(s["skipped"] == "limit order not filled" for s in trader.state["signals"])
+
+
+def test_week_limit_still_checked_during_a_day_pause_and_reset_wallet_starts_fresh():
+    now = guards.week_start_ms(1_760_000_000_000) + 3 * 86_400_000
+    g = {**guards.DEFAULTS}
+    w = {"start": 1000.0, "since": 0}
+    state = {"trades": [], "open": {"s|bybit|BTC/USDT|1h|futures": {"perp": True, "units": 1, "entry": 100,
+                                                                     "signal": {"side": "sell"}}},
+             "breakers": {"futures": {"kind": "day", "until": now + 3_600_000, "close": False, "why": "day"}}}
+    import aitrader.learn.guards as gm
+
+    orig = gm.open_pnl
+    gm.open_pnl = lambda st, m: -900.0  # the open short keeps losing during the pause
+    try:
+        br = guards.update_breaker(state, w, "futures", g, now)
+        assert br["kind"] == "week" and br["close"]
+        # a wallet reset an hour ago doesn't carry this week's earlier losses
+        gm.open_pnl = lambda st, m: 0.0
+        state = {"trades": [{"exit_ts": now - 86_400_000, "pnl_usdt": -500.0, "perp": True,
+                             "key": "s|bybit|BTC/USDT|1h|futures"}], "open": {}}
+        assert guards.update_breaker(state, {"start": 1000.0, "since": now - 3_600_000}, "futures", g, now) is None
+        assert guards.update_breaker(state, {"start": 1000.0, "since": 0}, "futures", g, now)["kind"] == "week"
+    finally:
+        gm.open_pnl = orig
+
+
+def test_nan_and_inf_are_not_saved_as_limits(tmp_path):
+    path = str(tmp_path / "g.json")
+    for bad in ("nan", "inf"):
+        with pytest.raises(ValueError):
+            guards.save(path, "spot", {"min_rr": bad})
+    assert guards._clean({"min_rr": float("nan"), "day_pause_pct": float("inf")})["day_pause_pct"] == \
+        guards.DEFAULTS["day_pause_pct"]

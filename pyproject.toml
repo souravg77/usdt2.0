@@ -19,6 +19,7 @@ dependencies = [
   "uvicorn>=0.29",
   "python-multipart>=0.0.9",
   "cryptography>=42",
+  "multidict>=6.9.1",  # via ccxt/aiohttp; older versions have PYSEC-2026-4244
 ]
 
 [project.optional-dependencies]

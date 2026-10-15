@@ -26,6 +26,7 @@ the paper state itself. Paper only: the live trader keeps its own limits.
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 from datetime import datetime, timedelta
@@ -61,6 +62,8 @@ def _clean(d: dict) -> dict:
             num = float(got)
         except (TypeError, ValueError):
             num = v
+        if not math.isfinite(num):  # "nan" or "inf" typed in the form: the default, not the limit
+            num = v
         lo, hi = RANGES[k]
         out[k] = num if k == "min_rr" and num == 0 else max(lo, min(hi, num))
         if k in WHOLE:
@@ -82,9 +85,9 @@ def load(path: str) -> dict:
 def save(path: str, market: str, values: dict, by: str = "") -> dict:
     if market not in wallet.MARKETS:
         raise ValueError(f"unknown market {market!r}")
-    for k in RANGES:  # a typed number must be a number
-        if k in values and values[k] not in (None, ""):
-            float(values[k])
+    for k in RANGES:  # a typed number must be a real number
+        if k in values and values[k] not in (None, "") and not math.isfinite(float(values[k])):
+            raise ValueError(f"{k} must be a number")
     try:
         with open(path, encoding="utf-8") as fh:
             data = json.load(fh)
@@ -138,21 +141,26 @@ def update_breaker(state: dict, w: dict, market: str, g: dict, now_ms: int) -> d
         held.pop(market, None)
         return None
     br = held.get(market)
-    if br and now_ms < br.get("until", 0):
+    holds = bool(br) and now_ms < br.get("until", 0)
+    if holds and br.get("kind") == "week":
         return br
-    held.pop(market, None)
     name = "Futures AI" if market == "futures" else "Spot AI"
     bal = wallet.balance(state, w, market)
     live = open_pnl(state, market)
     week0 = week_start_ms(now_ms)
-    week = _closed_since(state, market, week0)
+    since = int(w.get("since", 0))  # a reset wallet starts its week afresh
+    week = _closed_since(state, market, max(week0, since))
     week_base = bal - week
+    # checked even while a day pause holds: open trades can keep losing during the pause
     if week_base > 0 and week + live <= -g["week_close_pct"] / 100 * week_base:
         held[market] = {"kind": "week", "at": now_ms, "until": week0 + 7 * 86_400_000, "close": True,
                         "why": f"{name} lost {-(week + live):,.2f} USDT this week, past its weekly limit of "
                                f"{g['week_close_pct']:g}%: all its positions closed, no new trades until Monday"}
         return held[market]
-    day = wallet.today_pnl(state, market, now_ms)
+    if holds:
+        return br
+    held.pop(market, None)
+    day = wallet.today_pnl(state, market, now_ms, since)
     day_base = bal - day
     if day_base > 0 and day + live <= -g["day_pause_pct"] / 100 * day_base:
         held[market] = {"kind": "day", "at": now_ms, "until": now_ms + int(g["pause_hours"] * 3_600_000),

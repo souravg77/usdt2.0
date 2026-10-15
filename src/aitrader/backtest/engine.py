@@ -139,6 +139,9 @@ def simulate_signal(sig: Signal, df: pd.DataFrame, pos: int, cfg: BacktestConfig
     exit_px, exit_reason, exit_i, exit_fee = None, "", None, cfg.taker_fee
     end = min(len(df), pos + cfg.max_bars_in_trade)
     for i in range(pos, end):
+        # a limit entry fills somewhere inside its candle: a target touched in that same candle may
+        # have come before the fill, so it isn't counted (the stop still is: the cautious reading)
+        limit_bar = maker is not None and i == pos
         # gap through stop at the open
         if i > pos and o[i] <= sig.stop:
             exit_px, exit_reason, exit_i = o[i] * (1 - slip), "stop_gap", i
@@ -146,9 +149,9 @@ def simulate_signal(sig: Signal, df: pd.DataFrame, pos: int, cfg: BacktestConfig
         if lo[i] <= sig.stop:
             exit_px, exit_reason, exit_i = sig.stop * (1 - slip), "stop", i
             break
-        if tp1 is not None and half is None and h[i] >= tp1:
+        if tp1 is not None and half is None and h[i] >= tp1 and not limit_bar:
             half = tp1
-        if target is not None and h[i] >= target:
+        if target is not None and h[i] >= target and not limit_bar:
             exit_px, exit_reason, exit_i, exit_fee = target, "target", i, cfg.maker_fee
             break
         held = i - pos + 1
@@ -234,15 +237,18 @@ def _simulate_short(sig: Signal, df: pd.DataFrame, pos: int, cfg: BacktestConfig
     exit_px, exit_reason, exit_i, exit_fee = None, "", None, cfg.perp_taker_fee
     end = min(len(df), pos + cfg.max_bars_in_trade)
     for i in range(pos, end):
+        # a limit entry fills somewhere inside its candle: a target touched in that same candle may
+        # have come before the fill, so it isn't counted (the stop still is: the cautious reading)
+        limit_bar = maker is not None and i == pos
         if i > pos and o[i] >= sig.stop:
             exit_px, exit_reason, exit_i = o[i] * (1 + slip), "stop_gap", i
             break
         if h[i] >= sig.stop:
             exit_px, exit_reason, exit_i = sig.stop * (1 + slip), "stop", i
             break
-        if tp1 is not None and half is None and lo[i] <= tp1:
+        if tp1 is not None and half is None and lo[i] <= tp1 and not limit_bar:
             half = tp1
-        if target is not None and lo[i] <= target:
+        if target is not None and lo[i] <= target and not limit_bar:
             exit_px, exit_reason, exit_i, exit_fee = target, "target", i, cfg.perp_maker_fee
             break
         held = i - pos + 1
