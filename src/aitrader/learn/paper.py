@@ -315,12 +315,15 @@ class PaperTrader:
             self.events.emit("trade_open", f"paper {side} signal {key} entry~{sig['entry']:.6g} "
                              f"stop {sig['stop']:.6g}" + (f" (AI p={ai:.2f})" if ai is not None else "")
                              + (f" regime {regime}" if regime else ""),
-                             key=key, mode="paper")
+                             key=key, mode="paper",
+                             market="futures" if self.state["open"][key].get("perp") or sig.get("side") == Side.SELL.value
+                             else "spot")
         for key in events["closed"]:
             t = next((t for t in reversed(self.state["trades"]) if t["key"] == key), None)
             if t:
                 self.events.emit("trade_close", f"paper close {key} {t['exit_reason']} {t['r']:+.2f}R "
-                                 f"({t['pnl_usdt']:+.2f} USDT)", key=key, mode="paper", r=t["r"])
+                                 f"({t['pnl_usdt']:+.2f} USDT)", key=key, mode="paper", r=t["r"],
+                                 market=t.get("market") or wallet.market_of(t))
         for sid in events["retired"]:
             self.events.emit("error", f"paper: strategy {sid} retired by its results", level="warning")
 
