@@ -40,6 +40,8 @@ class BacktestConfig:
     perp_funding_8h: float = 0.0001  # charged to shorts as a cost, never counted as income
     max_bars_in_trade: int = 10_000
     max_cost_r: float = 0.25  # skip signals whose round-trip costs exceed this share of the risk (0: off)
+    min_rr: float = 0.0  # skip signals whose fixed target is less than this many R away (0: off)
+    split_tp: bool = False  # take half the position at halfway to the target, the rest at the target
 
 
 @dataclass
@@ -61,6 +63,7 @@ class Trade:
     fee_r: float = 0.0
     slippage_r: float = 0.0  # what slippage took from the fills, in R
     funding_r: float = 0.0
+    tp1: float | None = None  # with split_tp: the price where the first half was taken, if it was
     features: dict = field(default_factory=dict)
 
 
@@ -119,6 +122,8 @@ def simulate_signal(sig: Signal, df: pd.DataFrame, pos: int, cfg: BacktestConfig
     if risk <= 0 or entry <= sig.stop:
         return None  # gapped through the stop before we could enter
     target = sig.target
+    tp1 = _tp1(sig, cfg)
+    half = None  # where the first half was taken (split take-profit)
     trail = None
     if sig.trailing not in trail_cache:
         trail_cache[sig.trailing] = _trailing_exit(sig.trailing, df)
@@ -136,6 +141,8 @@ def simulate_signal(sig: Signal, df: pd.DataFrame, pos: int, cfg: BacktestConfig
         if lo[i] <= sig.stop:
             exit_px, exit_reason, exit_i = sig.stop * (1 - slip), "stop", i
             break
+        if tp1 is not None and half is None and h[i] >= tp1:
+            half = tp1
         if target is not None and h[i] >= target:
             exit_px, exit_reason, exit_i, exit_fee = target, "target", i, cfg.maker_fee
             break
@@ -153,20 +160,32 @@ def simulate_signal(sig: Signal, df: pd.DataFrame, pos: int, cfg: BacktestConfig
     bars = exit_i - pos + 1
     tf_hours = TIMEFRAME_MS[sig.timeframe] / 3_600_000
     funding = cfg.funding_rate_8h * bars * tf_hours / 8 * entry
-    fees = entry * cfg.taker_fee + exit_px * exit_fee
+    taken = 0.5 if half is not None else 0.0  # the share closed early at tp1 (as maker)
+    fees = entry * cfg.taker_fee + taken * _half_or(half) * cfg.maker_fee + (1 - taken) * exit_px * exit_fee
     # slipped exits were priced at (1 - slip) times the quoted price; targets and "end" were not
     slipped_exit = exit_reason in ("stop", "stop_gap", "trail", "time")
-    slippage = (entry - o[pos]) + (exit_px / (1 - slip) - exit_px if slipped_exit and slip < 1 else 0.0)
-    gross = exit_px - entry
+    slippage = (entry - o[pos]) + (1 - taken) * (exit_px / (1 - slip) - exit_px if slipped_exit and slip < 1 else 0.0)
+    gross = taken * (_half_or(half) - entry) + (1 - taken) * (exit_px - entry)
     net = gross - fees - funding
     return Trade(
         strategy=sig.strategy, symbol=sig.symbol, timeframe=sig.timeframe, signal_ts=sig.ts,
         entry_ts=int(ts[pos]), entry=entry, stop=sig.stop, target=target,
         exit_ts=int(ts[exit_i]), exit=float(exit_px), exit_reason=exit_reason,
         r=net / risk, gross_r=gross / risk, cost_r=(fees + funding) / risk,
-        fee_r=fees / risk, slippage_r=slippage / risk, funding_r=funding / risk,
+        fee_r=fees / risk, slippage_r=slippage / risk, funding_r=funding / risk, tp1=half,
         features=dict(sig.features),
     )
+
+
+def _tp1(sig: Signal, cfg: BacktestConfig) -> float | None:
+    """With the split take-profit on, the first target: halfway from the signal price to the target."""
+    if not cfg.split_tp or sig.target is None:
+        return None
+    return sig.entry + (sig.target - sig.entry) / 2
+
+
+def _half_or(half: float | None) -> float:
+    return half if half is not None else 0.0
 
 
 def _simulate_short(sig: Signal, df: pd.DataFrame, pos: int, cfg: BacktestConfig,
@@ -180,6 +199,8 @@ def _simulate_short(sig: Signal, df: pd.DataFrame, pos: int, cfg: BacktestConfig
     if risk <= 0 or entry >= sig.stop:
         return None  # gapped through the stop before we could enter
     target = sig.target
+    tp1 = _tp1(sig, cfg)
+    half = None
     if sig.trailing not in trail_cache:
         trail_cache[sig.trailing] = _trailing_exit(sig.trailing, df)
     trail = trail_cache[sig.trailing]
@@ -195,6 +216,8 @@ def _simulate_short(sig: Signal, df: pd.DataFrame, pos: int, cfg: BacktestConfig
         if h[i] >= sig.stop:
             exit_px, exit_reason, exit_i = sig.stop * (1 + slip), "stop", i
             break
+        if tp1 is not None and half is None and lo[i] <= tp1:
+            half = tp1
         if target is not None and lo[i] <= target:
             exit_px, exit_reason, exit_i, exit_fee = target, "target", i, cfg.perp_maker_fee
             break
@@ -213,17 +236,18 @@ def _simulate_short(sig: Signal, df: pd.DataFrame, pos: int, cfg: BacktestConfig
     bars = exit_i - pos + 1
     tf_hours = TIMEFRAME_MS[sig.timeframe] / 3_600_000
     funding = cfg.perp_funding_8h * bars * tf_hours / 8 * entry
-    fees = entry * cfg.perp_taker_fee + exit_px * exit_fee
+    taken = 0.5 if half is not None else 0.0
+    fees = entry * cfg.perp_taker_fee + taken * _half_or(half) * cfg.perp_maker_fee + (1 - taken) * exit_px * exit_fee
     slipped_exit = exit_reason in ("stop", "stop_gap", "trail", "time")
-    slippage = (o[pos] - entry) + (exit_px - exit_px / (1 + slip) if slipped_exit else 0.0)
-    gross = entry - exit_px
+    slippage = (o[pos] - entry) + (1 - taken) * (exit_px - exit_px / (1 + slip) if slipped_exit else 0.0)
+    gross = taken * (entry - _half_or(half)) + (1 - taken) * (entry - exit_px)
     net = gross - fees - funding
     return Trade(
         strategy=sig.strategy, symbol=sig.symbol, timeframe=sig.timeframe, signal_ts=sig.ts,
         entry_ts=int(ts[pos]), entry=entry, stop=sig.stop, target=target,
         exit_ts=int(ts[exit_i]), exit=float(exit_px), exit_reason=exit_reason,
         r=net / risk, gross_r=gross / risk, cost_r=(fees + funding) / risk,
-        fee_r=fees / risk, slippage_r=slippage / risk, funding_r=funding / risk,
+        fee_r=fees / risk, slippage_r=slippage / risk, funding_r=funding / risk, tp1=half,
         features=dict(sig.features),
     )
 
@@ -251,6 +275,13 @@ def too_costly(sig: Signal, cfg: BacktestConfig) -> bool:
     return bool(cfg.max_cost_r) and cost_r(sig, cfg) > cfg.max_cost_r
 
 
+def too_little_reward(sig: Signal, cfg: BacktestConfig) -> bool:
+    """With a minimum reward set: the signal's fixed target is closer than ``min_rr`` times the risk.
+    A signal with no fixed target (it exits on its own rule) is not judged."""
+    rr = sig.r_multiple_target
+    return bool(cfg.min_rr) and rr is not None and rr < cfg.min_rr - 1e-9
+
+
 def run_backtest(strategy: Strategy, df: pd.DataFrame, exchange: str, symbol: str,
                  timeframe: str, cfg: BacktestConfig | None = None, costly: list | None = None) -> list[Trade]:
     """``costly``: when given, the signals the fee filter skipped are appended to it."""
@@ -271,6 +302,8 @@ def run_backtest(strategy: Strategy, df: pd.DataFrame, exchange: str, symbol: st
         if too_costly(sig, cfg):
             if costly is not None:
                 costly.append(sig)
+            continue
+        if too_little_reward(sig, cfg):
             continue
         t = simulate_signal(sig, df, pos, cfg, cache)
         if t is None:

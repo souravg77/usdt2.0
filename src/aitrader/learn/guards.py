@@ -1,0 +1,184 @@
+"""Each paper engine's extra trading rules, set on the Trading page (ideas from the ApexTrade prompt).
+
+- **Loss breakers** (on unless a person turns them off): when an engine's loss today, closed and
+  open trades together, reaches ``day_pause_pct`` of the wallet it had at midnight, it opens nothing
+  new for ``pause_hours``. When its loss this week (from Monday midnight) reaches ``week_close_pct``,
+  it closes all its open positions and opens nothing new until next Monday.
+- **Minimum reward** (``min_rr``, 0 = off): a signal whose fixed target is less than this many times
+  its risk away is skipped. A signal that exits on its own rule (no fixed target) is not judged.
+- **Higher-timeframe trend** (``trend``): a long is skipped while the 4h or daily trend points down,
+  a short while it points up (5m to 1h signals check 4h and 1d, 4h signals check 1d). A trend is up
+  when the close is above EMA 50 and EMA 20 is above EMA 50, down when both are below.
+- **Split take-profit** (``split_tp``): half the position is closed halfway to the target, the
+  rest at the target (``backtest.engine``).
+
+Settings live in ``paper_guards.json`` next to the paper state; the engines' breaker state lives in
+the paper state itself. Paper only: the live trader keeps its own limits.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import time
+from datetime import datetime, timedelta
+
+from . import wallet
+
+DEFAULTS = {"breaker": True, "day_pause_pct": 3.0, "pause_hours": 24.0, "week_close_pct": 6.0,
+            "min_rr": 0.0, "trend": False, "split_tp": False}
+RANGES = {"day_pause_pct": (0.5, 50.0), "pause_hours": (1.0, 168.0), "week_close_pct": (1.0, 90.0),
+          "min_rr": (0.0, 10.0)}
+SWITCHES = ("breaker", "trend", "split_tp")
+
+HIGHER = {"5m": ("4h", "1d"), "15m": ("4h", "1d"), "30m": ("4h", "1d"), "1h": ("4h", "1d"), "4h": ("1d",)}
+TREND_BARS = 120  # candles of a higher timeframe read for its trend (EMA 50 needs ~60 to settle)
+
+
+def path_for(state_path: str) -> str:
+    return os.path.join(os.path.dirname(os.path.abspath(state_path)), "paper_guards.json")
+
+
+def _clean(d: dict) -> dict:
+    out = {}
+    for k, v in DEFAULTS.items():
+        got = d.get(k, v)
+        if k in SWITCHES:
+            out[k] = got is not False and got not in (0, "0", "")
+            continue
+        try:
+            num = float(got)
+        except (TypeError, ValueError):
+            num = v
+        lo, hi = RANGES[k]
+        out[k] = num if k == "min_rr" and num == 0 else max(lo, min(hi, num))
+    return out
+
+
+def load(path: str) -> dict:
+    """{"spot": {...}, "futures": {...}}: each engine's rules (the defaults where none were set)."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        data = data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        data = {}
+    return {m: _clean(data.get(m) if isinstance(data.get(m), dict) else {}) for m in wallet.MARKETS}
+
+
+def save(path: str, market: str, values: dict, by: str = "") -> dict:
+    if market not in wallet.MARKETS:
+        raise ValueError(f"unknown market {market!r}")
+    for k in RANGES:  # a typed number must be a number
+        if k in values and values[k] not in (None, ""):
+            float(values[k])
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        data = data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        data = {}
+    mine = data.get(market) if isinstance(data.get(market), dict) else {}
+    mine.update({k: v for k, v in values.items() if k in DEFAULTS and v not in (None, "")})
+    data[market] = {**_clean(mine), "by": by, "at": int(time.time() * 1000)}
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh)
+    os.replace(tmp, path)
+    return load(path)[market]
+
+
+# ---- loss breakers ------------------------------------------------------------------------------
+
+def week_start_ms(now_ms: int) -> int:
+    """Monday midnight of this week on the dashboard's clock (India by default)."""
+    from ..clock import zone
+
+    now = datetime.fromtimestamp(now_ms / 1000, zone())
+    monday = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+    return int(monday.timestamp() * 1000)
+
+
+def open_pnl(state: dict, market: str) -> float:
+    """What the engine's open positions are up or down now, at their last marked price."""
+    total = 0.0
+    for key, o in (state.get("open") or {}).items():
+        if not o.get("filled") or ((key.endswith("|futures") or wallet.market_of(o) == "futures")
+                                   != (market == "futures")):
+            continue
+        sig = o.get("signal") or {}
+        total += float(o.get("mark_r") or 0.0) * abs(sig.get("entry", 0) - sig.get("stop", 0)) * o.get("units", 0)
+    return total
+
+
+def _closed_since(state: dict, market: str, since: int) -> float:
+    return sum(t.get("pnl_usdt", 0.0) for t in state.get("trades", [])
+               if t.get("exit_ts", 0) >= since and wallet.market_of(t) == market)
+
+
+def update_breaker(state: dict, w: dict, market: str, g: dict, now_ms: int) -> dict | None:
+    """Trip, keep or clear this engine's breaker; returns it while it holds. Saved in the paper state
+    as state["breakers"][market] = {"kind", "until", "why", "close"}."""
+    held = state.setdefault("breakers", {})
+    if not g["breaker"]:
+        held.pop(market, None)
+        return None
+    br = held.get(market)
+    if br and now_ms < br.get("until", 0):
+        return br
+    held.pop(market, None)
+    name = "Futures AI" if market == "futures" else "Spot AI"
+    bal = wallet.balance(state, w, market)
+    live = open_pnl(state, market)
+    week0 = week_start_ms(now_ms)
+    week = _closed_since(state, market, week0)
+    week_base = bal - week
+    if week_base > 0 and week + live <= -g["week_close_pct"] / 100 * week_base:
+        held[market] = {"kind": "week", "at": now_ms, "until": week0 + 7 * 86_400_000, "close": True,
+                        "why": f"{name} lost {-(week + live):,.2f} USDT this week, past its weekly limit of "
+                               f"{g['week_close_pct']:g}%: all its positions closed, no new trades until Monday"}
+        return held[market]
+    day = wallet.today_pnl(state, market, now_ms)
+    day_base = bal - day
+    if day_base > 0 and day + live <= -g["day_pause_pct"] / 100 * day_base:
+        held[market] = {"kind": "day", "at": now_ms, "until": now_ms + int(g["pause_hours"] * 3_600_000),
+                        "close": False,
+                        "why": f"{name} lost {-(day + live):,.2f} USDT today, its {g['day_pause_pct']:g}% pause "
+                               f"limit: no new trades for {g['pause_hours']:g} hours"}
+        return held[market]
+    return None
+
+
+def block(state: dict, market: str, now_ms: int) -> str:
+    """Why the breaker stops this engine's new trades now, or ""."""
+    br = (state.get("breakers") or {}).get(market)
+    if br and now_ms < br.get("until", 0):
+        from ..clock import local
+
+        return f"{br['why']} (until {local(br['until'] / 1000)})"
+    return ""
+
+
+# ---- higher-timeframe trend ---------------------------------------------------------------------
+
+def trend_of(df) -> str:
+    """"up", "down" or "flat" from the newest closed candle: close and EMA 20 against EMA 50."""
+    from ..indicators import ema
+
+    if df is None or len(df) < 60:
+        return "flat"
+    close = df["close"]
+    e20, e50 = float(ema(close, 20).iloc[-1]), float(ema(close, 50).iloc[-1])
+    c = float(close.iloc[-1])
+    if c > e50 and e20 > e50:
+        return "up"
+    if c < e50 and e20 < e50:
+        return "down"
+    return "flat"
+
+
+def against(side_short: bool, trends: dict) -> str:
+    """The higher timeframe whose trend points against the trade, or ""."""
+    bad = "up" if side_short else "down"
+    return next((tf for tf, t in trends.items() if t == bad), "")

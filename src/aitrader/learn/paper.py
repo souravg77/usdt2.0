@@ -32,11 +32,11 @@ import json
 import logging
 import os
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 
 from ..backtest import BacktestConfig, metrics
-from ..backtest.engine import Trade, as_perp, cost_r, simulate_signal, too_costly
+from ..backtest.engine import Trade, as_perp, cost_r, simulate_signal, too_costly, too_little_reward
 from ..data.store import CandleStore
 from ..indicators import candles_to_frame
 from ..market import perp_limits
@@ -44,7 +44,7 @@ from ..market.regime import breakdown, classify
 from ..models import TIMEFRAME_MS, Side
 from ..strategies.base import Signal
 from ..trade import futures
-from . import picks, wallet
+from . import guards, picks, wallet
 from .lab import with_context
 from .registry import Registry, make_strategy
 
@@ -108,6 +108,9 @@ class PaperTrader:
         self.engines_path = wallet.engines_path(state_path)  # Spot AI / Futures AI on or off
         self.limits_path = wallet.limits_path(state_path)  # each engine's daily loss and open-position limits
         self.filters_path = wallet.filters_path(state_path)  # whether each engine uses the AI filter / teacher
+        self.guards_path = guards.path_for(state_path)  # each engine's loss breakers, min reward, trend, split TP
+        self._guards = guards.load(self.guards_path)
+        self._trends: dict = {}  # (exchange, symbol, timeframe) -> trend of a higher timeframe, this pass
         self._now = 0
         self.perp_limits_path = perp_limits.DEFAULT_PATH  # each coin's maximum leverage on Bybit
         self.ai_filter = ai_filter  # Phase 4 trade filter (aitrader.ai.LiveFilter) or None
@@ -129,6 +132,13 @@ class PaperTrader:
         reg = Registry(self.registry_path)  # re-read: `learn` commands may have changed it
         events = {"opened": [], "closed": [], "retired": [], "filtered": []}
         self._now = now_ms
+        self._guards, self._trends = guards.load(self.guards_path), {}
+        for m in wallet.MARKETS:  # trip, hold or clear each engine's loss breaker
+            br = guards.update_breaker(self.state, self._wallet(m), m, self._guards[m], now_ms)
+            if br and br.get("at") == now_ms:
+                log.warning("paper breaker: %s", br["why"])
+                if self.events is not None:
+                    self.events.emit("paper_breaker", br["why"], level="warning", market=m)
         self._manage_open(reg, now_ms, events)
         allow, size_mult, cal_why = self._calendar(now_ms)
         blocked = "" if allow else f"the economic-calendar filter: {cal_why}"
@@ -231,6 +241,7 @@ class PaperTrader:
                         if market not in regimes:
                             regimes[market] = _regime(df, tf)
                         for k, perp in legs:
+                            leg_mkt = "futures" if perp else "spot"
                             leg_ai = ai if (k, perp) in ai_legs else _NO_AI
                             leg_tch = tch if (k, perp) in tch_legs else _no_teacher(sig)
                             leg_sig = leg_tch["signal"]
@@ -239,7 +250,8 @@ class PaperTrader:
                                                      "size_mult": size_mult * ctx_mult * leg_ai["size"],
                                                      "filled": False,
                                                      "ai_prob": leg_ai["prob"], "ai_version": leg_ai["version"],
-                                                     "regime": regimes[market], "perp": perp}
+                                                     "regime": regimes[market], "perp": perp,
+                                                     "split_tp": self._guards[leg_mkt]["split_tp"]}
                             events["opened"].append(k)
                             self._log_signal(k, leg_sig, "")
                             log.info("paper signal %s entry~%.6g stop %.6g ai p=%s size x%.2f regime %s", k,
@@ -365,11 +377,18 @@ class PaperTrader:
             if k in self.state["open"]:
                 continue
             mkt = "futures" if perp else "spot"
-            why = wallet.entry_block(self.state, self._wallet(mkt), mkt, lim[mkt], self._now or int(time.time() * 1000))
+            now = self._now or int(time.time() * 1000)
+            why = wallet.entry_block(self.state, self._wallet(mkt), mkt, lim[mkt], now)
             if why:
                 self._log_signal(k, sig, "engine limit", why)
                 events["filtered"].append(k)
                 continue
+            why = guards.block(self.state, mkt, now)
+            if why:
+                self._log_signal(k, sig, "loss breaker", why)
+                events["filtered"].append(k)
+                continue
+            g = self._guards[mkt]
             if perp:
                 lev = self._lev(sym)
                 ok = futures.short_stop_ok if short else futures.long_stop_ok
@@ -379,7 +398,7 @@ class PaperTrader:
                     log.info("paper %s %s skipped: stop %.6g too close to liquidation at %gx",
                              "short" if short else "perp long", k, sig.stop, lev)
                     continue
-            bcfg = as_perp(self.cfg.backtest) if perp else self.cfg.backtest
+            bcfg = self._bcfg(perp, min_rr=g["min_rr"])
             if too_costly(sig, bcfg):  # fees would eat too much of the risk
                 self._log_signal(k, sig, "fees too high for the stop",
                                  f"fees and slippage {cost_r(sig, bcfg):.2f}R of the risk, "
@@ -388,8 +407,36 @@ class PaperTrader:
                 log.info("paper signal %s skipped: fees and slippage are %.2fR of the risk (limit %.2fR)",
                          k, cost_r(sig, bcfg), bcfg.max_cost_r)
                 continue
+            if too_little_reward(sig, bcfg):
+                self._log_signal(k, sig, "reward too small",
+                                 f"target {sig.r_multiple_target:.2f}R away, minimum {g['min_rr']:g}R")
+                events["filtered"].append(k)
+                continue
+            if g["trend"]:
+                ex, _sym, tf = key.split("|")[1:4]
+                bad = guards.against(sig.side is Side.SELL, self._higher_trends(ex, sym, tf))
+                if bad:
+                    self._log_signal(k, sig, "against the higher-timeframe trend",
+                                     f"the {bad} trend points {'up' if sig.side is Side.SELL else 'down'}")
+                    events["filtered"].append(k)
+                    continue
             legs.append((k, perp))
         return legs
+
+    def _bcfg(self, perp: bool, min_rr: float = 0.0, split_tp: bool = False) -> BacktestConfig:
+        base = as_perp(self.cfg.backtest) if perp else self.cfg.backtest
+        return replace(base, min_rr=min_rr, split_tp=split_tp) if (min_rr or split_tp) else base
+
+    def _higher_trends(self, ex: str, sym: str, tf: str) -> dict:
+        """{higher timeframe: "up" / "down" / "flat"} for a signal on ``tf`` (read once per pass)."""
+        out = {}
+        now = self._now or int(time.time() * 1000)
+        for htf in guards.HIGHER.get(tf, ()):
+            if (ex, sym, htf) not in self._trends:
+                df = self._frame(ex, sym, htf, now - guards.TREND_BARS * TIMEFRAME_MS[htf], now)
+                self._trends[(ex, sym, htf)] = guards.trend_of(df)
+            out[htf] = self._trends[(ex, sym, htf)]
+        return out
 
     def _lev(self, symbol: str = "") -> float:
         """The Trading page's paper leverage when chosen (up to Bybit's maximum for ``symbol``),
@@ -452,11 +499,15 @@ class PaperTrader:
         one = getattr(self.control, "close_requests", None)  # a person's "close this position"
         close_one = one() if callable(one) else {}
         left = 0  # positions the close request covers that couldn't be priced this pass
+        breakers = self.state.get("breakers") or {}
         for key, pos in list(self.state["open"].items()):
             entry_id, ex, sym, tf = key.split("|")[:4]
             # a close request covers the positions opened before it, not those opened after
             closing = killed or (close_req is not None and pos["signal"]["ts"] <= close_req * 1000)
             reason = why
+            pos_mkt = "futures" if key.endswith(FUTURES_SUFFIX) or wallet.market_of(pos) == "futures" else "spot"
+            if not closing and (breakers.get(pos_mkt) or {}).get("close"):  # the weekly loss limit
+                closing, reason = True, "weekly loss limit"
             if _asked_to_close(close_one.get(key), pos):
                 closing, reason = True, "closed by hand"
             if closing and not pos.get("filled"):
@@ -487,7 +538,7 @@ class PaperTrader:
             try:
                 if entry_id in reg.entries:
                     make_strategy(reg.entries[entry_id])  # registers its custom exit rules
-                bcfg = as_perp(self.cfg.backtest) if pos.get("perp") else self.cfg.backtest
+                bcfg = self._bcfg(bool(pos.get("perp")), split_tp=bool(pos.get("split_tp")))
                 t = simulate_signal(sig, df, entry_i, bcfg, {})
             except Exception:  # never close a trade on the wrong rule: keep it open and say so
                 log.exception("paper %s: can't evaluate its exits; kept open", key)
@@ -541,6 +592,11 @@ class PaperTrader:
             del self.state["open"][key]
             events["closed"].append(key)
             log.info("paper close %s %s %+.2fR %+.2f USDT", key, t.exit_reason, t.r, pnl)
+        for m, br in breakers.items():  # the weekly close is done once the engine holds nothing
+            if br.get("close") and not any(
+                    ("futures" if k.endswith(FUTURES_SUFFIX) or wallet.market_of(o) == "futures" else "spot") == m
+                    for k, o in self.state["open"].items()):
+                br["close"] = False
         if close_req is not None and not left:  # any it couldn't price yet: tried again next pass
             self.control.clear_close_all(close_req)
         done = [k for k, req in close_one.items()  # closed, or gone already
