@@ -108,6 +108,17 @@ async def cmd_collect(s: Settings, args) -> int:
                     log.warning("top gainers refresh failed: %s", exc)
                 finally:
                     await client.close()
+            from .learn import wallet
+            from .market import perp_limits
+
+            if wallet.futures_on(wallet.market_path(PAPER_STATE)) and perp_limits.due():
+                client = gainers.perp_client()  # Futures mode: each coin's maximum leverage, once a day
+                try:
+                    await perp_limits.refresh(client)
+                except Exception as exc:
+                    log.warning("perpetual leverage limits refresh failed: %s", exc)
+                finally:
+                    await client.close()
             symbols = configured_symbols(s.symbols, keep=open_paper_symbols(PAPER_STATE))
             for ex, adapter in adapters.items():
                 for sym in symbols:

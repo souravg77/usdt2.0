@@ -35,6 +35,7 @@ from ..backtest import BacktestConfig, metrics
 from ..backtest.engine import Trade, as_perp, cost_r, simulate_signal, too_costly
 from ..data.store import CandleStore
 from ..indicators import candles_to_frame
+from ..market import perp_limits
 from ..market.regime import breakdown, classify
 from ..models import TIMEFRAME_MS, Side
 from ..strategies.base import Signal
@@ -86,6 +87,7 @@ class PaperTrader:
         self.state_path, self.calendar = state_path, calendar
         self.wallet_path = wallet.wallet_path(state_path)  # the starting amount you chose
         self.market_path = wallet.market_path(state_path)  # Spot or Futures for longs
+        self.perp_limits_path = perp_limits.DEFAULT_PATH  # each coin's maximum leverage on Bybit
         self.ai_filter = ai_filter  # Phase 4 trade filter (aitrader.ai.LiveFilter) or None
         self.control = control  # trade.Control: pause / kill switch, or None
         self.context = context  # market-context filter (funding, open interest...), or None
@@ -155,18 +157,18 @@ class PaperTrader:
                             continue
                         sig = sigs[-1]
                         self.state["last_signal"][key] = sig.ts
-                        if sig.side is Side.SELL and not futures.short_stop_ok(sig.entry, sig.stop, self._lev()):
+                        if sig.side is Side.SELL and not futures.short_stop_ok(sig.entry, sig.stop, self._lev(sym)):
                             self._log_signal(key, sig, "stop too close to liquidation")
                             events["filtered"].append(key)
                             log.info("paper short %s skipped: stop %.6g too close to liquidation at %gx",
-                                     key, sig.stop, self._lev())
+                                     key, sig.stop, self._lev(sym))
                             continue
                         perp = perp_longs and sig.side is Side.BUY  # a long as a perpetual future
-                        if perp and not futures.long_stop_ok(sig.entry, sig.stop, self._lev()):
+                        if perp and not futures.long_stop_ok(sig.entry, sig.stop, self._lev(sym)):
                             self._log_signal(key, sig, "stop too close to liquidation")
                             events["filtered"].append(key)
                             log.info("paper perp long %s skipped: stop %.6g too close to liquidation at %gx",
-                                     key, sig.stop, self._lev())
+                                     key, sig.stop, self._lev(sym))
                             continue
                         bcfg = as_perp(self.cfg.backtest) if perp else self.cfg.backtest
                         if too_costly(sig, bcfg):  # fees would eat too much of the risk
@@ -302,8 +304,13 @@ class PaperTrader:
         for sid in events["retired"]:
             self.events.emit("error", f"paper: strategy {sid} retired by its results", level="warning")
 
-    def _lev(self) -> float:
-        return futures.leverage()
+    def _lev(self, symbol: str = "") -> float:
+        """The Trading page's paper leverage when chosen (up to Bybit's maximum for ``symbol``),
+        else AITRADER_LEVERAGE (1x-3x)."""
+        chosen = wallet.paper_leverage(self.market_path)
+        if not chosen:
+            return futures.leverage()
+        return futures.clamp_paper_leverage(chosen, perp_limits.max_leverage(symbol, self.perp_limits_path))
 
     def _ai_check(self, sig: Signal, entry_id: str, df) -> dict:
         if self.ai_filter is None or sig.side is Side.SELL:
@@ -408,7 +415,7 @@ class PaperTrader:
             if not pos["filled"]:
                 # sized from the one paper wallet every strategy shares (learn.wallet)
                 bal = wallet.balance(self.state, wallet.load(self.wallet_path))
-                lev = self._lev() if short or pos.get("perp") else 1.0
+                lev = self._lev(sym) if short or pos.get("perp") else 1.0
                 risk_usdt = bal * sig.risk_pct * pos.get("size_mult", 1.0)
                 units = risk_usdt / abs(sig.entry - sig.stop)
                 units = min(units, bal * self.cfg.max_position_frac / t.entry)

@@ -54,21 +54,48 @@ def market_path(state_path: str) -> str:
     return os.path.join(os.path.dirname(os.path.abspath(state_path)), "paper_market.json")
 
 
-def futures_on(path: str) -> bool:
-    """True when paper longs trade as USDT perpetual futures instead of spot buys."""
+def _market(path: str) -> dict:
     try:
         with open(path, encoding="utf-8") as fh:
-            return json.load(fh).get("market") == "futures"
-    except (OSError, ValueError, AttributeError):
-        return False
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
 
 
-def set_market(path: str, futures: bool, by: str = "") -> None:
+def futures_on(path: str) -> bool:
+    """True when the dashboard is in Futures mode: paper longs trade as USDT perpetual futures
+    instead of spot buys, and the pages show futures prices and details."""
+    return _market(path).get("market") == "futures"
+
+
+def paper_leverage(path: str) -> float | None:
+    """The leverage chosen on the Trading page for paper perpetuals, or None (use AITRADER_LEVERAGE)."""
+    try:
+        lev = _market(path).get("leverage")
+        return float(lev) if lev else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _save_market(path: str, data: dict) -> None:
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump({"market": "futures" if futures else "spot", "by": by, "at": int(time.time() * 1000)}, fh)
+        json.dump(data, fh)
     os.replace(tmp, path)
+
+
+def set_market(path: str, futures: bool, by: str = "") -> None:
+    data = _market(path)
+    data.update(market="futures" if futures else "spot", by=by, at=int(time.time() * 1000))
+    _save_market(path, data)
+
+
+def set_leverage(path: str, lev: float, by: str = "") -> None:
+    data = _market(path)
+    data.update(leverage=lev, by=by, at=int(time.time() * 1000))
+    _save_market(path, data)
 
 
 def in_use(state: dict, skip: str = "") -> float:
