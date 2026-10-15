@@ -265,8 +265,9 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
         if meta.get("kind") != "download" or "since_ms" not in meta:
             return JSONResponse({"error": "no such download"}, status_code=404)
         ahead = ""
-        if job["status"] == "queued":
-            running = [j for j in jobs.list() if j["status"] == "running"]
+        if job["status"] == "queued":  # only another download can be ahead of it
+            running = [j for j in jobs.list() if j["status"] == "running"
+                       and j.get("meta", {}).get("kind") == "download"]
             ahead = running[0]["title"] if running else ""
         store = CandleStore(settings.db_path)
         try:
