@@ -97,6 +97,17 @@ async def cmd_collect(s: Settings, args) -> int:
         while True:
             since = int(time.time() * 1000) - args.backfill_days * 86_400_000
             # the ranked pairs when AITRADER_PAIRS=ranked, plus any with an open paper position
+            from .market import gainers
+
+            if gainers.due():  # "Trade the top gainers" is on: today's list, about once an hour
+                client = gainers.perp_client()
+                try:
+                    await gainers.refresh(client)
+                    log.info("top gainers: %s", ", ".join(gainers.symbols()) or "none")
+                except Exception as exc:
+                    log.warning("top gainers refresh failed: %s", exc)
+                finally:
+                    await client.close()
             symbols = configured_symbols(s.symbols, keep=open_paper_symbols(PAPER_STATE))
             for ex, adapter in adapters.items():
                 for sym in symbols:
@@ -1363,6 +1374,30 @@ def cmd_pairs(s: Settings, args) -> int:
         print(pairs.ranking_text(rk, args.top))
         print(f"ranking saved to {args.out}")
         return 0
+    if args.pairs_cmd == "gainers":
+        from .market import gainers
+
+        if args.off:
+            gainers.switch(False)
+            print("top gainers off: trading uses the usual pairs (open positions still close normally)")
+            return 0
+
+        async def fetch():
+            client = gainers.perp_client(args.exchange)
+            try:
+                return await gainers.refresh(client, top=args.count)
+            finally:
+                await client.close()
+
+        gainers.switch(True, args.count)
+        data = asyncio.run(fetch())
+        hot = gainers.symbols()
+        print(f"top {data['top']} gainers (Bybit USDT perpetuals that also trade on spot, 24h turnover over "
+              f"{gainers.MIN_TURNOVER / 1e6:.0f}M USDT):")
+        for p in data["pairs"][:data["top"]]:
+            print(f"  {p['symbol']:<14} {p['change']:+7.2f}%  turnover {p['turnover'] / 1e6:,.0f}M")
+        print(f"trading them in paper now ({len(hot)}); the collector downloads their prices on its next pass")
+        return 0
     if args.pairs_cmd == "show":
         rk = pairs.load_ranking(args.out)
         if not rk.get("pairs"):
@@ -1662,9 +1697,11 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("--quiet", action="store_true", help="don't send it to the event log / Telegram")
 
     pa = sub.add_parser("pairs", help="rank Bybit spot USDT pairs; show the ranking and market regimes")
-    pa.add_argument("pairs_cmd", choices=["rank", "show", "regimes"])
+    pa.add_argument("pairs_cmd", choices=["rank", "show", "regimes", "gainers"])
+    pa.add_argument("--off", action="store_true", help="gainers: stop trading the top gainers")
     pa.add_argument("--out", default="data/pairs/ranking.json", help="ranking file")
     pa.add_argument("--top", type=int, default=30, help="rows to print")
+    pa.add_argument("--count", type=int, help="gainers: how many to trade (3-30, default 10 or the last choice)")
     pa.add_argument("--exchange", default="bybit", help="rank: ccxt exchange id (public data only)")
     pa.add_argument("--min-turnover", type=float, default=2_000_000, help="rank: 24h USDT turnover floor")
     pa.add_argument("--depth-top", type=int, default=40, help="rank: order books to check")
