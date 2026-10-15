@@ -333,10 +333,14 @@ def configured_symbols(fallback: list[str], env=None, path: str | None = None,
     return list(dict.fromkeys([*symbols, *hot, *(keep or [])]))
 
 
-def open_paper_symbols(state_path: str) -> list[str]:
-    """Symbols with open paper positions: they keep getting candles after leaving the ranking."""
-    keys = (_read(state_path).get("open") or {}).keys()
-    return sorted({k.split("|")[2] for k in keys if k.count("|") >= 3})
+def open_paper_symbols(state_path: str, market: str | None = None) -> list[str]:
+    """Symbols with open paper positions: they keep getting candles after leaving the ranking.
+    ``market`` ("spot" or "futures"): only that engine's positions."""
+    from ..learn.wallet import market_of
+
+    rows = (_read(state_path).get("open") or {}).items()
+    return sorted({k.split("|")[2] for k, p in rows if k.count("|") >= 3 and (
+        market is None or ("futures" if k.endswith("|futures") or market_of(p or {}) == "futures" else "spot") == market)})
 
 
 def public_client(exchange_id: str = "bybit"):

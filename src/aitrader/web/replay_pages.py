@@ -265,8 +265,9 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
         if meta.get("kind") != "download" or "since_ms" not in meta:
             return JSONResponse({"error": "no such download"}, status_code=404)
         ahead = ""
-        if job["status"] == "queued":
-            running = [j for j in jobs.list() if j["status"] == "running"]
+        if job["status"] == "queued":  # only another download can be ahead of it
+            running = [j for j in jobs.list() if j["status"] == "running"
+                       and j.get("meta", {}).get("kind") == "download"]
             ahead = running[0]["title"] if running else ""
         store = CandleStore(settings.db_path)
         try:
@@ -295,11 +296,15 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
             msg = f"Undoing the {tf} pick: every strategy may trade {tf} again."
         else:
             since = (datetime.now(timezone.utc) - timedelta(days=round(PICK_YEARS * 365.25))).strftime("%Y-%m-%d")
-            jobs.submit(f"Keep only the {tf} winners",
-                        [["download", "--since", since, "--exchange", exchange, "--timeframe", tf],
-                         ["learn", "pick-timeframe", tf, "--years", str(PICK_YEARS)]],
-                        meta={"kind": "pick", "by": user})
-            msg = (f"Testing every {tf} strategy on {PICK_YEARS:g} years of {tf} prices for every pair. "
+            # the workspace's own pairs: in the Futures view only Futures AI's (its top gainers)
+            sym_args = [a for sym in pairs() for a in ("--symbol", sym)]
+            where = "Futures AI" if futures_mode() else "Spot AI"
+            jobs.submit(f"Keep only the {tf} winners on {where} pairs",
+                        [["download", "--since", since, "--exchange", exchange, "--timeframe", tf, *sym_args],
+                         ["learn", *sym_args, "pick-timeframe", tf, "--years", str(PICK_YEARS)]],
+                        meta={"kind": "pick", "by": user, "market": "futures" if futures_mode() else "spot"})
+            msg = (f"Testing every {tf} strategy on {PICK_YEARS:g} years of {tf} prices for the {len(pairs())} "
+                   f"{where} pairs. "
                    f"The steady winners keep trading {tf}; the rest stop trading it. This page shows the "
                    "list when it's done (reload it in a few minutes).")
         cache.clear()
@@ -314,7 +319,8 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
                 else "Keep only the winners on one timeframe")
         out = (f'<details class="card" id="tf-pick"><summary><b>{head}</b></summary>'
                '<p class="small muted">Tests every strategy that trades the chosen timeframe on '
-               f'{PICK_YEARS:g} years of its prices for every pair (after fees). A strategy is kept when its '
+               f'{PICK_YEARS:g} years of its prices for this workspace\'s pairs only (in the Futures view the Futures AI '
+               'pairs, in the Spot view the Spot AI pairs), after fees. A strategy is kept when its '
                f'total is above 0R over at least {picks.MIN_TRADES} trades and it made money in at least as '
                'many 3-month quarters as it lost in, so one lucky quarter is not enough. Kept strategies '
                'paper trade that timeframe only; the others stop trading it (their other timeframes carry on).</p>'
@@ -327,7 +333,7 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
             won = [r for r in cur.get("results", []) if r["id"] in set(cur.get("picked", []))]
             when = clock.local(cur["at"] / 1000)
             out += (f'<p><b>{_e(tf)} pick ({_e(when)}):</b> {len(won)} of {len(cur.get("results", []))} '
-                    f'strategies kept on {len(cur.get("pairs", []))} pairs.</p>')
+                    f'strategies kept on {len(cur.get("pairs", []))} pairs: {_e(", ".join(cur.get("pairs", [])))}.</p>')
             if won:
                 rows = "".join(
                     f'<tr><td>{_e(r["name"])}</td><td>{r["trades"]}</td><td>{r["win_rate"]:.0f}%</td>'

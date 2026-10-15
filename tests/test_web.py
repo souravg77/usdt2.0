@@ -617,3 +617,18 @@ def test_open_positions_follow_the_live_price(tmp_path, monkeypatch):
     assert target_distance(111.0, 110.0, "buy") < 0 and target_distance(100.0, None, "buy") is None
     assert stop_distance(100.0, 95.0, "buy") == 5.0 and stop_distance(48.0, 52.0, "sell") == 100 * 4 / 48
     assert stop_distance(94.0, 95.0, "buy") < 0 and stop_distance(None, 95.0, "buy") is None
+
+
+def test_a_price_download_does_not_wait_behind_a_long_job(tmp_path, monkeypatch):
+    """Shawn's Replay download sat at "another job is running first" behind Keep the winners."""
+    import time
+
+    runner = JobRunner(str(tmp_path / "jobs"), env_file=str(tmp_path / "none.env"))
+    monkeypatch.setattr(runner, "command", lambda step: step)
+    long_id = runner.submit("Keep only the 1h winners", [["sleep", "5"]], meta={"kind": "pick"})
+    quick_id = runner.submit("Download BTC/USDT 1h", [["true"]], meta={"kind": "download"})
+    end = time.time() + 3
+    while time.time() < end and runner.get(quick_id)["status"] != "done":
+        time.sleep(0.05)
+    assert runner.get(quick_id)["status"] == "done" and runner.get(long_id)["status"] == "running"
+    runner.wait_idle(timeout=10)

@@ -102,8 +102,10 @@ def test_replay_page_starts_and_undoes_a_pick(tmp_path, monkeypatch):
     assert r.status_code == 303 and "tf=4h" in r.headers["location"]
     runner.wait_idle()
     job = [j for j in runner.list() if j["meta"].get("kind") == "pick"][0]
-    assert job["steps"][0][:2] == ["download", "--since"] and job["steps"][0][-2:] == ["--timeframe", "4h"]
-    assert job["steps"][1] == ["learn", "pick-timeframe", "4h", "--years", "2"]
+    assert job["steps"][0][:2] == ["download", "--since"] and job["steps"][0][-4:] == ["--timeframe", "4h",
+                                                                                         "--symbol", "BTC/USDT"]
+    assert job["steps"][1] == ["learn", "--symbol", "BTC/USDT", "pick-timeframe", "4h", "--years", "2"]
+    assert job["title"] == "Keep only the 4h winners on Spot AI pairs"
     # a saved pick is listed with an undo button
     picks.save(picks.picks_path(str(tmp_path / "registry.json")),
                {"4h": {"at": 1, "picked": ["up"], "pairs": ["BTC/USDT"], "results": [result("up")]}})
@@ -341,3 +343,33 @@ def test_paper_leverage_is_cut_to_each_coins_bybit_maximum(tmp_path):
     wallet.set_leverage(wallet.market_path(state), 50)
     assert trader._lev("BTC/USDT") == 50 and trader._lev("PEPE/USDT") == 25 and trader._lev("XRP/USDT") == 50
     store.close()
+
+
+def test_the_futures_view_keeps_the_winners_on_futures_pairs_only(tmp_path, monkeypatch):
+    """Shawn: on Futures, Keep only the winners tests and downloads only the Futures AI pairs."""
+    import time
+
+    from aitrader.learn import wallet
+
+    monkeypatch.chdir(tmp_path)
+    fut = str(tmp_path / "gainers.json")
+    with open(fut, "w") as fh:
+        json.dump({"on": True, "generated": int(time.time() * 1000),
+                   "pairs": [{"symbol": "SOL/USDT"}, {"symbol": "ZEREBRO/USDT"}]}, fh)
+    monkeypatch.setenv("AITRADER_GAINERS_FILE", fut)
+    runner = JobRunner(str(tmp_path / "jobs"), env_file=str(tmp_path / "none.env"))
+    submitted = []
+    monkeypatch.setattr(runner, "submit", lambda title, steps, meta=None: submitted.append((title, steps, meta)) or "j1")
+    app = create_app(Settings(db_path=str(tmp_path / "x.db"), symbols=["BTC/USDT", "ETH/USDT"]),
+                     Auth("admin", "correct horse battery", "k"), runner,
+                     Paths(report=str(tmp_path / "none.json"), registry=str(tmp_path / "registry.json")))
+    wallet.set_market(wallet.market_path("data/learn/paper_state.json"), True)
+    c = TestClient(app)
+    c.post("/login", data={"user": "admin", "password": "correct horse battery"})
+    csrf = Auth("admin", "correct horse battery", "k").csrf(c.cookies.get(COOKIE))
+    c.post("/replay/pick", data={"csrf": csrf, "tf": "1h"})
+    title, steps, meta = submitted[0]
+    syms = ["--symbol", "SOL/USDT", "--symbol", "ZEREBRO/USDT"]
+    assert title == "Keep only the 1h winners on Futures AI pairs" and meta["market"] == "futures"
+    assert steps[0][-4:] == syms[-4:] and "BTC/USDT" not in steps[0] and "BTC/USDT" not in steps[1]
+    assert steps[1] == ["learn", *syms, "pick-timeframe", "1h", "--years", "2"]

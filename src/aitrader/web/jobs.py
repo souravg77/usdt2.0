@@ -1,5 +1,7 @@
 """Background jobs started from the dashboard: one at a time, each a separate ``aitrader``
 process whose output goes to a log file, so a failing book never takes the dashboard down.
+A Replay page price download (meta kind "download") runs in a lane of its own, so it never waits
+behind a long job such as loading every strategy or keeping the winners.
 
 A book job runs ``kb build`` (so the book becomes searchable) and ``learn read <book> --test``
 (Claude writes strategies from it, then each goes through the backtest gate; the ones that pass
@@ -22,6 +24,7 @@ log = logging.getLogger(__name__)
 
 DEFAULT_DIR = "data/web/jobs"
 STEP_TIMEOUT_S = 3 * 3600
+QUICK_KINDS = {"download"}  # short jobs a person is waiting for: they don't queue behind the long ones
 
 
 class JobRunner:
@@ -29,9 +32,13 @@ class JobRunner:
         self.root, self.env_file = root, env_file
         os.makedirs(root, exist_ok=True)
         self._q: queue.Queue = queue.Queue()
+        self._quick: queue.Queue = queue.Queue()
         self._lock = threading.Lock()
-        self._worker = threading.Thread(target=self._loop, daemon=True, name="dashboard-jobs")
+        self._worker = threading.Thread(target=self._loop, args=(self._q,), daemon=True, name="dashboard-jobs")
         self._worker.start()
+        self._quick_worker = threading.Thread(target=self._loop, args=(self._quick,), daemon=True,
+                                              name="dashboard-quick-jobs")
+        self._quick_worker.start()
         for job in self.list():  # a restart interrupted these
             if job["status"] in ("queued", "running"):
                 self._update(job["id"], status="failed", error="the dashboard restarted during this job")
@@ -88,15 +95,15 @@ class JobRunner:
                "meta": meta or {}}
         with self._lock:
             self._write(job)
-        self._q.put(job_id)
+        (self._quick if (meta or {}).get("kind") in QUICK_KINDS else self._q).put(job_id)
         return job_id
 
     def command(self, step: list[str]) -> list[str]:
         return [sys.executable, "-m", "aitrader.cli", "--env-file", self.env_file, *step]
 
-    def _loop(self) -> None:
+    def _loop(self, q: queue.Queue) -> None:
         while True:
-            job_id = self._q.get()
+            job_id = q.get()
             try:
                 self._run(job_id)
             except Exception as exc:  # keep the worker alive
@@ -126,7 +133,7 @@ class JobRunner:
         """For tests: block until every queued job has finished."""
         end = time.time() + timeout
         while time.time() < end:
-            if self._q.empty() and all(j["status"] not in ("queued", "running") for j in self.list()):
+            if self._q.empty() and self._quick.empty() and all(j["status"] not in ("queued", "running") for j in self.list()):
                 return
             time.sleep(0.05)
         raise TimeoutError("jobs still running")

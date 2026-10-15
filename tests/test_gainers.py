@@ -112,6 +112,20 @@ def test_pairs_page_button_and_markets_badge(tmp_path, monkeypatch):
     page = c.get("/markets").text
     assert 'data-symbol="PEPE/USDT"' in page and "top gainer" in page
     assert 'data-symbol="ETH/USDT"' not in page  # Futures shows only its top gainers
+    # ...plus every pair Futures AI still holds a position in; Spot AI's positions stay on Spot
+    import json as _json
+
+    with open(str(tmp_path / "paper.json"), "w") as fh:
+        _json.dump({"open": {"s1|bybit|DOGE/USDT|1d": {"signal": {"side": "sell"}},
+                             "s1|bybit|ADA/USDT|1h|futures": {"perp": True, "signal": {"side": "buy"}},
+                             "s1|bybit|ETH/USDT|1h": {"perp": False, "signal": {"side": "buy"}}}}, fh)
+    page = c.get("/markets").text
+    assert 'data-symbol="DOGE/USDT"' in page and 'data-symbol="ADA/USDT"' in page and "open position" in page
+    assert 'data-symbol="ETH/USDT"' not in page
+    wallet.set_market(wallet.market_path(str(tmp_path / "paper.json")), False)
+    page = c.get("/markets").text
+    assert 'data-symbol="ETH/USDT"' in page and 'data-symbol="DOGE/USDT"' not in page
+    wallet.set_market(wallet.market_path(str(tmp_path / "paper.json")), True)
     c.post("/pairs/gainers", data={"csrf": csrf, "on": "0", "market": "futures"})
     assert not gainers.load()["on"] and 'data-symbol="PEPE/USDT"' not in c.get("/markets").text
 

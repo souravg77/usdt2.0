@@ -17,7 +17,7 @@ from fastapi.responses import JSONResponse, Response
 from ..config import EXCHANGE
 from ..data.store import CandleStore
 from ..market import gainers
-from ..market.pairs import configured_symbols
+from ..market.pairs import configured_symbols, open_paper_symbols
 from .app import _e, _q
 from .live import LiveMarket
 from .studies import compute, paper_trades
@@ -52,10 +52,19 @@ def add_market_routes(app, *, settings, page, guard, exchange: str = EXCHANGE, c
     memo: dict[tuple, tuple[tuple, dict]] = {}  # (symbol, tf) -> (candle fingerprint, studies)
     tfs = CHART_TIMEFRAMES
 
-    def current() -> list[str]:
-        """The pairs being traded now: the usual list plus today's top gainers when that's on."""
+    def held() -> list[str]:
+        """Pairs the workspace's engine holds an open paper position in."""
         try:
-            return configured_symbols(settings.symbols, market="futures" if futures_mode() else "spot")
+            return open_paper_symbols(paper_state, "futures" if futures_mode() else "spot") if paper_state else []
+        except Exception:
+            return []
+
+    def current() -> list[str]:
+        """The workspace's pairs: what its engine trades now (in the Futures view its top gainers while
+        that list is on) plus every pair it still holds an open paper position in."""
+        mkt = "futures" if futures_mode() else "spot"
+        try:
+            return configured_symbols(settings.symbols, market=mkt, keep=held())
         except Exception:
             return list(settings.symbols)
 
@@ -99,9 +108,12 @@ def add_market_routes(app, *, settings, page, guard, exchange: str = EXCHANGE, c
         if bad:
             return bad
         hot = set(gainers.symbols(gainers.path_for("futures" if futures_mode() else "spot")))
+        mine = set(held())
         res = await feed().tickers(current())
-        return JSONResponse({**res, "tickers": [{**t, "gainer": True} if t["symbol"] in hot else t
-                                          for t in res.get("tickers", [])]})
+        def mark(t: dict) -> dict:
+            return {**t, **({"gainer": True} if t["symbol"] in hot else {}),
+                    **({"held": True} if t["symbol"] in mine else {})}
+        return JSONResponse({**res, "tickers": [mark(t) for t in res.get("tickers", [])]})
 
     @app.get("/static/market.js")
     def market_js():
@@ -126,7 +138,8 @@ def add_market_routes(app, *, settings, page, guard, exchange: str = EXCHANGE, c
             db = CandleStore(settings.db_path)
             try:
                 hot = set(gainers.symbols(gainers.path_for("futures" if futures_mode() else "spot")))
-                rows = [{**_ticker(db, exchange, s, now), "gainer": s in hot} for s in current()]
+                mine = set(held())
+                rows = [{**_ticker(db, exchange, s, now), "gainer": s in hot, "held": s in mine} for s in current()]
                 if symbol:
                     bars = db.load(exchange, symbol, tf, start=now - BARS * TF_MS.get(tf, 900_000))
             finally:
@@ -240,7 +253,8 @@ def _ticker_buttons(rows: list[dict], current: str) -> str:
         cls = "" if ch is None else "good" if ch >= 0 else "bad"
         out += (f'<button type="button" class="tick{" active" if r["symbol"] == current else ""}" '
                 f'data-symbol="{_e(r["symbol"])}"><span class="tick-sym">{_e(r["symbol"])}'
-                f'{" <span class=hot>top gainer</span>" if r.get("gainer") else ""}</span>'
+                f'{" <span class=hot>top gainer</span>" if r.get("gainer") else ""}'
+                f'{" <span class=hot>open position</span>" if r.get("held") else ""}</span>'
                 f'<span class="tick-px">{"-" if r["price"] is None else _price(r["price"])}</span>'
                 f'<span class="tick-ch {cls}">{"" if ch is None else f"{ch:+.2f}%"}</span></button>')
     return out
