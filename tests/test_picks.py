@@ -112,6 +112,16 @@ def test_replay_page_starts_and_undoes_a_pick(tmp_path, monkeypatch):
                {"4h": {"at": 1, "picked": ["up"], "pairs": ["BTC/USDT"], "results": [result("up")]}})
     page = c.get("/replay?tf=4h").text
     assert "4h pick on: 1 strategies kept" in page and "Undo the 4h pick" in page
+    # a pick that kept nothing says so, and every tested strategy shows why it was dropped
+    day = 86_400_000
+    picks.save(picks.picks_path(str(tmp_path / "registry.json")),
+               {"5m": {"at": 731 * day, "since": day, "picked": [], "pairs": ["BTC/USDT"], "bars": {"BTC/USDT": 105_120},
+                       "results": [result("few", trades=4), result("losing", total=-3.5),
+                                   result("shaky", up=1, down=3)]}})
+    page = c.get("/replay?tf=5m").text
+    assert "No strategy passed on 5m" in page and "All 3 tested strategies" in page
+    assert "only 4 trades (needs 10)" in page and "lost money overall (-3.50R after fees)" in page
+    assert "down in more quarters than up (1 of 4 up)" in page and "BTC/USDT 105,120 candles (50%)" in page
     c.post("/replay/pick", data={"csrf": csrf, "tf": "4h", "undo": "1"})
     runner.wait_idle()
     assert ["learn", "pick-timeframe", "4h", "--clear", "--market", "spot"] in [j["steps"][0] for j in runner.list()]
