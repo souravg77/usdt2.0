@@ -632,3 +632,22 @@ def test_a_price_download_does_not_wait_behind_a_long_job(tmp_path, monkeypatch)
         time.sleep(0.05)
     assert runner.get(quick_id)["status"] == "done" and runner.get(long_id)["status"] == "running"
     runner.wait_idle(timeout=10)
+
+
+def test_open_positions_say_which_indicators_took_the_trade(tmp_path):
+    """Shawn: show that each paper trade comes from the strategies' indicator rules."""
+    from aitrader.learn import Entry, Registry
+    from aitrader.web.app import _indicator_names, _positions_table
+
+    reg = Registry(str(tmp_path / "reg.json"))
+    reg.add(Entry(id="builtin-trend_pullback", kind="builtin", name="trend_pullback", status="paper"))
+    reg.save()
+    names = _indicator_names(reg.path)
+    assert "EMA 20/50/200" in names("builtin-trend_pullback") and "RSI" in names("builtin-trend_pullback")
+    assert names("gone") == ""
+    paper = {"open": {"builtin-trend_pullback|bybit|SOL/USDT|1h|futures": {
+        "entry_id": "builtin-trend_pullback", "perp": True, "filled": True, "entry": 100.0, "units": 1,
+        "signal": {"side": "buy", "entry": 100.0, "stop": 95.0, "target": 110.0,
+                   "reason": "EMA stack up, HH/HL, pullback to EMA20 held"}}}}
+    html = _positions_table(paper, {}, futures_view=True, why=names)
+    assert "Why (indicators)" in html and "pullback to EMA20 held" in html and "Indicators: " in html
