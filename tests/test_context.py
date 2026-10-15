@@ -191,7 +191,7 @@ def test_filter_open_interest_up_while_price_falls(ctx):
 def test_filter_blocks_market_wide_selloff_and_rules_combine(ctx):
     ctx.upsert([("global", "*", "total_mcap_change_24h", NOW - HOUR_MS, -0.09)])
     d = ContextFilter(ctx).decide("bybit", "BTC/USDT", NOW)
-    assert not d.allow_entries and d.size_multiplier == 0.0 and "no new entries" in d.reasons[-1]
+    assert not d.allow_entries and d.size_multiplier == 0.0 and "no new longs" in d.reasons[-1]
     assert ContextFilter(ctx).decide("bybit", "BTC/USDT", NOW + 3 * HOUR_MS).allow_entries  # stale
     ctx.upsert([("global", "*", "total_mcap_change_24h", NOW, -0.02),
                 ("bybit", "BTC/USDT", "funding_rate", NOW, 0.0007),
@@ -239,3 +239,34 @@ def test_cli_context_collect_and_show(tmp_path, monkeypatch, capsys):
     assert main(["--env-file", "none", "context", "show", "--symbol", "BTC/USDT"]) == 0
     out = capsys.readouterr().out
     assert "funding_rate" in out and "btc_dominance" in out and "now: entries" in out
+
+
+@pytest.mark.parametrize("rate, long_ok, short_ok", [(0.0011, False, True), (-0.0011, True, False),
+                                                     (-0.0006, True, True)])
+def test_a_short_reads_funding_the_other_way(ctx, rate, long_ok, short_ok):
+    ctx.upsert([("bybit", "BTC/USDT", "funding_rate", NOW - HOUR_MS, rate)])
+    f = ContextFilter(ctx)
+    assert f.decide("bybit", "BTC/USDT", NOW).allow_entries is long_ok
+    short = f.decide("bybit", "BTC/USDT", NOW, side="sell")
+    assert short.allow_entries is short_ok
+    if rate == -0.0006:  # shorts crowded: half size, longs untouched
+        assert short.size_multiplier == 0.5 and f.decide("bybit", "BTC/USDT", NOW).size_multiplier == 1.0
+    if not short_ok:
+        assert "no new shorts" in short.reasons[0]
+
+
+def test_a_sell_off_blocks_longs_but_not_shorts(ctx):
+    ctx.upsert([("global", "*", "total_mcap_change_24h", NOW - HOUR_MS, -0.10)])
+    f = ContextFilter(ctx)
+    assert not f.decide("bybit", "BTC/USDT", NOW).allow_entries
+    assert f.decide("bybit", "BTC/USDT", NOW, side="sell").allow_entries
+
+
+def test_context_is_collected_for_the_engines_pairs(monkeypatch):
+    from aitrader import cli
+    from aitrader.config import Settings
+    from aitrader.market import pairs
+
+    monkeypatch.setattr(pairs, "configured_symbols",
+                        lambda base, market="spot": ["ZK/USDT", "BTC/USDT"] if market == "futures" else list(base))
+    assert cli._context_symbols(Settings(symbols=["BTC/USDT", "ETH/USDT"])) == ["BTC/USDT", "ETH/USDT", "ZK/USDT"]

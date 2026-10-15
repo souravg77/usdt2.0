@@ -321,6 +321,20 @@ def cmd_calendar(_s: Settings, args) -> int:
     return 0
 
 
+def _context_symbols(s: Settings) -> list[str]:
+    """The pairs to keep funding and open interest for: the fixed list plus what Spot AI and Futures AI
+    trade now (their top gainers while those lists are on), read again on every round."""
+    from .market.pairs import configured_symbols
+
+    out = list(s.symbols)
+    for market in ("spot", "futures"):
+        try:
+            out += configured_symbols(s.symbols, market=market)
+        except Exception:  # a broken pair list must not stop the context feed
+            logging.getLogger("aitrader.context").exception("can't read the %s pairs", market)
+    return list(dict.fromkeys(out))
+
+
 async def cmd_context(s: Settings, args) -> int:
     """Market context (Phase 2): funding, open interest, global market cap; see docs/market-context.md."""
     import time
@@ -333,7 +347,7 @@ async def cmd_context(s: Settings, args) -> int:
         if args.context_cmd == "collect":
             log = logging.getLogger("aitrader.context")
             while True:
-                added = await collect_context(ctx, args.symbol or s.symbols, backfill_days=args.backfill_days)
+                added = await collect_context(ctx, args.symbol or _context_symbols(s), backfill_days=args.backfill_days)
                 log.info("context +%s", ", ".join(f"{m} {n}" for m, n in added.items() if n) or "nothing new")
                 if args.once:
                     return 0
@@ -869,8 +883,8 @@ def _filter_strategies(reg, use_all: bool) -> list:
     from .learn.registry import Entry
     from .strategies import STRATEGIES
 
-    if not use_all:  # the filter judges long trades only, so it learns from long strategies only
-        entries = [e for e in reg.with_status("paper", "retired") if e.kind != "short"]
+    if not use_all:  # shorts too: they are learned (and judged) as longs on the flipped chart
+        entries = list(reg.with_status("paper", "retired"))
     else:
         entries = [e for e in reg.entries.values() if e.kind == "rule"]
         entries += [Entry(id=f"builtin-{n}", kind="builtin", name=n) for n in STRATEGIES]

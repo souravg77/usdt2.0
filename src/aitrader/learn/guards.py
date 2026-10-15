@@ -11,6 +11,10 @@
   when the close is above EMA 50 and EMA 20 is above EMA 50, down when both are below.
 - **Split take-profit** (``split_tp``): half the position is closed halfway to the target, the
   rest at the target (``backtest.engine``).
+- **Exposure caps**: at most ``max_long`` long and ``max_short`` short positions at once, and at
+  most ``max_correlated`` positions on the same side whose hourly returns over the last week move
+  together with the new pair (correlation of at least ``corr_min``), so one Bitcoin move can't hit
+  every position at once.
 - **Limit entries** (``maker_entry``): enter with a post-only limit order at the signal price or
   the open, paying the maker fee instead of taker fee and slippage; when the entry candle never
   trades through that price the order is cancelled and the trade is missed (``engine.maker_fill``).
@@ -29,9 +33,13 @@ from datetime import datetime, timedelta
 from . import wallet
 
 DEFAULTS = {"breaker": True, "day_pause_pct": 3.0, "pause_hours": 24.0, "week_close_pct": 6.0,
-            "min_rr": 0.0, "trend": False, "split_tp": False, "maker_entry": False}
+            "min_rr": 0.0, "trend": False, "split_tp": False, "maker_entry": False,
+            "max_long": 8.0, "max_short": 8.0, "max_correlated": 3.0, "corr_min": 0.8}
 RANGES = {"day_pause_pct": (0.5, 50.0), "pause_hours": (1.0, 168.0), "week_close_pct": (1.0, 90.0),
-          "min_rr": (0.0, 10.0)}
+          "min_rr": (0.0, 10.0), "max_long": (1.0, 200.0), "max_short": (1.0, 200.0),
+          "max_correlated": (1.0, 50.0), "corr_min": (0.5, 0.99)}
+WHOLE = ("max_long", "max_short", "max_correlated")
+CORR_BARS = 168  # hourly returns of the last week
 SWITCHES = ("breaker", "trend", "split_tp", "maker_entry")
 
 HIGHER = {"5m": ("4h", "1d"), "15m": ("4h", "1d"), "30m": ("4h", "1d"), "1h": ("4h", "1d"), "4h": ("1d",)}
@@ -55,6 +63,8 @@ def _clean(d: dict) -> dict:
             num = v
         lo, hi = RANGES[k]
         out[k] = num if k == "min_rr" and num == 0 else max(lo, min(hi, num))
+        if k in WHOLE:
+            out[k] = float(int(out[k]))
     return out
 
 
@@ -161,6 +171,19 @@ def block(state: dict, market: str, now_ms: int) -> str:
 
         return f"{br['why']} (until {local(br['until'] / 1000)})"
     return ""
+
+
+# ---- exposure caps ------------------------------------------------------------------------------
+
+def correlation(a, b) -> float:
+    """Correlation of two hourly-return series over the hours both have (0 with too few)."""
+    import pandas as pd
+
+    both = pd.concat([a, b], axis=1, join="inner").dropna()
+    if len(both) < 48 or (both.std() == 0).any():  # too few hours, or a flat series: unrelated
+        return 0.0
+    c = both.iloc[:, 0].corr(both.iloc[:, 1])
+    return 0.0 if c != c else float(c)
 
 
 # ---- higher-timeframe trend ---------------------------------------------------------------------

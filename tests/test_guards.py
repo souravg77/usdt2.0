@@ -208,6 +208,54 @@ def test_the_paper_trader_skips_a_long_against_the_daily_trend(tmp_path, monkeyp
     store.close()
 
 
+def test_correlation_of_hourly_returns():
+    idx = list(range(100))
+    a = pd.Series([((i * 7) % 11) / 100 for i in idx], index=idx)
+    assert guards.correlation(a, a * 2) == pytest.approx(1.0)
+    assert guards.correlation(a, -a) == pytest.approx(-1.0)
+    assert guards.correlation(a, a.head(10)) == 0.0  # too few hours in common
+    assert guards.correlation(a, pd.Series(0.0, index=idx)) == 0.0  # a flat series
+
+
+def _two_pair_trader(tmp_path, values):
+    from test_learn import EVERY_UP_BAR, fill_store, synthetic
+
+    from aitrader.data.store import CandleStore
+    from aitrader.learn import Entry, PaperTrader, Registry
+    from aitrader.learn.rules import validate_spec
+
+    store = CandleStore(str(tmp_path / "c.db"))
+    df = synthetic(n=700)
+    fill_store(store, df, sym="BTC/USDT")
+    fill_store(store, df, sym="ETH/USDT")  # the same prices: they move together exactly
+    reg = Registry(str(tmp_path / "reg.json"))
+    reg.add(Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR), status="paper"))
+    reg.save()
+    state = str(tmp_path / "paper_state.json")
+    wallet.set_engine(wallet.engines_path(state), "futures", False)
+    guards.save(guards.path_for(state), "spot", values)
+    trader = PaperTrader(store, str(tmp_path / "reg.json"), ["bybit"], ["BTC/USDT", "ETH/USDT"], state_path=state)
+    for i in range(600, 640):
+        trader.tick(now_ms=int(df.ts.iloc[i]) + H)
+    store.close()
+    return trader
+
+
+def test_an_engine_holds_at_most_its_cap_of_longs(tmp_path):
+    trader = _two_pair_trader(tmp_path, {"max_long": 1, "max_correlated": 50})
+    held = {k.split("|")[2] for k in trader.state["open"]} | {t["key"].split("|")[2] for t in trader.state["trades"]}
+    why = [s for s in trader.state["signals"] if s["skipped"] == "exposure cap"]
+    assert why and "already holds 1 long positions (its limit is 1)" in why[0]["detail"]
+    assert len(trader.state["open"]) <= 1 and held
+
+
+def test_pairs_that_move_together_count_against_one_cap(tmp_path):
+    trader = _two_pair_trader(tmp_path, {"max_correlated": 1})
+    why = [s for s in trader.state["signals"] if s["skipped"] == "exposure cap"]
+    assert why and "move with" in why[0]["detail"]
+    assert len({k.split("|")[2] for k in trader.state["open"]}) <= 1  # never both pairs at once
+
+
 def test_a_limit_entry_pays_the_maker_fee_or_misses_the_trade():
     from aitrader.backtest.engine import maker_fill
 

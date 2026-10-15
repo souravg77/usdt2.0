@@ -23,7 +23,7 @@ and each can be turned off on the Trading page:
   the result, isolated margin at the chosen leverage (only the margin counts against the futures
   wallet), and a trade whose stop is too close to the liquidation price is skipped.
 
-The AI trade filter learned from long trades, so it doesn't judge shorts.
+The AI trade filter judges shorts as the long on the flipped chart (``ai.features.as_long``).
 """
 
 from __future__ import annotations
@@ -111,6 +111,7 @@ class PaperTrader:
         self.guards_path = guards.path_for(state_path)  # each engine's loss breakers, min reward, trend, split TP
         self._guards = guards.load(self.guards_path)
         self._trends: dict = {}  # (exchange, symbol, timeframe) -> trend of a higher timeframe, this pass
+        self._returns: dict = {}  # (exchange, symbol) -> hourly returns of the last week, this pass
         self._now = 0
         self.perp_limits_path = perp_limits.DEFAULT_PATH  # each coin's maximum leverage on Bybit
         self.ai_filter = ai_filter  # Phase 4 trade filter (aitrader.ai.LiveFilter) or None
@@ -132,7 +133,7 @@ class PaperTrader:
         reg = Registry(self.registry_path)  # re-read: `learn` commands may have changed it
         events = {"opened": [], "closed": [], "retired": [], "filtered": []}
         self._now = now_ms
-        self._guards, self._trends = guards.load(self.guards_path), {}
+        self._guards, self._trends, self._returns = guards.load(self.guards_path), {}, {}
         for m in wallet.MARKETS:  # trip, hold or clear each engine's loss breaker
             br = guards.update_breaker(self.state, self._wallet(m), m, self._guards[m], now_ms)
             if br and br.get("at") == now_ms:
@@ -212,7 +213,7 @@ class PaperTrader:
                         legs = self._legs(key, sig, sym, on, events)
                         if not legs:
                             continue
-                        ctx_mult = self._context(ex, sym, now_ms)
+                        ctx_mult = self._context(ex, sym, now_ms, sig.side.value)
                         if ctx_mult <= 0:
                             for k, _perp in legs:
                                 self._log_signal(k, sig, "market context or news filter")
@@ -317,15 +318,16 @@ class PaperTrader:
         candles = [c for c in self.store.load(ex, sym, tf, start) if c.ts + step <= now_ms]
         return candles_to_frame(candles) if candles else None
 
-    def _context(self, exchange: str, symbol: str, now_ms: int) -> float:
-        """Size multiplier from the market-context and news filters (0 = no new entry)."""
+    def _context(self, exchange: str, symbol: str, now_ms: int, side: str = "buy") -> float:
+        """Size multiplier from the market-context and news filters (0 = no new entry). The
+        market-context filter reads funding and open interest the other way round for a short."""
         mult = 1.0
-        for name, f, args in (("market-context", self.context, (exchange, symbol, now_ms)),
-                              ("news", self.news, (symbol, now_ms))):
+        for name, f, args, kw in (("market-context", self.context, (exchange, symbol, now_ms), {"side": side}),
+                                  ("news", self.news, (symbol, now_ms), {})):
             if f is None:
                 continue
             try:
-                d = f.decide(*args)
+                d = f.decide(*args, **kw)
             except Exception:  # missing context data must never stop paper trading
                 log.exception("%s filter failed; ignoring it this tick", name)
                 continue
@@ -390,6 +392,11 @@ class PaperTrader:
                 events["filtered"].append(k)
                 continue
             g = self._guards[mkt]
+            why = self._exposure_block(mkt, key.split("|")[1], sym, short, g)
+            if why:
+                self._log_signal(k, sig, "exposure cap", why)
+                events["filtered"].append(k)
+                continue
             if perp:
                 lev = self._lev(sym)
                 ok = futures.short_stop_ok if short else futures.long_stop_ok
@@ -431,6 +438,39 @@ class PaperTrader:
             return replace(base, min_rr=min_rr, split_tp=split_tp, maker_entry=maker_entry)
         return base
 
+    def _exposure_block(self, mkt: str, ex: str, sym: str, short: bool, g: dict) -> str:
+        """Why one more position on this side would be too much for the engine, or "": its cap of
+        longs or shorts, or too many open positions on the same side that move with ``sym``."""
+        name = "Futures AI" if mkt == "futures" else "Spot AI"
+        mine = [(k, o) for k, o in self.state["open"].items()
+                if ("futures" if k.endswith(FUTURES_SUFFIX) or wallet.market_of(o) == "futures" else "spot") == mkt
+                and ((o.get("signal") or {}).get("side") == "sell") == short]
+        cap = int(g["max_short"] if short else g["max_long"])
+        side = "short" if short else "long"
+        if len(mine) >= cap:
+            return f"{name} already holds {len(mine)} {side} positions (its limit is {cap})"
+        others = {k.split("|")[2] for k, _o in mine} - {sym}
+        if len(others) < int(g["max_correlated"]):
+            return ""
+        mine_r = self._hourly_returns(ex, sym)
+        if mine_r is None:
+            return ""
+        close = [o for o in sorted(others) if (r := self._hourly_returns(ex, o)) is not None
+                 and guards.correlation(mine_r, r) >= g["corr_min"]]
+        if len(close) >= int(g["max_correlated"]):
+            return (f"{name} already holds {len(close)} {side} positions that move with {sym} "
+                    f"(correlation {g['corr_min']:g} or more over the last week: {', '.join(close[:5])})")
+        return ""
+
+    def _hourly_returns(self, ex: str, sym: str):
+        """Hourly returns of the last week, indexed by time (read once per pass), or None."""
+        if (ex, sym) not in self._returns:
+            now = self._now or int(time.time() * 1000)
+            df = self._frame(ex, sym, "1h", now - (guards.CORR_BARS + 1) * TIMEFRAME_MS["1h"], now)
+            self._returns[(ex, sym)] = (None if df is None or len(df) < 48 else
+                                        df.set_index("ts")["close"].pct_change().dropna())
+        return self._returns[(ex, sym)]
+
     def _higher_trends(self, ex: str, sym: str, tf: str) -> dict:
         """{higher timeframe: "up" / "down" / "flat"} for a signal on ``tf`` (read once per pass)."""
         out = {}
@@ -451,7 +491,7 @@ class PaperTrader:
         return futures.clamp_paper_leverage(chosen, perp_limits.max_leverage(symbol, self.perp_limits_path))
 
     def _ai_check(self, sig: Signal, entry_id: str, df) -> dict:
-        if self.ai_filter is None or sig.side is Side.SELL:
+        if self.ai_filter is None:
             return {"take": True, "size": 1.0, "prob": None, "version": None}
         recent = [t["r"] for t in self.state["trades"]
                   if t["entry_id"] == entry_id and t["exit_ts"] < sig.ts]
