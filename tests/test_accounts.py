@@ -392,3 +392,47 @@ def test_switching_live_off_sells_live_positions(tmp_path):
     run(runner.tick())
     assert u.id not in runner._ex  # then nothing runs for the account until live is on again
     assert len(real.sent) == 2
+
+
+def test_password_change_logs_out_other_devices_and_wrong_tries_lock(site):
+    make, users, _calls = site
+    client, auth = make()
+    client.post("/signup", data={"email": "bo@example.com", "password": "a long enough password",
+                                 "password2": "a long enough password", "agree": "1"})
+    phone = TestClient(client.app)
+    _login(client, "bo@example.com", "a long enough password")
+    _login(phone, "bo@example.com", "a long enough password")
+    csrf = _csrf(client)
+    for _ in range(5):  # wrong current password: counted like wrong logins
+        r = client.post("/me/password", data={"csrf": csrf, "current": "wrong guess here", "new": "x" * 14},
+                        follow_redirects=False)
+    r = client.post("/me/password", data={"csrf": csrf, "current": "a long enough password", "new": "x" * 14},
+                    follow_redirects=False)
+    assert "Too many" in r.headers["location"].replace("%20", " ")
+    assert users.authenticate("bo@example.com", "a long enough password")
+    auth._fails.clear()
+    import time as _t
+
+    _t.sleep(1.1)  # sessions issued in an earlier second than the change
+    r = client.post("/me/password", data={"csrf": csrf, "current": "a long enough password",
+                                          "new": "a brand new password"}, follow_redirects=False)
+    assert "Other devices" in r.headers["location"].replace("%20", " ")
+    assert client.get("/me", follow_redirects=False).status_code == 200  # this browser: a new session
+    assert phone.get("/me", follow_redirects=False).headers["location"] == "/login"  # the other one: out
+
+
+def test_logins_posted_from_another_site_are_refused(site):
+    make, _users, _calls = site
+    client, _ = make()
+    r = client.post("/login", data={"user": "admin", "password": PW}, headers={"origin": "https://evil.example"},
+                    follow_redirects=False)
+    assert r.status_code == 403 and not client.cookies.get(COOKIE)
+    r = client.post("/login", data={"user": "admin", "password": PW}, headers={"sec-fetch-site": "cross-site"},
+                    follow_redirects=False)
+    assert r.status_code == 403
+    r = client.post("/signup", data={"email": "e@example.com", "password": "p" * 12, "password2": "p" * 12,
+                                     "agree": "1"}, headers={"origin": "https://evil.example"}, follow_redirects=False)
+    assert r.status_code == 403
+    r = client.post("/login", data={"user": "admin", "password": PW}, headers={"origin": "http://testserver"},
+                    follow_redirects=False)
+    assert r.status_code == 303 and client.cookies.get(COOKIE)  # this site's own form

@@ -248,8 +248,10 @@ def day_start_ms(now_ms: int) -> int:
     return int(now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
 
 
-def today_pnl(state: dict, market: str, now_ms: int) -> float:
-    start = day_start_ms(now_ms)
+def today_pnl(state: dict, market: str, now_ms: int, since: int = 0) -> float:
+    """Profit or loss of that engine's trades closed today, and (with ``since``) after the wallet was
+    set: a reset wallet doesn't carry the old wallet's losses."""
+    start = max(day_start_ms(now_ms), since)
     return sum(t.get("pnl_usdt", 0.0) for t in state.get("trades", [])
                if t.get("exit_ts", 0) >= start and market_of(t) == market)
 
@@ -261,7 +263,7 @@ def entry_block(state: dict, w: dict, market: str, lim: dict, now_ms: int) -> st
                  if (k.endswith("|futures") or market_of(o) == "futures") == (market == "futures"))
     if opened >= lim["max_open"]:
         return f"{name} has {opened} open positions (its limit is {lim['max_open']})"
-    today = today_pnl(state, market, now_ms)
+    today = today_pnl(state, market, now_ms, w.get("since", 0))
     day_start_balance = balance(state, w, market) - today
     if day_start_balance > 0 and today <= -lim["daily_loss_pct"] / 100 * day_start_balance:
         return (f"{name} lost {-today:,.2f} USDT today, its daily limit of {lim['daily_loss_pct']:g}%: "

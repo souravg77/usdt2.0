@@ -25,6 +25,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from urllib.parse import urlsplit
 
 from ..clock import label as tz_label, local, offset_minutes
 
@@ -151,6 +152,8 @@ data-tz-label="{_e(tz_label(now))}"{f' data-reload-ms="{int(refresh * 1000)}"' i
 
     @app.post("/login")
     def login(request: Request, user: str = Form(...), password: str = Form(...)):
+        if cross_site(request):  # no session yet, so no form token: refuse logins posted by other sites
+            return PlainTextResponse("log in from this site's own login page", status_code=403)
         ip = request.client.host if request.client else "?"
         if auth.locked_out(ip):
             return RedirectResponse("/login?error=locked", status_code=303)
@@ -227,7 +230,7 @@ data-tz-label="{_e(tz_label(now))}"{f' data-reload-ms="{int(refresh * 1000)}"' i
 
         add_user_routes(app, settings=settings, auth=auth, paths=paths, users=users,
                         keys_secret=keys_secret, signup=signup, verifier=verifier, page=page,
-                        session=session, guard=guard)
+                        session=session, guard=guard, secure_cookie=secure_cookie)
 
     @app.post("/logout")
     def logout(request: Request, csrf: str = Form("")):
@@ -871,6 +874,14 @@ def _q(s: str) -> str:
     from urllib.parse import quote
 
     return quote(s)
+
+
+def cross_site(request) -> bool:
+    """A form posted from another website (the browser says so in Sec-Fetch-Site or Origin)."""
+    if request.headers.get("sec-fetch-site", "") == "cross-site":
+        return True
+    origin = request.headers.get("origin")
+    return bool(origin) and urlsplit(origin).netloc.lower() != request.headers.get("host", "").lower()
 
 
 def _csrf(auth: Auth, token: str | None) -> str:

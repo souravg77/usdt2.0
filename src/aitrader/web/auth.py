@@ -109,7 +109,16 @@ class Auth:
             return None
         if int(expires) < (now or time.time()):
             return None
+        ended = self._revoked_disk.get("nb:" + user)  # sessions ended (password changed): their expiry
+        if ended and int(expires) <= ended:
+            return None
         return user
+
+    def end_sessions(self, subject: str, now: float | None = None) -> None:
+        """Log out every session of ``subject`` issued before this second (after a password change);
+        one issued from this second on still works."""
+        self._revoked_disk["nb:" + subject] = int((now or time.time()) + self.session_s) - 1
+        self._save_revoked()
 
     def revoke(self, token: str) -> None:
         """Log a session out. With ``revoked_path`` it stays logged out after a restart too."""
@@ -125,6 +134,11 @@ class Auth:
             pass
         self._revoked_disk = {k: v for k, v in self._revoked_disk.items() if v > now}
         self._revoked_disk[_digest(token)] = int(expires)
+        self._save_revoked()
+
+    def _save_revoked(self) -> None:
+        if not self._revoked_path:
+            return
         try:
             os.makedirs(os.path.dirname(os.path.abspath(self._revoked_path)), exist_ok=True)
             tmp = self._revoked_path + ".tmp"
