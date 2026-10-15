@@ -88,7 +88,12 @@ def test_pairs_page_button_and_markets_badge(tmp_path, monkeypatch):
     c = TestClient(app)
     c.post("/login", data={"user": "admin", "password": PW})
     page = c.get("/pairs").text
-    assert "Spot top gainers" in page and "Futures top gainers" in page and "Trade the top gainers" in page
+    # each workspace shows only its own scanner: Spot first (the default view)
+    assert "Spot top gainers" in page and "Futures top gainers" not in page and "Trade the top gainers" in page
+    from aitrader.learn import wallet
+    wallet.set_market(wallet.market_path(str(tmp_path / "paper.json")), True)
+    page = c.get("/pairs").text
+    assert "Futures top gainers" in page and "Spot top gainers" not in page
     csrf = Auth("admin", PW, "k").csrf(c.cookies.get(COOKIE))
     assert c.post("/pairs/gainers", data={"csrf": "x", "on": "1"}).status_code == 403
     r = c.post("/pairs/gainers", data={"csrf": csrf, "on": "1", "count": "5", "window": "4h"}, follow_redirects=False)
@@ -101,11 +106,12 @@ def test_pairs_page_button_and_markets_badge(tmp_path, monkeypatch):
     asyncio.run(gainers.refresh(FakePerps(), now_ms=int(time.time() * 1000)))
     page = c.get("/pairs").text
     assert "PEPE/USDT" in page and "+31.50%" in page and "Stop trading the top gainers" in page
+    wallet.set_market(wallet.market_path(str(tmp_path / "paper.json")), False)
     assert 'data-symbol="PEPE/USDT"' not in c.get("/markets").text  # the Spot AI view: not its gainer
-    from aitrader.learn import wallet
     wallet.set_market(wallet.market_path(str(tmp_path / "paper.json")), True)
     page = c.get("/markets").text
     assert 'data-symbol="PEPE/USDT"' in page and "top gainer" in page
+    assert 'data-symbol="ETH/USDT"' not in page  # Futures shows only its top gainers
     c.post("/pairs/gainers", data={"csrf": csrf, "on": "0", "market": "futures"})
     assert not gainers.load()["on"] and 'data-symbol="PEPE/USDT"' not in c.get("/markets").text
 
@@ -159,5 +165,10 @@ def test_spot_scanner_scores_and_flags_pumps(tmp_path):
     env = {"AITRADER_GAINERS_FILE": fut, "AITRADER_SPOT_GAINERS_FILE": path}
     fixed = ["ETH/USDT"]
     assert pairs.configured_symbols(fixed, env=env, now_ms=NOW + 1, market="spot") == ["ETH/USDT", "BTC/USDT", "WIF/USDT"]
+    # Futures AI trades only its gainers while that list is on (plus pairs it still holds)
     assert pairs.configured_symbols(fixed, env=env, now_ms=NOW + 1, market="futures") == \
-        ["ETH/USDT", "PEPE/USDT", "WIF/USDT", "BTC/USDT"]
+        ["PEPE/USDT", "WIF/USDT", "BTC/USDT"]
+    assert pairs.configured_symbols(fixed, env=env, now_ms=NOW + 1, market="futures", keep=["SOL/USDT"]) == \
+        ["PEPE/USDT", "WIF/USDT", "BTC/USDT", "SOL/USDT"]
+    gainers.switch(False, path=fut)  # off: the usual pairs again
+    assert pairs.configured_symbols(fixed, env=env, now_ms=NOW + 1, market="futures") == ["ETH/USDT"]

@@ -306,7 +306,8 @@ def configured_symbols(fallback: list[str], env=None, path: str | None = None,
                        market: str | None = None) -> list[str]:
     """The pairs to trade: the fixed list unless ``AITRADER_PAIRS=ranked`` and a fresh ranking
     exists, plus today's top gainers while that switch is on (``market.gainers``): the Spot
-    scanner's for ``market="spot"``, the Futures scanner's for ``"futures"``, both by default.
+    scanner's for ``market="spot"``, the Futures scanner's for ``"futures"``, both by default. While
+    the Futures scanner is on, ``market="futures"`` is its gainers alone, without the usual list.
     ``keep`` (e.g. pairs with open paper positions) is always added."""
     env = os.environ if env is None else env
     symbols = list(fallback)
@@ -326,6 +327,8 @@ def configured_symbols(fallback: list[str], env=None, path: str | None = None,
              "futures": env.get("AITRADER_GAINERS_FILE") or gainers.DEFAULT_PATH}
     hot = [s for m in ((market,) if market in files else ("spot", "futures"))
            for s in gainers.symbols(files[m], now_ms=now_ms)]
+    if market == "futures" and hot:  # Futures AI trades only its top gainers while that list is on
+        return list(dict.fromkeys([*hot, *(keep or [])]))
     return list(dict.fromkeys([*symbols, *hot, *(keep or [])]))
 
 

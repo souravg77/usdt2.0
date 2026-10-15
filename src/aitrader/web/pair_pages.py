@@ -80,8 +80,10 @@ def add_pair_routes(app, *, settings, auth, jobs, page, guard, ranking_path: str
         if job:
             body += (f'<p class="warn">Ranking pairs ({_e(job["status"])}). '
                      f'<a href="/jobs/{_e(job["id"])}">Follow the job</a></p>')
-        body += '<div class="grid">' + "".join(_gainers_card(auth, token, now, gainer_job(), m)
-                                               for m in ("spot", "futures")) + "</div>"
+        from ..learn import wallet  # the workspace shown: only its own scanner
+
+        ws = "futures" if wallet.futures_on(wallet.market_path(paper_state)) else "spot"
+        body += _gainers_card(auth, token, now, gainer_job(), ws)
         body += _run_card(auth, token, rk, job, now, settings.symbols, ranking_path)
         symbols = [p["symbol"] for p in rk.get("pairs", [])[:20]] or list(settings.symbols)
         try:

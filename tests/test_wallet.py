@@ -111,5 +111,5 @@ def test_trading_page_sets_the_wallet(tmp_path, monkeypatch):
     assert wallet.load("data/learn/paper_wallet.json")["start"] == 1000.0
     page = client.get("/trading").text
     assert "Balance <b>1,000.00 USDT</b>" in page and 'value="1000"' in page
-    assert "Spot AI wallet <b>1,000.00 USDT</b>" in client.get("/").text
+    assert "Spot AI paper trading" in client.get("/").text and "Wallet <b>1,000.00 USDT</b>" in client.get("/").text
     assert token
