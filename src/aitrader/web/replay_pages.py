@@ -24,10 +24,11 @@ from datetime import datetime, timedelta, timezone
 from fastapi import Form, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, Response
 
+from .. import clock
 from ..config import EXCHANGE
 from ..backtest import BacktestConfig
 from ..data.store import CandleStore
-from ..learn import keep
+from ..learn import keep, picks
 from ..learn.registry import Registry
 from ..learn.replay import WARMUP_BARS, replay
 from ..learn.report import known_entries
@@ -40,6 +41,7 @@ REPLAY_TIMEFRAMES = ["5m", "15m", "30m", "1h", "4h", "1d"]
 SPEEDS = [1, 2, 5, 10, 50, 200]
 CACHE_SIZE = 6
 TOPS = [10, 20, 30]
+PICK_YEARS = 2  # history a timeframe pick tests (learn.picks)
 
 
 def _top(strategy: str) -> int:
@@ -144,8 +146,11 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
         ids = on_tf + ranked + [i for i, _label in ranked_strategies()] + [e.id for e in entries]
         return list(dict.fromkeys(ids)), len(on_tf)
 
+    picks_file = picks.picks_path(registry_path)
+
     def compute(symbol: str, tf: str, start: datetime, months: int, strategy: str) -> dict:
-        key = (symbol, tf, start, months, strategy)
+        tf_picks = picks.load(picks_file)
+        key = (symbol, tf, start, months, strategy, (tf_picks.get(tf) or {}).get("at"))
         if key in cache:
             cache.move_to_end(key)
             return cache[key]
@@ -160,7 +165,9 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
                 only, on_tf = best_ids(entries, tf)
             else:
                 only = "" if strategy.startswith("top:") else strategy
-            res = replay(entries, store, exchange, symbol, tf, start_ms, end_ms, only=only, cfg=cfg(), top=n)
+            res = replay(entries, store, exchange, symbol, tf, start_ms, end_ms, only=only, cfg=cfg(), top=n,
+                         tf_picks=tf_picks)
+            res["picked"] = tf in tf_picks
             res["top"] = n
             ranked = set(only[:on_tf]) if n else set()
             res["ranked_on_tf"] = sum(1 for s in res["strategies"] if s["id"] in ranked)
@@ -250,6 +257,70 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
         return JSONResponse(download_status(job["status"], have, meta["since_ms"], meta["until_ms"],
                                             meta["tf"], job.get("error", ""), ahead))
 
+    @app.post("/replay/pick")
+    def pick(request: Request, csrf: str = Form(""), tf: str = Form("4h"), undo: str = Form("")):
+        user, token, redirect = guard(request)
+        if redirect:
+            return redirect
+        if not auth.check_csrf(token, csrf):
+            return PlainTextResponse("bad form token; reload the page", status_code=403)
+        if tf not in REPLAY_TIMEFRAMES:
+            return RedirectResponse("/replay?error=" + _q("pick a timeframe"), status_code=303)
+        if any(j["status"] in ("queued", "running") and j.get("meta", {}).get("kind") == "pick"
+               for j in jobs.list()):
+            return RedirectResponse(f"/replay?tf={_q(tf)}&error=" + _q("A pick is already running; see Recent "
+                                                                       "jobs on the Overview page."), status_code=303)
+        if undo:
+            jobs.submit(f"Undo the {tf} pick", [["learn", "pick-timeframe", tf, "--clear"]],
+                        meta={"kind": "pick", "by": user})
+            msg = f"Undoing the {tf} pick: every strategy may trade {tf} again."
+        else:
+            since = (datetime.now(timezone.utc) - timedelta(days=round(PICK_YEARS * 365.25))).strftime("%Y-%m-%d")
+            jobs.submit(f"Keep only the {tf} winners",
+                        [["download", "--since", since, "--exchange", exchange, "--timeframe", tf],
+                         ["learn", "pick-timeframe", tf, "--years", str(PICK_YEARS)]],
+                        meta={"kind": "pick", "by": user})
+            msg = (f"Testing every {tf} strategy on {PICK_YEARS:g} years of {tf} prices for every pair. "
+                   f"The steady winners keep trading {tf}; the rest stop trading it. This page shows the "
+                   "list when it's done (reload it in a few minutes).")
+        cache.clear()
+        return RedirectResponse(f"/replay?tf={_q(tf)}&msg=" + _q(msg), status_code=303)
+
+    def pick_card(tf: str, token: str) -> str:
+        p = picks.load(picks_file)
+        cur = p.get(tf)
+        others = ", ".join(t for t in REPLAY_TIMEFRAMES if t in p and t != tf)
+        opts = "".join(f'<option value="{t}"{" selected" if t == tf else ""}>{t}</option>' for t in REPLAY_TIMEFRAMES)
+        head = (f'{_e(tf)} pick on: {len(cur.get("picked", []))} strategies kept' if cur
+                else "Keep only the winners on one timeframe")
+        out = (f'<details class="card" id="tf-pick"><summary><b>{head}</b></summary>'
+               '<p class="small muted">Tests every strategy that trades the chosen timeframe on '
+               f'{PICK_YEARS:g} years of its prices for every pair (after fees). A strategy is kept when its '
+               f'total is above 0R over at least {picks.MIN_TRADES} trades and it made money in at least as '
+               'many 3-month quarters as it lost in, so one lucky quarter is not enough. Kept strategies '
+               'paper trade that timeframe only; the others stop trading it (their other timeframes carry on).</p>'
+               f'<form method="post" action="/replay/pick" class="row">{_csrf(auth, token)}'
+               f'<label>Timeframe <select name="tf">{opts}</select></label>'
+               '<button>Keep only the winners</button></form>')
+        if others:
+            out += f'<p class="small">Also picked: {_e(others)}.</p>'
+        if cur:
+            won = [r for r in cur.get("results", []) if r["id"] in set(cur.get("picked", []))]
+            when = clock.local(cur["at"] / 1000)
+            out += (f'<p><b>{_e(tf)} pick ({_e(when)}):</b> {len(won)} of {len(cur.get("results", []))} '
+                    f'strategies kept on {len(cur.get("pairs", []))} pairs.</p>')
+            if won:
+                rows = "".join(
+                    f'<tr><td>{_e(r["name"])}</td><td>{r["trades"]}</td><td>{r["win_rate"]:.0f}%</td>'
+                    f'<td class="good">{r["total_r"]:+.2f}R</td><td>{r["quarters_up"]} of '
+                    f'{r["quarters_up"] + r["quarters_down"]}</td></tr>' for r in won)
+                out += ('<table><tr><th>Strategy</th><th>Trades</th><th>Win %</th>'
+                        f'<th>Total</th><th>Quarters up</th></tr>{rows}</table>')
+            out += (f'<form method="post" action="/replay/pick" class="row">{_csrf(auth, token)}'
+                    f'<input type="hidden" name="tf" value="{_e(tf)}"><input type="hidden" name="undo" value="1">'
+                    f'<button class="ghost">Undo the {_e(tf)} pick</button></form>')
+        return out + '</details>'
+
     @app.get("/replay")
     def replay_page(request: Request, symbol: str = "", tf: str = "1h", month: str = "", months: int = 1,
                     strategy: str = "", msg: str = "", error: str = ""):
@@ -283,6 +354,7 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
             f'<label class="wide">Strategy <select name="strategy">{strat_opts}</select></label>'
             '<button type="submit">Load</button></form>'
             '<div id="replay-msg" class="muted"></div>'
+            + pick_card(tf, token) +
             f'<form id="replay-download" method="post" action="/replay/download" class="row hidden">{_csrf(auth, token)}'
             '<input type="hidden" name="symbol"><input type="hidden" name="tf"><input type="hidden" name="month">'
             '<input type="hidden" name="months"><button>Download these prices from Bybit</button></form>'
