@@ -160,6 +160,7 @@ INDICATOR_WORDS: dict[str, str] = {
     "pat": r"\b(hammer|doji|engulfing|inside_bar|outside_bar|pin bar|ha_green|heikin|body_pct|nr\d*\(|nr7)",
     "atr": r"\b(atr\w*|true range)",
     "cci": r"\bcci",
+    "smc": r"\b(fvg\w*|\w*_fvg|fair value gaps?|\w*_ob|bull_ob_\w+|order blocks?|sweep_\w+|liquidity sweeps?)",
     "willr": r"\b(williams|willr)",
 }
 # a book rule's notes (why it was coded so, what couldn't be) can name indicators it doesn't use

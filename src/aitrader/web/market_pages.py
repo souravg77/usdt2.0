@@ -188,6 +188,7 @@ STUDIES = [
     ("fib", "Fibonacci", "#eab308", False, False),
     ("vp", "Volume profile", "#64748b", False, False),
     ("pat", "Candle patterns", "#84cc16", False, False),
+    ("smc", "FVG / order blocks / sweeps", "#2dd4bf", False, False),
     ("trades", "Agent's trades", "#7aa2ff", False, True),
     ("vol", "Volume", "#64748b", True, True),
     ("rsi", "RSI", "#c084fc", True, True),

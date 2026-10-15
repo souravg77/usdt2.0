@@ -306,9 +306,10 @@ def _register_more() -> None:
     from .divergence import CciDivergence
     from .families import FAMILY_STRATEGIES
     from .master import MASTER_STRATEGIES
+    from .smc import SMC_STRATEGIES
 
     STRATEGIES[CciDivergence.spec.name] = CciDivergence
-    for cls in (*FAMILY_STRATEGIES, *MASTER_STRATEGIES):
+    for cls in (*FAMILY_STRATEGIES, *MASTER_STRATEGIES, *SMC_STRATEGIES):
         STRATEGIES[cls.spec.name] = cls
 
 
