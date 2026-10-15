@@ -622,22 +622,27 @@ def cmd_learn(s: Settings, args) -> int:
         from .learn import picks
         from .learn.report import known_entries
 
-        tf, path = args.timeframe, picks.picks_path(args.registry)
+        mkt = args.market
+        tf, path = args.timeframe, picks.picks_path(args.registry, mkt)
         if args.clear:
-            gone = picks.clear(reg, tf, path)
+            gone = picks.clear(reg, tf, path, mkt)
             print(f"{tf} pick undone: every strategy may trade {tf} again; {len(gone)} pick copies stopped")
             return 0
         since = int(_time.time() * 1000) - int(args.years * 365.25 * 86_400_000)
         entries = known_entries(reg.entries)
         store = CandleStore(s.db_path)
         try:
+            if mkt == "futures":  # Futures AI's pick: longs costed as perpetuals too
+                from .backtest.engine import as_perp
+
+                cfg = as_perp(cfg)
             results = picks.evaluate(entries, store, exchanges[0], list(symbols), tf, since, cfg)
         finally:
             store.close()
         if not any(r["trades"] for r in results):
             print(f"no {tf} trades: download {tf} prices first (aitrader download --since ... --timeframe {tf})")
             return 1
-        out = picks.apply(reg, entries, tf, results, path, min_trades=args.min_trades,
+        out = picks.apply(reg, entries, tf, results, path, min_trades=args.min_trades, market=mkt,
                           info={"since": since, "pairs": list(symbols), "years": args.years})
         print(f"{tf}: tested {out['tested']} strategies on {len(symbols)} pairs; kept {len(out['picked'])} "
               f"(total above 0R, at least {args.min_trades} trades, up in at least half their quarters)")
@@ -1589,6 +1594,8 @@ def build_parser() -> argparse.ArgumentParser:
     lpt.add_argument("--years", type=float, default=2.0, help="how much saved history to test (default 2)")
     lpt.add_argument("--min-trades", type=int, default=10, help="fewest trades to judge a strategy (default 10)")
     lpt.add_argument("--clear", action="store_true", help="undo the pick: every strategy trades it again")
+    lpt.add_argument("--market", choices=["spot", "futures"], default="spot",
+                     help="whose pick: Spot AI's (default) or Futures AI's; each engine trades only its own")
     le_sub.add_parser("add-shorts", help="add a short twin (Bybit perpetual futures) of every long strategy")
     le_sub.add_parser("paper-all", help="paper-trade every strategy, including untested and rejected "
                                         "ones (fake money; poor ones retire on their paper results)")

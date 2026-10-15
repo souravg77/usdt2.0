@@ -104,7 +104,8 @@ def test_replay_page_starts_and_undoes_a_pick(tmp_path, monkeypatch):
     job = [j for j in runner.list() if j["meta"].get("kind") == "pick"][0]
     assert job["steps"][0][:2] == ["download", "--since"] and job["steps"][0][-4:] == ["--timeframe", "4h",
                                                                                          "--symbol", "BTC/USDT"]
-    assert job["steps"][1] == ["learn", "--symbol", "BTC/USDT", "pick-timeframe", "4h", "--years", "2"]
+    assert job["steps"][1] == ["learn", "--symbol", "BTC/USDT", "pick-timeframe", "4h", "--years", "2",
+                               "--market", "spot"]
     assert job["title"] == "Keep only the 4h winners on Spot AI pairs"
     # a saved pick is listed with an undo button
     picks.save(picks.picks_path(str(tmp_path / "registry.json")),
@@ -113,7 +114,7 @@ def test_replay_page_starts_and_undoes_a_pick(tmp_path, monkeypatch):
     assert "4h pick on: 1 strategies kept" in page and "Undo the 4h pick" in page
     c.post("/replay/pick", data={"csrf": csrf, "tf": "4h", "undo": "1"})
     runner.wait_idle()
-    assert ["learn", "pick-timeframe", "4h", "--clear"] in [j["steps"][0] for j in runner.list()]
+    assert ["learn", "pick-timeframe", "4h", "--clear", "--market", "spot"] in [j["steps"][0] for j in runner.list()]
 
 
 def test_cli_pick_timeframe_and_undo(tmp_path, monkeypatch, capsys):
@@ -372,4 +373,25 @@ def test_the_futures_view_keeps_the_winners_on_futures_pairs_only(tmp_path, monk
     syms = ["--symbol", "SOL/USDT", "--symbol", "ZEREBRO/USDT"]
     assert title == "Keep only the 1h winners on Futures AI pairs" and meta["market"] == "futures"
     assert steps[0][-4:] == syms[-4:] and "BTC/USDT" not in steps[0] and "BTC/USDT" not in steps[1]
-    assert steps[1] == ["learn", *syms, "pick-timeframe", "1h", "--years", "2"]
+    assert steps[1] == ["learn", *syms, "pick-timeframe", "1h", "--years", "2", "--market", "futures"]
+
+
+def test_a_futures_pick_keeps_its_own_copies_and_leaves_spot_alone(tmp_path):
+    reg = Registry(str(tmp_path / "registry.json"))
+    reg.add(UP)
+    UP.set_status("paper", "test")
+    spot_file, fut_file = picks.picks_path(reg.path), picks.picks_path(reg.path, "futures")
+    assert fut_file.endswith("timeframe_picks_futures.json") and spot_file != fut_file
+    picks.apply(reg, [UP], "4h", [result("up")], spot_file)
+    out = picks.apply(Registry(reg.path), [UP], "4h", [result("up")], fut_file, market="futures")
+    assert out["added"] == ["fwin4h-up"] and picks.load(fut_file)["4h"]["market"] == "futures"
+    reg = Registry(reg.path)
+    old, new = reg.entries["win4h-up"], reg.entries["fwin4h-up"]
+    assert old.status == new.status == "paper"
+    assert picks.trades_now(old, True, "spot") and not picks.trades_now(old, True, "futures")
+    assert picks.trades_now(new, True, "futures") and not picks.trades_now(new, True, "spot")
+    # a futures pick that keeps nothing stops only the futures copy; undo leaves spot alone too
+    again = picks.apply(reg, [UP], "4h", [], fut_file, market="futures")
+    assert again["dropped"] == ["fwin4h-up"] and Registry(reg.path).entries["win4h-up"].status == "paper"
+    assert picks.clear(Registry(reg.path), "4h", fut_file, "futures") == []
+    assert picks.load(spot_file)["4h"]["picked"] == ["up"]
