@@ -16,6 +16,7 @@ from fastapi.responses import PlainTextResponse, RedirectResponse
 
 from ..config import EXCHANGE
 from ..data.store import CandleStore
+from ..market import gainers
 from ..market.pairs import configured_symbols, load_ranking, ranked_symbols
 from ..market.regime import current_regimes
 from .app import _csrf, _e, _ms, _q
@@ -34,6 +35,32 @@ def add_pair_routes(app, *, settings, auth, jobs, page, guard, ranking_path: str
                 return j
         return None
 
+    def gainer_job() -> dict | None:
+        for j in jobs.list():
+            if j.get("meta", {}).get("kind") == "gainers" and j["status"] in ("queued", "running"):
+                return j
+        return None
+
+    @app.post("/pairs/gainers")
+    def gainers_switch(request: Request, csrf: str = Form(""), on: str = Form(""), count: str = Form("")):
+        user, token, redirect = guard(request)
+        if redirect:
+            return redirect
+        if not auth.check_csrf(token, csrf):
+            return PlainTextResponse("bad form token; reload the page", status_code=403)
+        if on != "1":
+            gainers.switch(False, by=user)
+            return RedirectResponse("/pairs?msg=" + _q("Top gainers off: trading is back to the usual pairs. "
+                                                       "Open trades on them still close normally."), status_code=303)
+        if gainer_job():
+            return RedirectResponse("/pairs?error=" + _q("the top gainers are already being fetched"), status_code=303)
+        n = gainers.clamp_top(count or gainers.DEFAULT_TOP)
+        jobs.submit(f"Trade the top {n} gainers (Bybit futures)", [["pairs", "gainers", "--count", str(n)]],
+                    meta={"kind": "gainers", "by": user})
+        return RedirectResponse("/pairs?msg=" + _q(f"Fetching Bybit's top {n} gainers. Paper trading and the Markets page "
+                                                   "add them as soon as the list arrives; the collector downloads their "
+                                                   "prices on its next pass."), status_code=303)
+
     @app.get("/pairs")
     def pairs(request: Request, msg: str = "", error: str = ""):
         user, token, redirect = guard(request)
@@ -47,6 +74,7 @@ def add_pair_routes(app, *, settings, auth, jobs, page, guard, ranking_path: str
         if job:
             body += (f'<p class="warn">Ranking pairs ({_e(job["status"])}). '
                      f'<a href="/jobs/{_e(job["id"])}">Follow the job</a></p>')
+        body += _gainers_card(auth, token, now, gainer_job())
         body += _run_card(auth, token, rk, job, now, settings.symbols, ranking_path)
         symbols = [p["symbol"] for p in rk.get("pairs", [])[:20]] or list(settings.symbols)
         try:
@@ -109,6 +137,41 @@ def _run_card(auth, token, rk: dict, job, now: int, fixed: list[str], ranking_pa
             f'{_e(", ".join(used[:20]))}{" ..." if len(used) > 20 else ""}. Set AITRADER_PAIRS=ranked in .env to '
             f'trade the top ranked pairs.</p><form method="post" action="/pairs/rank" class="row">'
             f'{_csrf(auth, token)}<button{disabled}>Rank pairs now</button></form></div>')
+
+
+def _gainers_card(auth, token, now: int, job) -> str:
+    """The "Trade the top gainers" switch and today's list."""
+    data = gainers.load()
+    on, top = bool(data.get("on")), gainers.clamp_top(data.get("top", gainers.DEFAULT_TOP))
+    live = gainers.symbols(now_ms=now)
+    rows = "".join(f'<tr><td>{_e(p["symbol"])}</td><td class="good">{p["change"]:+.2f}%</td>'
+                   f'<td>{_usdt(p.get("turnover"))}</td><td>{"trading" if p["symbol"] in live else "-"}</td></tr>'
+                   for p in data.get("pairs", [])[:top])
+    when = f"List from {_ms(data['generated'])}." if data.get("generated") else "No list yet."
+    if job:
+        state = f'<span class="warn">fetching</span> (<a href="/jobs/{_e(job["id"])}">job</a>)'
+    elif on and live:
+        state = f'<span class="good">ON</span>: {len(live)} gainers trading in paper'
+    elif on:
+        state = '<span class="warn">ON</span>, but the list is missing or old (the collector refreshes it every hour)'
+    else:
+        state = '<span class="muted">OFF</span>'
+    csrf = _csrf(auth, token)
+    form = (f'<form method="post" action="/pairs/gainers" class="row">{csrf}<input type="hidden" name="on" value="1">'
+            f'<label class="small">Top <input type="number" name="count" min="{gainers.MIN_TOP}" max="{gainers.MAX_TOP}" '
+            f'value="{top}" style="width:4.5em"> gainers</label>'
+            f'<button{" disabled" if job else ""}>{"Refresh the top gainers" if on else "Trade the top gainers"}</button></form>')
+    if on:
+        form += (f'<form method="post" action="/pairs/gainers" class="row">{csrf}<input type="hidden" name="on" value="0">'
+                 '<button class="ghost">Stop trading the top gainers</button></form>')
+    table = (f'<table><tr><th>Pair</th><th>24h</th><th>Perp turnover</th><th>Paper</th></tr>{rows}</table>'
+             if rows else "")
+    return (f'<div class="card"><h3>Top gainers (Bybit futures)</h3><p>Top gainers {state}. {_e(when)}</p>'
+            '<p class="small muted">The Bybit USDT perpetual futures that rose most in 24 hours (also listed on spot, '
+            f'over {gainers.MIN_TURNOVER / 1e6:.0f}M USDT of 24h turnover). While on, they are added to the usual pairs '
+            'for paper trading and the Markets page, and refreshed every hour. Shorts trade them as futures. '
+            'Big movers are risky: sharp reversals, wide spreads and slipped stops are common.</p>'
+            f'{form}{table}</div>')
 
 
 def _usdt(x) -> str:

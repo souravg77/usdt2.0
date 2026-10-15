@@ -1542,7 +1542,7 @@ p.warn{border-color:color-mix(in srgb,var(--warnc) 40%,transparent)}
 padding:10px 12px;border-radius:var(--radius);font-weight:400;transition:border-color .2s,background .4s}
 .tick:hover{background:var(--card2);border-color:var(--accent)}.tick.active{border-color:var(--accent);background:var(--card2)}
 .tick-sym{font-size:.8em;color:var(--muted);font-weight:600}.tick-px{font-size:1.12em;font-weight:650}
-.tick-ch{font-size:.85em;font-weight:600}.tick-vol{font-size:.75em}
+.tick-ch{font-size:.85em;font-weight:600}.hot{font-size:.85em;color:#d97706;font-weight:700}.tick-vol{font-size:.75em}
 .tick.up{background:color-mix(in srgb,var(--good) 14%,var(--card))}.tick.down{background:color-mix(in srgb,var(--bad) 14%,var(--card))}
 .chart-card{padding:14px 14px 10px}.chart-head{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
 .chart-head h2{margin:0;font-size:1.1em}
