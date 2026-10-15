@@ -166,3 +166,42 @@ def test_replay_studies_match_the_markets_formulas(tmp_path):
     assert st["overlays"]["ema50"][k] == pytest.approx(alone["overlays"]["ema50"][0])
     assert st["panels"]["rsi"][k] == pytest.approx(alone["panels"]["rsi"][0])
     store.close()
+
+
+def test_replay_shows_only_the_workspace_pairs(client, monkeypatch, tmp_path):
+    """Shawn: Futures pairs on the Futures replay, Spot pairs on the Spot replay."""
+    import json
+    import time
+
+    from aitrader.learn import wallet
+
+    c, _runner = client
+    fut = str(tmp_path / "gainers.json")
+    with open(fut, "w") as fh:
+        json.dump({"on": True, "generated": int(time.time() * 1000), "pairs": [{"symbol": "SOL/USDT"}]}, fh)
+    monkeypatch.setenv("AITRADER_GAINERS_FILE", fut)
+    monkeypatch.setenv("AITRADER_SPOT_GAINERS_FILE", str(tmp_path / "none.json"))
+    c.post("/login", data={"user": "admin", "password": PW})
+    page = c.get("/replay").text
+    assert '<option value="BTC/USDT" selected>' in page and "SOL/USDT" not in page and "Spot AI workspace" in page
+
+    wallet.set_market(wallet.market_path("data/learn/paper_state.json"), True)
+    page = c.get("/replay").text
+    assert '<option value="SOL/USDT" selected>' in page and "BTC/USDT" not in page and "Futures AI workspace" in page
+    assert c.get("/api/replay?symbol=BTC/USDT&tf=1h&month=2025-03").status_code == 400  # a Spot pair here
+
+
+def test_spot_replay_leaves_out_short_strategies(client, monkeypatch):
+    import aitrader.web.replay_pages as rp
+    from aitrader.learn import wallet
+    from aitrader.learn.registry import short_twin
+
+    c, _runner = client
+    up = Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR))
+    monkeypatch.setattr(rp, "known_entries", lambda *a, **k: [up, short_twin(up)])
+    c.post("/login", data={"user": "admin", "password": PW})
+    ids = {s["id"] for s in c.get("/api/replay?symbol=BTC/USDT&tf=1h&month=2025-03").json()["strategies"]}
+    assert "up" in ids and "short-up" not in ids
+    wallet.set_market(wallet.market_path("data/learn/paper_state.json"), True)
+    ids = {s["id"] for s in c.get("/api/replay?symbol=BTC/USDT&tf=1h&month=2025-03").json()["strategies"]}
+    assert "short-up" in ids
