@@ -495,8 +495,8 @@ def test_paper_honours_pause_context_and_writes_events(tmp_path):
     control = Control(str(tmp_path / "control.json"))
     control.pause("test")
     events = EventLog(str(tmp_path / "ev.jsonl"), service="paper")
-    blocked = SimpleNamespace(decide=lambda ex, sym, now: SimpleNamespace(allow_entries=False, size_multiplier=0))
-    half = SimpleNamespace(decide=lambda ex, sym, now: SimpleNamespace(allow_entries=True, size_multiplier=0.5))
+    blocked = SimpleNamespace(decide=lambda ex, sym, now, side="buy": SimpleNamespace(allow_entries=False, size_multiplier=0))
+    half = SimpleNamespace(decide=lambda ex, sym, now, side="buy": SimpleNamespace(allow_entries=True, size_multiplier=0.5))
     trader = PaperTrader(store, reg_path, ["bybit"], ["BTC/USDT"], state_path=str(tmp_path / "s.json"),
                          control=control, context=blocked, events=events)
     ticks = [int(df.ts.iloc[i]) + H for i in range(600, 700)]

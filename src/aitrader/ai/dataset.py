@@ -25,12 +25,12 @@ import numpy as np
 import pandas as pd
 
 from ..backtest import BacktestConfig, split_periods
-from ..backtest.engine import simulate_signal
+from ..backtest.engine import as_perp, simulate_signal
 from ..data.context import ContextStore, attach_context, has_context
 from ..indicators import candles_to_frame
 from ..models import TIMEFRAME_MS, Side
 from ..strategies.base import Signal, Strategy
-from .features import ALL, history_features, market_features, signal_bar, signal_features
+from .features import ALL, as_long, history_features, market_features, signal_bar, signal_features
 
 log = logging.getLogger(__name__)
 
@@ -59,8 +59,15 @@ def reached_1r(df: pd.DataFrame, pos: int, fill: float, stop: float, risk: float
 def signal_rows(strategy: Strategy, strategy_id: str, df: pd.DataFrame, exchange: str,
                 symbol: str, timeframe: str, cfg: BacktestConfig | None = None,
                 feats: pd.DataFrame | None = None, source: str = "backtest") -> list[dict]:
-    """Simulate every signal ``strategy`` gives on ``df`` and return one row per signal."""
+    """Simulate every signal ``strategy`` gives on ``df`` and return one row per signal. A short
+    twin's signals are its long rules on the flipped chart (``strategies.mirror``), costed as perps,
+    so they become rows in the same form as the longs (``features.as_long``)."""
+    from ..strategies.mirror import ShortMirror, flip
+
     cfg = cfg or BacktestConfig()
+    if isinstance(strategy, ShortMirror):
+        return signal_rows(strategy.base, strategy_id, flip(df), exchange, symbol, timeframe,
+                           as_perp(cfg), None, source)
     feats = market_features(df) if feats is None else feats
     frecords = feats.to_dict("records")
     index_of = {int(t): i for i, t in enumerate(df["ts"].to_numpy())}
@@ -185,13 +192,18 @@ def paper_rows(store, state_path: str, cfg: BacktestConfig | None = None) -> lis
         if i is None or i + 1 >= len(df):
             continue
         sig = Signal(ts=t["signal_ts"], strategy=t["strategy"], exchange=ex, symbol=sym,
-                     timeframe=tf, side=Side.BUY, entry=float(df["close"].iloc[i]),
+                     timeframe=tf, side=Side(t.get("side") or "buy"), entry=float(df["close"].iloc[i]),
                      stop=t["stop"], target=t["target"])
+        fill = t["entry"]
+        if sig.side is Side.SELL:  # a short: the long on the flipped chart, as the filter judges it
+            sig, df = as_long(sig, df)
+            sig = Signal(**{**sig.__dict__, "entry": float(df["close"].iloc[i])})
+            fill = 1.0 / fill
         feats = market_features(df.iloc[:i + 1]).iloc[-1].to_dict()
         row = signal_features(sig, sid, feats, [])
         row.update(source="paper", exchange=ex, symbol=sym, signal_ts=t["signal_ts"],
                    entry_ts=t["entry_ts"], exit_ts=t["exit_ts"], exit_reason=t["exit_reason"],
-                   r=t["r"], hit_1r=reached_1r(df, i + 1, t["entry"], sig.stop, sig.entry - sig.stop))
+                   r=t["r"], hit_1r=reached_1r(df, i + 1, fill, sig.stop, sig.entry - sig.stop))
         rows.append(row)
     return rows
 

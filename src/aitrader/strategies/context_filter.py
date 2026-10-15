@@ -3,11 +3,14 @@ derivatives market or the whole crypto market looks stretched. It never creates 
 
 Rules (defaults are conservative: they only cut risk, and only on clear extremes):
 
-- funding above +0.05% per 8h: longs are crowded, size x0.5; above +0.10%: no new longs (the
-  agent trades spot longs only, so that means no new entries).
+- funding above +0.05% per 8h: longs are crowded, size x0.5; above +0.10%: no new longs.
 - open interest up more than 15% in 24h while price fell: new leverage is piling into a falling
   market, size x0.5.
-- total crypto market cap down more than 8% in 24h: market-wide sell-off, no new entries.
+- total crypto market cap down more than 8% in 24h: market-wide sell-off, no new longs.
+
+A short (``side="sell"``, Futures AI) gets the mirror: funding below -0.05% means shorts are
+crowded (size x0.5) and below -0.10% means a squeeze is likely (no new shorts); open interest up
+15% while price rose halves it. A market-wide sell-off doesn't block shorts.
 - a series older than twice its refresh interval (``data.context.REFRESH_MS``) is ignored and
   that rule is skipped. Missing data never blocks a trade; the calendar filter already covers the
   "feed down" case for macro risk.
@@ -76,20 +79,23 @@ class ContextFilter:
         return None
 
     def decide(self, exchange: str, symbol: str, now_ms: int | None = None,
-               price_change_24h: float | None = None) -> ContextDecision:
+               price_change_24h: float | None = None, side: str = "buy") -> ContextDecision:
         now = now_ms if now_ms is not None else int(time.time() * 1000)
         allow, size, reasons = True, 1.0, []
+        short = side in ("sell", "short")
+        sign = -1.0 if short else 1.0  # a short reads every rule upside down
 
         fr = self._derivs("funding_rate", exchange, symbol, now)
         if fr is None:
             reasons.append("funding rate missing or stale: rule skipped")
-        elif fr[1] > self.funding_block:
+        elif sign * fr[1] > self.funding_block:
             allow = False
-            reasons.append(f"funding {fr[1]:+.4%}/8h above {self.funding_block:+.2%}: no new longs")
-        elif fr[1] > self.funding_reduce:
+            reasons.append(f"funding {fr[1]:+.4%}/8h {'below' if short else 'above'} "
+                           f"{sign * self.funding_block:+.2%}: no new {'shorts' if short else 'longs'}")
+        elif sign * fr[1] > self.funding_reduce:
             size *= self.funding_size
-            reasons.append(f"funding {fr[1]:+.4%}/8h above {self.funding_reduce:+.2%}: "
-                           f"size x{self.funding_size:g}")
+            reasons.append(f"funding {fr[1]:+.4%}/8h {'below' if short else 'above'} "
+                           f"{sign * self.funding_reduce:+.2%}: size x{self.funding_size:g}")
 
         oi_now = self._derivs("open_interest", exchange, symbol, now)
         oi_ago = self._derivs("open_interest", exchange, symbol, now - DAY_MS) if oi_now else None
@@ -98,7 +104,7 @@ class ContextFilter:
             reasons.append("open interest or price history missing or stale: rule skipped")
         else:
             oi_chg = oi_now[1] / oi_ago[1] - 1
-            if oi_chg > self.oi_jump and move < 0:
+            if oi_chg > self.oi_jump and sign * move < 0:
                 size *= self.oi_size
                 reasons.append(f"open interest {oi_chg:+.1%} in 24h while price {move:+.1%}: "
                                f"size x{self.oi_size:g}")
@@ -106,9 +112,9 @@ class ContextFilter:
         chg = self._fresh("total_mcap_change_24h", *GLOBAL, now)
         if chg is None:
             reasons.append("total market cap change missing or stale: rule skipped")
-        elif chg[1] < -self.mcap_drop:
+        elif chg[1] < -self.mcap_drop and not short:
             allow = False
             reasons.append(f"total market cap {chg[1]:+.1%} in 24h (below -{self.mcap_drop:.0%}): "
-                           "no new entries")
+                           "no new longs")
 
         return ContextDecision(allow, size if allow else 0.0, reasons)
