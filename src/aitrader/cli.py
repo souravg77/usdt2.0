@@ -99,13 +99,16 @@ async def cmd_collect(s: Settings, args) -> int:
             # the ranked pairs when AITRADER_PAIRS=ranked, plus any with an open paper position
             from .market import gainers
 
-            if gainers.due():  # "Trade the top gainers" is on: today's list, about once an hour
-                client = gainers.perp_client()
+            for gm in gainers.MARKETS:  # each scanner switched on: its list, about once an hour
+                gpath = gainers.path_for(gm)
+                if not gainers.due(gpath):
+                    continue
+                client = gainers.client_for(gm)
                 try:
-                    await gainers.refresh(client)
-                    log.info("top gainers: %s", ", ".join(gainers.symbols()) or "none")
+                    await gainers.refresh(client, gpath, market=gm)
+                    log.info("%s top gainers: %s", gm, ", ".join(gainers.symbols(gpath)) or "none")
                 except Exception as exc:
-                    log.warning("top gainers refresh failed: %s", exc)
+                    log.warning("%s top gainers refresh failed: %s", gm, exc)
                 finally:
                     await client.close()
             from .learn import wallet
@@ -762,6 +765,8 @@ def cmd_learn(s: Settings, args) -> int:
 
             context = ContextFilter(ContextStore(store))
         pairs = symbols if args.symbol else (lambda: configured_symbols(s.symbols))  # re-read each tick
+        # Spot AI trades the Spot scanner's gainers, Futures AI the Futures scanner's
+        per_market = None if args.symbol else (lambda m: configured_symbols(s.symbols, market=m))
         trader = PaperTrader(store, args.registry, exchanges, pairs,
                              PaperConfig(start_equity=s.paper_start_usdt, backtest=cfg),
                              calendar=None if args.no_calendar else CalendarFilter(),
@@ -769,7 +774,8 @@ def cmd_learn(s: Settings, args) -> int:
                              control=Control(os.path.join(TRADE_DIR, "control.json")),
                              context=context, events=EventLog(service="paper"),
                              news=None if args.no_news else NewsFilter(),
-                             teacher=None if args.no_teacher else TeacherFilter(args.teacher_dir))
+                             teacher=None if args.no_teacher else TeacherFilter(args.teacher_dir),
+                             market_symbols=per_market)
         try:
             if args.once:
                 print(trader.tick())
@@ -1388,25 +1394,29 @@ def cmd_pairs(s: Settings, args) -> int:
     if args.pairs_cmd == "gainers":
         from .market import gainers
 
+        gm = args.market
+        gpath = gainers.path_for(gm)
+        name = "Spot" if gm == "spot" else "Futures"
         if args.off:
-            gainers.switch(False)
-            print("top gainers off: trading uses the usual pairs (open positions still close normally)")
+            gainers.switch(False, path=gpath)
+            print(f"{name} top gainers off: trading uses the usual pairs (open positions still close normally)")
             return 0
 
         async def fetch():
-            client = gainers.perp_client(args.exchange)
+            client = gainers.client_for(gm, args.exchange)
             try:
-                return await gainers.refresh(client, top=args.count)
+                return await gainers.refresh(client, gpath, top=args.count, market=gm, window=args.window)
             finally:
                 await client.close()
 
-        gainers.switch(True, args.count)
+        gainers.switch(True, args.count, path=gpath, window=args.window)
         data = asyncio.run(fetch())
-        hot = gainers.symbols()
-        print(f"top {data['top']} gainers (Bybit USDT perpetuals that also trade on spot, 24h turnover over "
-              f"{gainers.MIN_TURNOVER / 1e6:.0f}M USDT):")
+        hot = gainers.symbols(gpath)
+        print(f"{name} top {data['top']} gainers over {data['window']} (24h turnover over "
+              f"{gainers.MIN_TURNOVER / 1e6:.0f}M USDT, spread at most {gainers.MAX_SPREAD_PCT:g}%):")
         for p in data["pairs"][:data["top"]]:
-            print(f"  {p['symbol']:<14} {p['change']:+7.2f}%  turnover {p['turnover'] / 1e6:,.0f}M")
+            print(f"  {p['symbol']:<14} score {p['score']:+7.2f}  24h {p['change']:+7.2f}%  "
+                  f"turnover {p['turnover'] / 1e6:,.0f}M" + (f"  NOT TRADED: {p['pump']}" if p.get("pump") else ""))
         print(f"trading them in paper now ({len(hot)}); the collector downloads their prices on its next pass")
         return 0
     if args.pairs_cmd == "show":
@@ -1713,6 +1723,9 @@ def build_parser() -> argparse.ArgumentParser:
     pa.add_argument("--out", default="data/pairs/ranking.json", help="ranking file")
     pa.add_argument("--top", type=int, default=30, help="rows to print")
     pa.add_argument("--count", type=int, help="gainers: how many to trade (3-30, default 10 or the last choice)")
+    pa.add_argument("--market", choices=["spot", "futures"], default="futures",
+                    help="gainers: the Spot scanner (Spot AI) or the Futures scanner (Futures AI)")
+    pa.add_argument("--window", choices=["1h", "4h", "24h"], help="gainers: rank by the rise over this window")
     pa.add_argument("--exchange", default="bybit", help="rank: ccxt exchange id (public data only)")
     pa.add_argument("--min-turnover", type=float, default=2_000_000, help="rank: 24h USDT turnover floor")
     pa.add_argument("--depth-top", type=int, default=40, help="rank: order books to check")

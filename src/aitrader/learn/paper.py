@@ -84,10 +84,13 @@ class PaperTrader:
     def __init__(self, store: CandleStore, registry_path: str, exchanges: list[str],
                  symbols: list[str], cfg: PaperConfig | None = None,
                  state_path: str = DEFAULT_STATE, calendar=None, ai_filter=None, control=None,
-                 context=None, events=None, news=None, teacher=None):
+                 context=None, events=None, news=None, teacher=None, market_symbols=None):
         self.store, self.registry_path = store, registry_path
         # ``symbols`` may be a function returning the list (the pair ranking, read each tick)
         self.exchanges, self.symbols = exchanges, symbols
+        # ``market_symbols(market)``: the pairs Spot AI or Futures AI may open on (each adds its own
+        # scanner's top gainers); None means both use ``symbols``
+        self.market_symbols = market_symbols
         self.cfg = cfg or PaperConfig()
         self.state_path, self.calendar = state_path, calendar
         self.wallet_path = wallet.wallet_path(state_path)  # the Spot wallet's starting amount
@@ -124,6 +127,7 @@ class PaperTrader:
         frames: dict = {}  # (exchange, symbol, timeframe) -> (frame, newest close, new candle since last tick)
         regimes: dict = {}  # (exchange, symbol, timeframe) -> regime of the newest closed bar
         symbols = self._symbols()
+        per_market = {m: set(symbols if self.market_symbols is None else self._symbols(m)) for m in wallet.MARKETS}
         tf_picks = picks.load(picks.picks_path(self.registry_path))  # timeframes kept for their winners
         engines = wallet.engines(self.engines_path)  # the Trading page's Spot AI / Futures AI switches
         only_winners = picks.winners_only(self.registry_path)  # the Trading page's "WIN strategies only"
@@ -140,12 +144,12 @@ class PaperTrader:
             built += 1
             for ex in self.exchanges:
                 for sym in symbols:
+                    on = {m: engines[m] and sym in per_market[m] for m in wallet.MARKETS}
                     for tf in picks.allowed(entry, strat.spec.timeframes, tf_picks):
                         key = f"{entry.id}|{ex}|{sym}|{tf}"
                         # a long takes the plain key on Spot and key|futures on Futures; a short
                         # (Futures only) takes the plain key
-                        slots = ([key] if engines["spot"] else []) + ([key, key + FUTURES_SUFFIX]
-                                                                       if engines["futures"] else [])
+                        slots = ([key] if on["spot"] else []) + ([key, key + FUTURES_SUFFIX] if on["futures"] else [])
                         if not allow or all(k in self.state["open"] for k in slots):
                             continue
                         market = (ex, sym, tf)
@@ -168,7 +172,7 @@ class PaperTrader:
                             continue
                         sig = sigs[-1]
                         self.state["last_signal"][key] = sig.ts
-                        legs = self._legs(key, sig, sym, engines, events)
+                        legs = self._legs(key, sig, sym, on, events)
                         if not legs:
                             continue
                         ctx_mult = self._context(ex, sym, now_ms)
@@ -249,11 +253,12 @@ class PaperTrader:
 
     # ---- internals ------------------------------------------------------------------------------
 
-    def _symbols(self) -> list[str]:
-        if not callable(self.symbols):
-            return self.symbols
+    def _symbols(self, market: str | None = None) -> list[str]:
+        src = self.symbols if market is None else (lambda: self.market_symbols(market))
+        if not callable(src):
+            return list(src)
         try:
-            return list(self.symbols())
+            return list(src())
         except Exception:  # a broken ranking file must not stop paper trading
             log.exception("can't read the pair list; skipping new entries this tick")
             return []

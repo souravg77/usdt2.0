@@ -3,6 +3,8 @@
 import asyncio
 import time
 
+import pytest
+
 from fastapi.testclient import TestClient
 
 from aitrader.config import Settings
@@ -86,20 +88,76 @@ def test_pairs_page_button_and_markets_badge(tmp_path, monkeypatch):
     c = TestClient(app)
     c.post("/login", data={"user": "admin", "password": PW})
     page = c.get("/pairs").text
-    assert "Top gainers (Bybit futures)" in page and "Trade the top gainers" in page
+    assert "Spot top gainers" in page and "Futures top gainers" in page and "Trade the top gainers" in page
     csrf = Auth("admin", PW, "k").csrf(c.cookies.get(COOKIE))
     assert c.post("/pairs/gainers", data={"csrf": "x", "on": "1"}).status_code == 403
-    r = c.post("/pairs/gainers", data={"csrf": csrf, "on": "1", "count": "5"}, follow_redirects=False)
-    assert r.status_code == 303 and "Fetching" in r.headers["location"]
+    r = c.post("/pairs/gainers", data={"csrf": csrf, "on": "1", "count": "5", "window": "4h"}, follow_redirects=False)
+    assert r.status_code == 303 and "Scanning" in r.headers["location"]
     runner.wait_idle()
     [job] = [j for j in runner.list() if j["meta"].get("kind") == "gainers"]
-    assert job["steps"] == [["pairs", "gainers", "--count", "5"]]
-    # the list arrived: it is shown, traded and marked on the Markets page
+    assert job["steps"] == [["pairs", "gainers", "--market", "futures", "--count", "5", "--window", "4h"]]
+    # the list arrived: it is shown, traded and marked on the Markets page of its workspace
     gainers.switch(True, top=5)
     asyncio.run(gainers.refresh(FakePerps(), now_ms=int(time.time() * 1000)))
     page = c.get("/pairs").text
     assert "PEPE/USDT" in page and "+31.50%" in page and "Stop trading the top gainers" in page
+    assert 'data-symbol="PEPE/USDT"' not in c.get("/markets").text  # the Spot AI view: not its gainer
+    from aitrader.learn import wallet
+    wallet.set_market(wallet.market_path(str(tmp_path / "paper.json")), True)
     page = c.get("/markets").text
     assert 'data-symbol="PEPE/USDT"' in page and "top gainer" in page
-    c.post("/pairs/gainers", data={"csrf": csrf, "on": "0"})
+    c.post("/pairs/gainers", data={"csrf": csrf, "on": "0", "market": "futures"})
     assert not gainers.load()["on"] and 'data-symbol="PEPE/USDT"' not in c.get("/markets").text
+
+
+SPOT_TICKERS = {
+    "PEPE/USDT": {"percentage": 30.0, "quoteVolume": 80e6, "last": 0.00002, "bid": 0.0000199, "ask": 0.00002},
+    "WIF/USDT": {"percentage": 12.0, "quoteVolume": 40e6, "last": 2.1, "bid": 2.099, "ask": 2.1},
+    "BTC/USDT": {"percentage": 1.2, "quoteVolume": 5e9, "last": 80000, "bid": 79999, "ask": 80000},
+    "ONLYPERP/USDT:USDT": {"percentage": 80.0, "quoteVolume": 50e6},
+    "THIN/USDT": {"percentage": 60.0, "quoteVolume": 1e6},
+}
+
+
+def test_spot_scanner_scores_and_flags_pumps(tmp_path):
+    got = gainers.pick(MARKETS, SPOT_TICKERS, top=5, market="spot")
+    # PEPE's spread is 0.5%, over the 0.2% limit; perps and thin pairs are left out
+    assert [g["symbol"] for g in got] == ["WIF/USDT", "BTC/USDT"]
+    assert got[0]["spread"] == pytest.approx(0.0476, abs=1e-3)
+    # 1h and 4h rise and relative volume from hourly candles
+    bars = [[i, 1, 1, 1, 100.0, 10.0] for i in range(24)] + [[24, 1, 1, 1, 110.0, 10.0], [25, 1, 1, 1, 121.0, 40.0]]
+    row = gainers.enrich({"symbol": "X/USDT", "change": 21.0, "spread": 0.1}, bars)
+    assert row["change_1h"] == 10.0 and row["change_4h"] == 21.0 and row["relvol"] == pytest.approx(40 / 10.0)
+    # score = rise over the window + 2 x (relative volume - 1), at most 6, - 5 x spread
+    assert gainers.score(row, "1h") == pytest.approx(10 + 6 - 0.5)
+    assert gainers.score(row, "24h") == pytest.approx(21 + 6 - 0.5)
+    pump = gainers.enrich({"symbol": "P/USDT", "change": 25.0}, bars[:-1] + [[25, 1, 1, 1, 130.0, 10.0]])
+    ranked = gainers.rank([row, pump], "1h")
+    assert ranked[0]["symbol"] == "P/USDT" and ranked[0]["pump"] == "up 18% in an hour"
+
+    class FakeSpot:
+        async def load_markets(self):
+            return MARKETS
+
+        async def fetch_tickers(self):
+            return {**SPOT_TICKERS, "PEPE/USDT": {**SPOT_TICKERS["PEPE/USDT"], "bid": 0.00002}}
+
+        async def fetch_ohlcv(self, symbol, tf, limit=26):
+            return bars[:-1] + [[25, 1, 1, 1, 130.0, 10.0]] if symbol == "PEPE/USDT" else bars
+
+    path = str(tmp_path / "spot.json")
+    gainers.switch(True, top=5, path=path, window="1h")
+    data = asyncio.run(gainers.refresh(FakeSpot(), path, now_ms=NOW, market="spot"))
+    assert data["window"] == "1h" and data["market"] == "spot" and data["scanned"] == 3
+    assert data["pairs"][0]["symbol"] == "PEPE/USDT" and data["pairs"][0]["pump"]
+    # the pump is listed, not traded; the same 1h rise ranks the tighter spread first
+    assert gainers.symbols(path, now_ms=NOW + 1) == ["BTC/USDT", "WIF/USDT"]
+    # each workspace gets its own scanner's gainers
+    fut = str(tmp_path / "fut.json")
+    gainers.switch(True, top=3, path=fut)
+    asyncio.run(gainers.refresh(FakePerps(), fut, now_ms=NOW))
+    env = {"AITRADER_GAINERS_FILE": fut, "AITRADER_SPOT_GAINERS_FILE": path}
+    fixed = ["ETH/USDT"]
+    assert pairs.configured_symbols(fixed, env=env, now_ms=NOW + 1, market="spot") == ["ETH/USDT", "BTC/USDT", "WIF/USDT"]
+    assert pairs.configured_symbols(fixed, env=env, now_ms=NOW + 1, market="futures") == \
+        ["ETH/USDT", "PEPE/USDT", "WIF/USDT", "BTC/USDT"]

@@ -867,6 +867,23 @@ def test_spot_and_futures_engines_trade_independently(tmp_path, monkeypatch):
     assert only_fut["trades"] and all(t["market"] == "futures" for t in only_fut["trades"])
 
 
+def test_each_engine_trades_only_its_own_pairs(tmp_path):
+    """A Futures scanner gainer is traded by Futures AI only, not bought on Spot AI."""
+    df = synthetic(n=700)
+    store = CandleStore(str(tmp_path / "c.db"))
+    fill_store(store, df)
+    reg_path = str(tmp_path / "reg.json")
+    reg = Registry(reg_path)
+    reg.add(Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR), status="paper"))
+    reg.save()
+    trader = PaperTrader(store, reg_path, ["bybit"], ["BTC/USDT"], state_path=str(tmp_path / "s.json"),
+                         market_symbols=lambda m: ["BTC/USDT"] if m == "futures" else ["ETH/USDT"])
+    for i in range(600, 700):
+        trader.tick(now_ms=int(df.ts.iloc[i]) + H)
+    store.close()
+    assert trader.state["trades"] and all(t["market"] == "futures" for t in trader.state["trades"])
+
+
 def test_a_missing_entry_candle_doesnt_keep_a_paper_trade_open_forever(tmp_path, monkeypatch):
     import aitrader.learn.paper as paper_mod
 

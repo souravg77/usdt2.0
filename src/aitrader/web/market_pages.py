@@ -55,7 +55,7 @@ def add_market_routes(app, *, settings, page, guard, exchange: str = EXCHANGE, c
     def current() -> list[str]:
         """The pairs being traded now: the usual list plus today's top gainers when that's on."""
         try:
-            return configured_symbols(settings.symbols)
+            return configured_symbols(settings.symbols, market="futures" if futures_mode() else "spot")
         except Exception:
             return list(settings.symbols)
 
@@ -98,7 +98,7 @@ def add_market_routes(app, *, settings, page, guard, exchange: str = EXCHANGE, c
         bad = api_guard(request)
         if bad:
             return bad
-        hot = set(gainers.symbols())
+        hot = set(gainers.symbols(gainers.path_for("futures" if futures_mode() else "spot")))
         res = await feed().tickers(current())
         return JSONResponse({**res, "tickers": [{**t, "gainer": True} if t["symbol"] in hot else t
                                           for t in res.get("tickers", [])]})
@@ -125,7 +125,7 @@ def add_market_routes(app, *, settings, page, guard, exchange: str = EXCHANGE, c
         try:
             db = CandleStore(settings.db_path)
             try:
-                hot = set(gainers.symbols())
+                hot = set(gainers.symbols(gainers.path_for("futures" if futures_mode() else "spot")))
                 rows = [{**_ticker(db, exchange, s, now), "gainer": s in hot} for s in current()]
                 if symbol:
                     bars = db.load(exchange, symbol, tf, start=now - BARS * TF_MS.get(tf, 900_000))
