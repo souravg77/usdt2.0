@@ -550,6 +550,20 @@ paper trading. Nothing trades real money.</p>
                     "the indicators they use.")
         return _control_post(request, csrf, act)
 
+    @app.post("/trading/paper/winners-only")
+    def trading_paper_winners_only(request: Request, csrf: str = Form(""), on: str = Form("")):
+        def act(user):
+            from ..learn import picks
+
+            turn_on = on == "1"
+            picks.set_winners_only(paths.registry, turn_on, by=user)
+            _event("winners_only", f"WIN strategies only turned {'on' if turn_on else 'off'} from the dashboard by {user}")
+            if turn_on:
+                return ("WIN strategies only is on: from the next minute only the WIN strategies open paper trades. "
+                        "Trades the others already opened still close normally.")
+            return "WIN strategies only is off: the best strategies open paper trades again, with the WIN ones."
+        return _control_post(request, csrf, act)
+
     @app.post("/trading/ai/train")
     def trading_ai_train(request: Request, csrf: str = Form("")):
         def act(user):
@@ -1117,8 +1131,6 @@ def _service_state(events: list[dict], service: str, now_ms: int) -> tuple[str, 
 
 
 def _trading_stats(c: dict, settings, paths: Paths, paper: dict, events: list[dict], acct: dict) -> str:
-    from ..learn import Registry
-
     if c["killed"]:
         trading = ("Kill switch on", "bad")
     elif c.get("halted"):
@@ -1129,10 +1141,7 @@ def _trading_stats(c: dict, settings, paths: Paths, paper: dict, events: list[di
         trading = ("Running", "good")
     trades = paper.get("trades", [])
     pnl = sum(t.get("pnl_usdt", 0) for t in trades)
-    try:
-        in_paper = sum(1 for e in Registry(paths.registry).entries.values() if e.status == "paper")
-    except Exception:
-        in_paper = 0
+    in_paper = _trading_count(paths)
     tiles = [
         ("Trading", trading[0], trading[1], "new entries" if not c["paused"] and not c["killed"] else ""),
         ("Mode", settings.mode.value, "", "live orders locked" if live_gate_problems(settings) else "LIVE UNLOCKED"),
@@ -1201,14 +1210,28 @@ def _account_card(acct: dict, csrf: str = "", now: float | None = None) -> str:
             f'{again}</div>')
 
 
-def _paper_switch_card(c: dict, paths: Paths, events: list[dict], jobs: list[dict], csrf: str) -> str:
-    """The paper-trading switch: on loads every strategy into paper trading; off pauses entries."""
-    from ..learn import Registry
+def _trading_count(paths: Paths) -> int:
+    """How many strategies paper trading opens trades for (only the WIN ones when that switch is on)."""
+    from ..learn import Registry, picks
 
     try:
-        in_paper = sum(1 for e in Registry(paths.registry).entries.values() if e.status == "paper")
+        only = picks.winners_only(paths.registry)
+        return sum(1 for e in Registry(paths.registry).entries.values()
+                   if e.status == "paper" and picks.trades_now(e, only))
     except Exception:
-        in_paper = 0
+        return 0
+
+
+def _paper_switch_card(c: dict, paths: Paths, events: list[dict], jobs: list[dict], csrf: str) -> str:
+    """The paper-trading switch: on loads every strategy into paper trading; off pauses entries."""
+    from ..learn import Registry, picks
+
+    in_paper = _trading_count(paths)
+    try:
+        wins = sum(1 for e in Registry(paths.registry).entries.values() if e.status == "paper" and picks.picked_for(e))
+    except Exception:
+        wins = 0
+    only = picks.winners_only(paths.registry)
     svc, svc_cls, svc_detail = _service_state(events, "paper", int(time.time() * 1000))
     starting = next((j for j in jobs if j.get("meta", {}).get("kind") == "paper-start"
                      and j["status"] in ("queued", "running")), None)
@@ -1220,12 +1243,16 @@ def _paper_switch_card(c: dict, paths: Paths, events: list[dict], jobs: list[dic
         state, cls, why = "OFF", "bad", "new entries are paused"
     elif starting:
         state, cls, why = "STARTING", "warn", f'loading strategies and price history (<a href="/jobs/{_e(starting["id"])}">progress</a>)'
+    elif not in_paper and only:
+        state, cls, why = "OFF", "bad", ("WIN strategies only is on, but there are none yet: press Keep only "
+                                         "the winners on the Replay page")
     elif not in_paper:
         state, cls, why = "OFF", "bad", "no strategy is paper trading yet"
     elif svc_cls != "good":
         state, cls, why = "ON", "warn", f"but the paper service is {_e(svc)} ({_e(svc_detail)})"
     else:
-        state, cls, why = "ON", "good", f"{in_paper} strategies trading with fake money"
+        state, cls, why = "ON", "good", (f"{in_paper} WIN strategies trading with fake money" if only
+                                         else f"{in_paper} strategies trading with fake money")
     if state == "ON" and c["paused"]:  # an automatic live pause: paper keeps going
         why += "; live trading is paused (see Controls), paper keeps collecting results"
     on = "Turn paper trading on" if state != "ON" else "Reload every strategy"
@@ -1249,7 +1276,22 @@ def _paper_switch_card(c: dict, paths: Paths, events: list[dict], jobs: list[dic
             f'<form method="post" action="/trading/paper/keep" class="row">{csrf}'
             f'<label class="small">Keep the best <input type="number" name="n" min="{MIN_N}" max="{MAX_N}" '
             f'value="{keep_n}" style="width:4.5em"> strategies</label><button class="ghost">Keep only the best</button></form>'
-            '</div>')
+            + _winners_only_form(only, wins, csrf) + '</div>')
+
+
+def _winners_only_form(only: bool, wins: int, csrf: str) -> str:
+    """The "WIN strategies only" switch on the paper-trading card."""
+    if only:
+        head = f'<p><b>WIN strategies only: <span class="good">ON</span></b>. Only the {wins} WIN strategies open trades.'
+        btn = '<input type="hidden" name="on" value="0"><button class="ghost">Trade the best strategies too</button>'
+    else:
+        head = (f'<p><b>WIN strategies only: <span class="muted">OFF</span></b>. The best strategies and the {wins} WIN '
+                'strategies all open trades.')
+        btn = '<input type="hidden" name="on" value="1"><button>Trade only the WIN strategies</button>'
+    return (head + '</p><p class="small muted">WIN strategies are the ones kept by Keep only the winners on the Replay '
+            'page. When this is on, the best strategies above stop opening trades; their open trades still close '
+            'normally. Switch it off to bring them back.</p>'
+            f'<form method="post" action="/trading/paper/winners-only" class="row">{csrf}{btn}</form>')
 
 
 def _live_card(settings, paths: Paths, events: list[dict]) -> str:

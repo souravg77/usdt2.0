@@ -113,8 +113,11 @@ class PaperTrader:
         regimes: dict = {}  # (exchange, symbol, timeframe) -> regime of the newest closed bar
         symbols = self._symbols()
         tf_picks = picks.load(picks.picks_path(self.registry_path))  # timeframes kept for their winners
+        only_winners = picks.winners_only(self.registry_path)  # the Trading page's "WIN strategies only"
         built, broken, checks = 0, 0, 0  # what this pass looked at, for the dashboard
         for entry in reg.with_status("paper"):
+            if not picks.trades_now(entry, only_winners):
+                continue
             try:
                 strat = make_strategy(entry)
             except Exception:  # one broken strategy must not stop the others
