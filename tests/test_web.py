@@ -525,24 +525,33 @@ def test_open_positions_follow_the_live_price(tmp_path, monkeypatch):
     json.dump(paper, open(paths.paper_state, "w"))
     json.dump({"positions": {"k": {"key": "k", "entry_id": "a", "symbol": "BTC/USDT", "amount": 0.5, "entry": 100.0,
                                    "cost": 50.1, "stop": 95.0, "status": "open"}}}, open("data/trade/live_state.json", "w"))
+    # the Spot AI workspace (the default view): the spot long and the live spot buy
     r = client.get("/api/positions").json()
-    assert r["source"] == "live" and fake.asked[-1] == ["BTC/USDT", "ETH/USDT"]  # only filled ones
+    assert r["source"] == "live" and fake.asked[-1] == ["BTC/USDT"]  # only filled ones
     assert r["rows"] == {"paper|a|bybit|BTC/USDT|1h": 6.0,  # (103 - 100) x 2
-                         "paper|b|bybit|ETH/USDT|4h": 6.0,  # short: (50 - 48) x 3
                          "live|k": 1.4}  # 103 x 0.5 - 50.1
-    assert r["total"] == 13.4
-    assert r["prices"] == {"paper|a|bybit|BTC/USDT|1h": 103.0, "paper|b|bybit|ETH/USDT|4h": 48.0, "live|k": 103.0}
+    assert r["total"] == 7.4
+    assert r["prices"] == {"paper|a|bybit|BTC/USDT|1h": 103.0, "live|k": 103.0}
     page = client.get("/trading").text
-    # the price now and the stop loss with how far away it is, for longs and shorts
+    # the price now and the stop loss with how far away it is
     for cell in ("<th>Price now</th>", "<th>Stop loss</th>", 'data-px="paper|a|bybit|BTC/USDT|1h"',
-                 'data-stop="paper|b|bybit|ETH/USDT|4h" data-level="52" data-short="1"',
-                 # the take-profit, or the exit rule when a strategy has no fixed target
-                 "<th>Take profit</th>", 'data-tp="paper|a|bybit|BTC/USDT|1h" data-level="110"',
-                 "exit rule: close_below_ema20", "no fixed target"):
+                 # the take-profit
+                 "<th>Take profit</th>", 'data-tp="paper|a|bybit|BTC/USDT|1h" data-level="110"', "no fixed target"):
         assert cell in page, cell
     for cell in ('data-pos="paper|a|bybit|BTC/USDT|1h"', 'data-pos="live|k"', 'data-pos="total"',
                  '<script src="/static/positions.js" defer></script>'):
         assert cell in page, cell
+    assert "ETH/USDT" not in page  # the short belongs to Futures AI
+    # the Futures AI workspace: the short, with the exit rule when it has no fixed target
+    from aitrader.learn import wallet
+    wallet.set_market(wallet.market_path(paths.paper_state), True)
+    r = client.get("/api/positions").json()
+    assert r["rows"] == {"paper|b|bybit|ETH/USDT|4h": 6.0}  # short: (50 - 48) x 3
+    page = client.get("/trading").text
+    for cell in ('data-stop="paper|b|bybit|ETH/USDT|4h" data-level="52" data-short="1"',
+                 "exit rule: close_below_ema20"):
+        assert cell in page, cell
+    assert 'data-pos="live|k"' not in page and 'data-pos="paper|a|' not in page
     js = client.get("/static/positions.js")
     assert js.status_code == 200 and "/api/positions" in js.text
     assert live_position_usdt(paper, {}, {})["rows"] == {}  # no price: cells keep what they showed

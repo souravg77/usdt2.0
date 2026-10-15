@@ -1,6 +1,14 @@
-"""The paper trading wallet: one fake-money account every paper strategy trades from.
+"""The paper trading wallets: two fake-money accounts, one per trading workspace.
 
-You choose its starting amount (100 to 10,000 USDT) on the Trading page. Its balance is that amount
+- **Spot AI** buys coins (long only, no leverage) from the Spot wallet.
+- **Futures AI** trades USDT perpetual futures, long and short, with leverage, from the Futures
+  wallet.
+
+Each engine can be turned on or off by itself, and each wallet has its own starting amount,
+positions, trade history and results: a spot trade never touches the futures wallet or the other
+way round. The header's Spot / Futures switch only chooses which workspace the pages show.
+
+You choose each wallet's starting amount (100 to 10,000 USDT) on the Trading page. Its balance is that amount
 plus the profit or loss of every paper trade closed since it was set; choosing a new amount starts
 a new wallet (the trade log keeps the old trades). Trade sizes follow the balance: each trade risks
 its strategy's share (``risk_pct``, e.g. 0.5%) of it, one position is worth at most half of it, and
@@ -21,8 +29,48 @@ MIN_START, MAX_START, DEFAULT_START = 100.0, 10_000.0, 10_000.0
 MIN_ORDER_USDT = 5.0  # Bybit's smallest order for most USDT spot pairs and perpetuals
 
 
-def wallet_path(state_path: str) -> str:
-    return os.path.join(os.path.dirname(os.path.abspath(state_path)), "paper_wallet.json")
+MARKETS = ("spot", "futures")
+
+
+def wallet_path(state_path: str, market: str = "spot") -> str:
+    name = "paper_wallet_futures.json" if market == "futures" else "paper_wallet.json"
+    return os.path.join(os.path.dirname(os.path.abspath(state_path)), name)
+
+
+def market_of(row: dict) -> str:
+    """Which workspace an open position or a closed trade belongs to: shorts and perpetual longs
+    are Futures, spot buys are Spot."""
+    side = row.get("side") or (row.get("signal") or {}).get("side")
+    return "futures" if row.get("perp") or side in ("sell", "short") else "spot"
+
+
+def engines_path(state_path: str) -> str:
+    return os.path.join(os.path.dirname(os.path.abspath(state_path)), "paper_engines.json")
+
+
+def engines(path: str) -> dict:
+    """{"spot": on, "futures": on}. Both engines run unless a person turned one off."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        data = {}
+    data = data if isinstance(data, dict) else {}
+    return {m: data.get(m, True) is not False for m in MARKETS}
+
+
+def set_engine(path: str, market: str, on: bool, by: str = "") -> dict:
+    if market not in MARKETS:
+        raise ValueError(f"unknown market {market!r}")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        data = data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        data = {}
+    data.update({market: bool(on), "by": by, "at": int(time.time() * 1000)})
+    _save_market(path, data)
+    return engines(path)
 
 
 def clamp(amount: float) -> float:
@@ -50,7 +98,8 @@ def save(path: str, start: float, now_ms: int | None = None) -> dict:
 
 
 def market_path(state_path: str) -> str:
-    """Where the Trading page's Spot / Futures choice for paper longs is kept."""
+    """Where the Spot / Futures workspace choice (which one the pages show) and the futures
+    leverage are kept."""
     return os.path.join(os.path.dirname(os.path.abspath(state_path)), "paper_market.json")
 
 
@@ -64,8 +113,8 @@ def _market(path: str) -> dict:
 
 
 def futures_on(path: str) -> bool:
-    """True when the dashboard is in Futures mode: paper longs trade as USDT perpetual futures
-    instead of spot buys, and the pages show futures prices and details."""
+    """True when the pages show the Futures workspace (futures prices, wallet and positions).
+    It never changes what either engine trades."""
     return _market(path).get("market") == "futures"
 
 
@@ -98,22 +147,27 @@ def set_leverage(path: str, lev: float, by: str = "") -> None:
     _save_market(path, data)
 
 
-def in_use(state: dict, skip: str = "") -> float:
-    """USDT tied up by the open positions: what a spot position cost, a perp position's margin."""
+def _of(row: dict, market: str | None) -> bool:
+    return market is None or market_of(row) == market
+
+
+def in_use(state: dict, skip: str = "", market: str | None = None) -> float:
+    """USDT tied up by the open positions (of one workspace, when ``market`` is given): what a
+    spot position cost, a perp position's margin."""
     return sum(o.get("units", 0) * o.get("entry", 0) / o.get("leverage", 1.0)
-               for k, o in state.get("open", {}).items() if k != skip and o.get("filled"))
+               for k, o in state.get("open", {}).items() if k != skip and o.get("filled") and _of(o, market))
 
 
-def balance(state: dict, w: dict) -> float:
-    """The starting amount plus every paper trade closed since the wallet was set."""
+def balance(state: dict, w: dict, market: str | None = None) -> float:
+    """The starting amount plus every paper trade (of that workspace) closed since the wallet was set."""
     return w["start"] + sum(t.get("pnl_usdt", 0.0) for t in state.get("trades", [])
-                            if t.get("exit_ts", 0) >= w["since"])
+                            if t.get("exit_ts", 0) >= w["since"] and _of(t, market))
 
 
-def summary(state: dict, w: dict) -> dict:
-    bal = balance(state, w)
-    used = in_use(state)
-    closed = [t for t in state.get("trades", []) if t.get("exit_ts", 0) >= w["since"]]
+def summary(state: dict, w: dict, market: str | None = None) -> dict:
+    bal = balance(state, w, market)
+    used = in_use(state, market=market)
+    closed = [t for t in state.get("trades", []) if t.get("exit_ts", 0) >= w["since"] and _of(t, market)]
     return {"start": w["start"], "since": w["since"], "balance": bal, "in_use": used,
             "free": max(0.0, bal - used), "closed_pnl": bal - w["start"], "trades": len(closed),
-            "open": sum(1 for o in state.get("open", {}).values() if o.get("filled"))}
+            "open": sum(1 for o in state.get("open", {}).values() if o.get("filled") and _of(o, market))}

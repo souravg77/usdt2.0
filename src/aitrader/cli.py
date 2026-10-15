@@ -111,8 +111,8 @@ async def cmd_collect(s: Settings, args) -> int:
             from .learn import wallet
             from .market import perp_limits
 
-            if wallet.futures_on(wallet.market_path(PAPER_STATE)) and perp_limits.due():
-                client = gainers.perp_client()  # Futures mode: each coin's maximum leverage, once a day
+            if wallet.engines(wallet.engines_path(PAPER_STATE))["futures"] and perp_limits.due():
+                client = gainers.perp_client()  # Futures AI on: each coin's maximum leverage, once a day
                 try:
                     await perp_limits.refresh(client)
                 except Exception as exc:

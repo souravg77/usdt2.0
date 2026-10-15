@@ -220,29 +220,41 @@ def test_futures_mode_switches_the_whole_dashboard(tmp_path, monkeypatch):
     c = TestClient(app)
     c.post("/login", data={"user": "admin", "password": "correct horse battery"})
     page = c.get("/trading").text
-    assert 'action="/market-mode"' in page and "Switch to futures trading" in page
-    assert "<th>Liquidation</th>" not in page and "long (perp)" in page
+    assert 'action="/market-mode"' in page and "Spot AI workspace" in page and "Turn Futures AI off" in page
+    # the Spot view hides the futures position; the Futures view shows it with its liquidation price
+    assert "<th>Liquidation</th>" not in page and "long (perp)" not in page
     csrf = Auth("admin", "correct horse battery", "k").csrf(c.cookies.get(COOKIE))
     path = wallet.market_path(paths.paper_state)
     # the header switch, from any page, back to the same page
     assert c.post("/market-mode", data={"csrf": "x", "market": "futures"}).status_code == 403
     r = c.post("/market-mode", data={"csrf": csrf, "market": "futures", "back": "/pairs"}, follow_redirects=False)
-    assert r.headers["location"].startswith("/pairs?msg=Futures") and wallet.futures_on(path)
+    assert r.headers["location"].startswith("/pairs?msg=Showing") and wallet.futures_on(path)
     r = c.post("/market-mode", data={"csrf": csrf, "market": "futures", "back": "https://evil.example"},
                follow_redirects=False)
     assert r.headers["location"].startswith("/trading?")
     page = c.get("/trading").text
-    assert "Futures 1x" in page and "Switch to spot" in page and "<th>Liquidation</th>" in page
+    assert "Futures AI 1x" in page and "Futures AI workspace" in page and "<th>Liquidation</th>" in page
+    assert "long (perp)" in page and "Futures AI paper wallet" in page
     assert "50.5" in page  # a 2x long from 100: liquidation about 100 x (1 - 1/2 + 0.005)
     # Bybit's leverage choices for paper futures, 1x-100x
     assert '<option value="50">50x</option>' in page and '<option value="100">100x</option>' in page
     c.post("/trading/paper/leverage", data={"csrf": csrf, "lev": "500"})
     assert wallet.paper_leverage(path) == 100.0
     c.post("/trading/paper/leverage", data={"csrf": csrf, "lev": "25"})
-    assert wallet.paper_leverage(path) == 25.0 and "Futures 25x" in c.get("/markets").text
+    assert wallet.paper_leverage(path) == 25.0 and "Futures AI 25x" in c.get("/markets").text
     assert "perpetual" in c.get("/markets").text
-    c.post("/trading/paper/market", data={"csrf": csrf, "market": "spot"})
-    assert not wallet.futures_on(path) and "Switch to futures trading" in c.get("/trading").text
+    # each wallet keeps its own starting amount
+    c.post("/trading/paper/wallet", data={"csrf": csrf, "amount": "500", "market": "futures"})
+    assert wallet.load(wallet.wallet_path(paths.paper_state, "futures"))["start"] == 500.0
+    assert wallet.load(wallet.wallet_path(paths.paper_state))["start"] == 10_000.0
+    # the engines turn on and off one at a time
+    eng = wallet.engines_path(paths.paper_state)
+    c.post("/trading/paper/market", data={"csrf": csrf, "market": "futures", "on": "0"})
+    assert wallet.engines(eng) == {"spot": True, "futures": False} and "Turn Futures AI on" in c.get("/trading").text
+    c.post("/trading/paper/market", data={"csrf": csrf, "market": "futures", "on": "1"})
+    assert wallet.engines(eng) == {"spot": True, "futures": True}
+    c.post("/market-mode", data={"csrf": csrf, "market": "spot"})
+    assert not wallet.futures_on(path) and "Spot AI workspace" in c.get("/trading").text
 
     class Perps:
         asked = []

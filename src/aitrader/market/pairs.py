@@ -257,7 +257,7 @@ def validated_results(registry_path: str | None, paper_state: str | None) -> dic
                 add(mk["symbol"], "oos_trades", n, n * float(mk.get("exp_oos") or 0))
     for t in (_read(paper_state).get("trades", []) if paper_state else []):
         parts = str(t.get("key", "")).split("|")
-        if len(parts) == 4:
+        if len(parts) >= 4:
             add(parts[2], "paper_trades", 1, float(t.get("r") or 0))
     out = {}
     for sym, a in acc.items():
@@ -327,7 +327,7 @@ def configured_symbols(fallback: list[str], env=None, path: str | None = None,
 def open_paper_symbols(state_path: str) -> list[str]:
     """Symbols with open paper positions: they keep getting candles after leaving the ranking."""
     keys = (_read(state_path).get("open") or {}).keys()
-    return sorted({k.split("|")[2] for k in keys if k.count("|") == 3})
+    return sorted({k.split("|")[2] for k in keys if k.count("|") >= 3})
 
 
 def public_client(exchange_id: str = "bybit"):

@@ -289,6 +289,14 @@ def test_executor_drops_an_order_that_never_arrived(ex):
     assert e.state["positions"][KEY]["status"] == "open"
 
 
+def test_executor_leaves_futures_ai_paper_longs_alone(ex):
+    make, adapter, paper, _events = ex
+    _paper(paper, {KEY: _pos(SIG), KEY + "|futures": {**_pos(SIG), "perp": True}})
+    e = make()
+    out = run(e.tick())  # only the Spot AI buy is mirrored: one order, not two
+    assert out["opened"] == [KEY] and len(adapter.sent) == 1
+
+
 def test_executor_never_buys_for_a_short_signal(ex):
     make, adapter, paper, _events = ex
     short = _pos(SIG, stop=105.0)
