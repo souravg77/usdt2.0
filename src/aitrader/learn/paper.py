@@ -64,6 +64,14 @@ class PaperConfig:
     retire: RetireRule = field(default_factory=RetireRule)
 
 
+def _asked_to_close(req: dict | None, pos: dict) -> bool:
+    """A person's close request covers this open position (not a later one on the same key)."""
+    if not isinstance(req, dict) or not pos:
+        return False
+    ts = req.get("signal_ts")
+    return ts is None or ts == (pos.get("signal") or {}).get("ts")
+
+
 class PaperTrader:
     def __init__(self, store: CandleStore, registry_path: str, exchanges: list[str],
                  symbols: list[str], cfg: PaperConfig | None = None,
@@ -332,15 +340,20 @@ class PaperTrader:
         close_req = asked() if callable(asked) else None
         why = "closed by hand" if close_req is not None else "kill switch"
         killed = self.control is not None and bool(getattr(self.control, "killed", False))
+        one = getattr(self.control, "close_requests", None)  # a person's "close this position"
+        close_one = one() if callable(one) else {}
         left = 0  # positions the close request covers that couldn't be priced this pass
         for key, pos in list(self.state["open"].items()):
             entry_id, ex, sym, tf = key.split("|")
             # a close request covers the positions opened before it, not those opened after
             closing = killed or (close_req is not None and pos["signal"]["ts"] <= close_req * 1000)
+            reason = why
+            if _asked_to_close(close_one.get(key), pos):
+                closing, reason = True, "closed by hand"
             if closing and not pos.get("filled"):
                 del self.state["open"][key]
                 events["closed"].append(key)
-                log.info("paper %s cancelled (%s) before its entry", key, why)
+                log.info("paper %s cancelled (%s) before its entry", key, reason)
                 continue
             if ex not in self.exchanges:  # an exchange no longer used: its prices stopped updating
                 del self.state["open"][key]
@@ -386,14 +399,14 @@ class PaperTrader:
                 # all open positions together may not tie up more than the wallet
                 # (a spot position ties up what it cost; a perp short only its margin)
                 units = min(units, max(0.0, bal - wallet.in_use(self.state, skip=key)) * lev / t.entry)
-                why = ("the wallet's money is all in open positions" if units <= 0 else
-                       f"below Bybit's {wallet.MIN_ORDER_USDT:g} USDT minimum order"
-                       if units * t.entry < wallet.MIN_ORDER_USDT else "")
-                if why:
+                skip = ("the wallet's money is all in open positions" if units <= 0 else
+                        f"below Bybit's {wallet.MIN_ORDER_USDT:g} USDT minimum order"
+                        if units * t.entry < wallet.MIN_ORDER_USDT else "")
+                if skip:
                     del self.state["open"][key]
-                    self._mark_signal(key, sig.ts, why, f"{max(units, 0) * t.entry:.2f} USDT from a "
+                    self._mark_signal(key, sig.ts, skip, f"{max(units, 0) * t.entry:.2f} USDT from a "
                                       f"{bal:,.2f} USDT wallet")
-                    log.info("paper %s skipped: %s", key, why)
+                    log.info("paper %s skipped: %s", key, skip)
                     continue
                 pos.update(filled=True, entry=t.entry, units=units, entry_ts=t.entry_ts)
                 if short:
@@ -403,7 +416,7 @@ class PaperTrader:
                     pos["mark_r"] = round(t.r, 3)  # still open
                     pos["mark"] = float(df["close"].iloc[-1])  # the price it was marked at, for the page
                     continue
-                t.exit_reason = why
+                t.exit_reason = reason
             pnl = t.r * abs(sig.entry - sig.stop) * pos["units"]
             self.state["equity"][entry_id] = equity + pnl
             row = {**_trade_dict(t), "key": key, "entry_id": entry_id, "units": pos["units"],
@@ -418,6 +431,10 @@ class PaperTrader:
             log.info("paper close %s %s %+.2fR %+.2f USDT", key, t.exit_reason, t.r, pnl)
         if close_req is not None and not left:  # any it couldn't price yet: tried again next pass
             self.control.clear_close_all(close_req)
+        done = [k for k, req in close_one.items()  # closed, or gone already
+                if not _asked_to_close(req, self.state["open"].get(k, {}))]
+        if done:
+            self.control.clear_close(done)
 
     def _score(self, reg: Registry, events: dict) -> None:
         rule = self.cfg.retire

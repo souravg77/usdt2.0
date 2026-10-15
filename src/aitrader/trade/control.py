@@ -8,7 +8,8 @@ ledger, the price feed gone quiet); stops stay in place. All stay set until a pe
 
 A person can also ask for every paper position to be closed now (``request_close_all``, kept in
 ``close_all.json`` next to this file): the paper trader closes them at the last closed candle's
-price on its next pass and keeps trading. A kill closes them too.
+price on its next pass and keeps trading. A kill closes them too. One position can be closed the
+same way (``request_close``, kept in ``close_one.json``: {position key: request}).
 
 Paper trading stops only for a person: their pause or a kill (``stops_paper``). A safety halt or
 the risk engine's loss-cap pause is about the live account, so paper keeps collecting results.
@@ -116,6 +117,40 @@ class Control:
                 os.remove(self._close_path())
             except OSError:
                 pass
+
+    # ---- "close this position" (paper), one position at a time ----
+
+    def _one_path(self) -> str:
+        return os.path.join(os.path.dirname(os.path.abspath(self.path)), "close_one.json")
+
+    def close_requests(self) -> dict:
+        """{paper position key: {"at", "by", "signal_ts"}} a person asked to close, or {}."""
+        try:
+            with open(self._one_path(), encoding="utf-8") as fh:
+                data = json.load(fh)
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _save_one(self, data: dict) -> None:
+        os.makedirs(os.path.dirname(self._one_path()), exist_ok=True)
+        tmp = self._one_path() + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+        os.replace(tmp, self._one_path())
+
+    def request_close(self, key: str, signal_ts: int | None = None, by: str = "") -> dict:
+        """Close the position ``key`` that opened on ``signal_ts`` (not a later one on the same key)."""
+        data = self.close_requests()
+        data[key] = {"at": time.time(), "by": by, "signal_ts": signal_ts}
+        self._save_one(data)
+        return data[key]
+
+    def clear_close(self, keys) -> None:
+        """Done with these positions' close requests."""
+        data = self.close_requests()
+        if any(k in data for k in keys):
+            self._save_one({k: v for k, v in data.items() if k not in set(keys)})
 
     def mark_flattened(self) -> None:
         s = self.state()

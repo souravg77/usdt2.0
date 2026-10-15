@@ -545,6 +545,17 @@ def test_kill_and_close_all_close_paper_positions(tmp_path):
     trader.tick(now_ms=next(ticks))
     hand = [t for t in trader.state["trades"] if t["exit_reason"] == "closed by hand"]
     assert hand and control.close_all_requested() is None  # done: the request is cleared
+    # one position at a time: only that one closes
+    until_filled()
+    key, pos = next((k, p) for k, p in trader.state["open"].items() if p["filled"])
+    control.request_close(key, pos["signal"]["ts"], by="admin")
+    before = len(hand)
+    trader.tick(now_ms=next(ticks))
+    hand = [t for t in trader.state["trades"] if t["exit_reason"] == "closed by hand"]
+    assert len(hand) == before + 1 and hand[-1]["key"] == key and hand[-1]["signal_ts"] == pos["signal"]["ts"]
+    # a later position on the same key (the strategy's next signal) stays open
+    assert all(p["signal"]["ts"] != pos["signal"]["ts"] for p in trader.state["open"].values())
+    assert control.close_requests() == {}  # done: the request is cleared
     until_filled()  # paper trading carries on and new positions stay open
     trader.tick(now_ms=next(ticks))
     assert not control.killed
