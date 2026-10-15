@@ -156,3 +156,42 @@ def test_a_short_twin_of_a_win_copy_is_not_picked_again(tmp_path):
     res = picks.evaluate([UP, copy, twin_of_copy], store, "bybit", ["BTC/USDT"], "1h")
     assert [r["id"] for r in res] == ["up"]
     store.close()
+
+
+def test_winners_only_switch(tmp_path):
+    reg_path = str(tmp_path / "registry.json")
+    assert not picks.winners_only(reg_path)
+    copy = picks.pick_copy(UP, "4h")
+    assert picks.trades_now(UP, False) and picks.trades_now(copy, False)
+    picks.set_winners_only(reg_path, True, by="admin")
+    assert picks.winners_only(reg_path)
+    assert not picks.trades_now(UP, True) and picks.trades_now(copy, True)
+    picks.set_winners_only(reg_path, False)
+    assert not picks.winners_only(reg_path)
+
+
+def test_trading_page_winners_only_button(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    make_store(tmp_path / "x.db").close()
+    reg_path = str(tmp_path / "registry.json")
+    reg = Registry(reg_path)
+    reg.add(Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR), status="paper"))
+    win = picks.pick_copy(UP, "4h")
+    win.status = "paper"
+    reg.add(win)
+    reg.save()
+    runner = JobRunner(str(tmp_path / "jobs"), env_file=str(tmp_path / "none.env"))
+    app = create_app(Settings(db_path=str(tmp_path / "x.db"), symbols=["BTC/USDT"]), Auth("admin", "correct horse battery", "k"),
+                     runner, Paths(report=str(tmp_path / "none.json"), registry=reg_path))
+    c = TestClient(app)
+    c.post("/login", data={"user": "admin", "password": "correct horse battery"})
+    page = c.get("/trading").text
+    assert "Trade only the WIN strategies" in page and '<span class="v good">2</span>' in page
+    csrf = Auth("admin", "correct horse battery", "k").csrf(c.cookies.get(COOKIE))
+    assert c.post("/trading/paper/winners-only", data={"csrf": "x", "on": "1"}).status_code == 403
+    c.post("/trading/paper/winners-only", data={"csrf": csrf, "on": "1"})
+    assert picks.winners_only(reg_path)
+    page = c.get("/trading").text
+    assert "Trade the best strategies too" in page and '<span class="v good">1</span>' in page
+    c.post("/trading/paper/winners-only", data={"csrf": csrf, "on": "0"})
+    assert not picks.winners_only(reg_path)

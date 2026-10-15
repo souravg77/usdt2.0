@@ -780,6 +780,29 @@ def test_paper_keeps_trading_through_a_live_safety_halt(tmp_path):
     assert not opened and before
 
 
+def test_paper_winners_only_trades_just_the_win_copies(tmp_path):
+    from aitrader.learn import picks
+
+    df = synthetic(n=700)
+    store = CandleStore(str(tmp_path / "c.db"))
+    fill_store(store, df)
+    reg_path = str(tmp_path / "reg.json")
+    reg = Registry(reg_path)
+    up = Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR), status="paper")
+    reg.add(up)
+    win = picks.pick_copy(up, "1h")
+    win.status = "paper"
+    reg.add(win)
+    reg.save()
+    picks.set_winners_only(reg_path, True)
+    trader = PaperTrader(store, reg_path, ["bybit"], ["BTC/USDT"], state_path=str(tmp_path / "s.json"))
+    opened = []
+    for i in range(600, 660):
+        opened += trader.tick(now_ms=int(df.ts.iloc[i]) + H)["opened"]
+    assert opened and all(k.startswith(win.id + "|") for k in opened)
+    store.close()
+
+
 def test_a_missing_entry_candle_doesnt_keep_a_paper_trade_open_forever(tmp_path, monkeypatch):
     import aitrader.learn.paper as paper_mod
 

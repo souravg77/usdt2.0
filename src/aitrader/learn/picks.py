@@ -16,6 +16,10 @@ What a pick changes, in paper trading and on the Replay page:
 
 The backtest report and keep-top still test everything, so a later pick can change its mind.
 ``learn pick-timeframe 4h --clear`` undoes it. The picks are a JSON file next to the registry.
+
+"Winners only" (a switch on the Trading page, ``winners_only.json`` next to the registry): paper
+trading then opens trades for the WIN copies only, so the best-N strategies of keep-top stop
+opening their own. Their open trades still close normally, and switching it off brings them back.
 """
 
 from __future__ import annotations
@@ -56,6 +60,32 @@ def save(path: str, picks: dict) -> None:
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(picks, fh, indent=1)
     os.replace(tmp, path)
+
+
+def winners_only_path(registry_path: str) -> str:
+    return os.path.join(os.path.dirname(os.path.abspath(registry_path)), "winners_only.json")
+
+
+def winners_only(registry_path: str) -> bool:
+    try:
+        with open(winners_only_path(registry_path), encoding="utf-8") as fh:
+            return bool(json.load(fh).get("on"))
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def set_winners_only(registry_path: str, on: bool, by: str = "") -> None:
+    path = winners_only_path(registry_path)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump({"on": bool(on), "by": by, "at": int(time.time() * 1000)}, fh)
+    os.replace(tmp, path)
+
+
+def trades_now(entry: Entry, only_winners: bool) -> bool:
+    """Whether paper trading opens trades for ``entry`` (status aside)."""
+    return not only_winners or bool(picked_for(entry))
 
 
 def picked_for(entry: Entry) -> str:
