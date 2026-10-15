@@ -877,11 +877,15 @@ def _q(s: str) -> str:
 
 
 def cross_site(request) -> bool:
-    """A form posted from another website (the browser says so in Sec-Fetch-Site or Origin)."""
+    """A form posted from another website (the browser says so in Sec-Fetch-Site or Origin).
+    Our pages send ``Referrer-Policy: no-referrer``, so browsers post our own forms with
+    ``Origin: null``: that says nothing about the site and isn't refused."""
     if request.headers.get("sec-fetch-site", "") == "cross-site":
         return True
-    origin = request.headers.get("origin")
-    return bool(origin) and urlsplit(origin).netloc.lower() != request.headers.get("host", "").lower()
+    origin = (request.headers.get("origin") or "").strip()
+    if not origin or origin == "null":
+        return False
+    return urlsplit(origin).netloc.lower() != request.headers.get("host", "").lower()
 
 
 def _csrf(auth: Auth, token: str | None) -> str:
