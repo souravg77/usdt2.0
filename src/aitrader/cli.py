@@ -637,13 +637,14 @@ def cmd_learn(s: Settings, args) -> int:
 
                 cfg = as_perp(cfg)
             results = picks.evaluate(entries, store, exchanges[0], list(symbols), tf, since, cfg)
+            bars = {sym: store.count(exchanges[0], sym, tf, since, int(_time.time() * 1000) + 1) for sym in symbols}
         finally:
             store.close()
         if not any(r["trades"] for r in results):
             print(f"no {tf} trades: download {tf} prices first (aitrader download --since ... --timeframe {tf})")
             return 0 if args.skip_empty else 1
         out = picks.apply(reg, entries, tf, results, path, min_trades=args.min_trades, market=mkt,
-                          info={"since": since, "pairs": list(symbols), "years": args.years})
+                          info={"since": since, "pairs": list(symbols), "years": args.years, "bars": bars})
         print(f"{tf}: tested {out['tested']} strategies on {len(symbols)} pairs; kept {len(out['picked'])} "
               f"(total above 0R, at least {args.min_trades} trades, up in at least half their quarters)")
         for r in picks.winners(results, args.min_trades):

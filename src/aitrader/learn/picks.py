@@ -180,6 +180,17 @@ def evaluate(entries: list[Entry], store: CandleStore, exchange: str, symbols: l
     return out
 
 
+def why_not(r: dict, min_trades: int = MIN_TRADES) -> str:
+    """Why a tested strategy was not kept ("" when it was a winner)."""
+    if r["trades"] < min_trades:
+        return f"only {r['trades']} trades (needs {min_trades})"
+    if r["total_r"] <= 0:
+        return f"lost money overall ({r['total_r']:+.2f}R after fees)"
+    if r["quarters_up"] < r["quarters_down"]:
+        return f"down in more quarters than up ({r['quarters_up']} of {r['quarters_up'] + r['quarters_down']} up)"
+    return ""
+
+
 def winners(results: list[dict], min_trades: int = MIN_TRADES) -> list[dict]:
     return [r for r in results if r["trades"] >= min_trades and r["total_r"] > 0
             and r["quarters_up"] >= r["quarters_down"]]

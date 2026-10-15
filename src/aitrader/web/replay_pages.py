@@ -366,6 +366,11 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
             when = clock.local(cur["at"] / 1000)
             out += (f'<p><b>{_e(tf)} pick ({_e(when)}):</b> {len(won)} of {len(cur.get("results", []))} '
                     f'strategies kept on {len(cur.get("pairs", []))} pairs: {_e(", ".join(cur.get("pairs", [])))}.</p>')
+            if not won and cur.get("results"):
+                out += (f'<p class="warn">No strategy passed on {_e(tf)}, so none trades {_e(tf)} on this engine now '
+                        'and Replay shows none. That is the test working: after fees none made money steadily on '
+                        f'these pairs. Undo the {_e(tf)} pick to let them all trade it again, or use a timeframe '
+                        'whose pick kept some.</p>')
             if won:
                 rows = "".join(
                     f'<tr><td>{_e(r["name"])}</td><td>{r["trades"]}</td><td>{r["win_rate"]:.0f}%</td>'
@@ -373,6 +378,7 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
                     f'{r["quarters_up"] + r["quarters_down"]}</td></tr>' for r in won)
                 out += ('<table><tr><th>Strategy</th><th>Trades</th><th>Win %</th>'
                         f'<th>Total</th><th>Quarters up</th></tr>{rows}</table>')
+            out += _tested_table(cur, tf)
             out += (f'<form method="post" action="/replay/pick" class="row">{_csrf(auth, token)}'
                     f'<input type="hidden" name="tf" value="{_e(tf)}"><input type="hidden" name="undo" value="1">'
                     f'<button class="ghost">Undo the {_e(tf)} pick</button></form>')
@@ -449,3 +455,29 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
             'dots the exits (green: profit, red: loss).</p>'
             '<script src="/static/chartstudies.js" defer></script><script src="/static/replay.js" defer></script>')
         return page("Replay backtest", body, user, token)
+
+
+def _tested_table(cur: dict, tf: str) -> str:
+    """Every strategy the pick tested, best first, with why each one was or wasn't kept, and how much
+    price history each pair had."""
+    results = cur.get("results") or []
+    if not results:
+        return ""
+    kept = set(cur.get("picked", []))
+    rows = "".join(
+        f'<tr><td>{_e(r["name"])}</td><td>{r["trades"]}</td><td>{r["win_rate"]:.0f}%</td>'
+        f'<td class="{"good" if r["total_r"] > 0 else "bad"}">{r["total_r"]:+.2f}R</td>'
+        f'<td>{r["quarters_up"]} of {r["quarters_up"] + r["quarters_down"]}</td>'
+        f'<td class="small">{"<span class=good>kept</span>" if r["id"] in kept else _e(picks.why_not(r, cur.get("min_trades", picks.MIN_TRADES)))}</td></tr>'
+        for r in sorted(results, key=lambda r: r["total_r"], reverse=True))
+    out = (f'<details><summary class="small">All {len(results)} tested strategies and why each was or wasn\'t kept'
+           '</summary><table><tr><th>Strategy</th><th>Trades</th><th>Win %</th><th>Total</th>'
+           f'<th>Quarters up</th><th>Result</th></tr>{rows}</table>')
+    bars = cur.get("bars") or {}
+    step = TIMEFRAME_MS.get(tf)
+    if bars and step and cur.get("since") and cur.get("at"):
+        full = max(1, (cur["at"] - cur["since"]) // step)
+        out += ('<p class="small muted">Price history tested: ' + ", ".join(
+            f'{_e(sym)} {n:,} candles ({min(100, 100 * n // full)}%)' for sym, n in bars.items())
+            + '. A coin listed recently has less.</p>')
+    return out + '</details>'
