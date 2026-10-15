@@ -239,6 +239,14 @@ def cost_r(sig: Signal, cfg: BacktestConfig) -> float:
     return (sig.entry + sig.stop) * (fee + slip) / risk
 
 
+def as_perp(cfg: BacktestConfig) -> BacktestConfig:
+    """The same settings with longs costed as USDT perpetual futures (perp fees and funding)."""
+    from dataclasses import replace
+
+    return replace(cfg, taker_fee=cfg.perp_taker_fee, maker_fee=cfg.perp_maker_fee,
+                   funding_rate_8h=cfg.perp_funding_8h)
+
+
 def too_costly(sig: Signal, cfg: BacktestConfig) -> bool:
     return bool(cfg.max_cost_r) and cost_r(sig, cfg) > cfg.max_cost_r
 

@@ -49,8 +49,30 @@ def save(path: str, start: float, now_ms: int | None = None) -> dict:
     return w
 
 
+def market_path(state_path: str) -> str:
+    """Where the Trading page's Spot / Futures choice for paper longs is kept."""
+    return os.path.join(os.path.dirname(os.path.abspath(state_path)), "paper_market.json")
+
+
+def futures_on(path: str) -> bool:
+    """True when paper longs trade as USDT perpetual futures instead of spot buys."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh).get("market") == "futures"
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def set_market(path: str, futures: bool, by: str = "") -> None:
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump({"market": "futures" if futures else "spot", "by": by, "at": int(time.time() * 1000)}, fh)
+    os.replace(tmp, path)
+
+
 def in_use(state: dict, skip: str = "") -> float:
-    """USDT tied up by the open positions: what a spot position cost, a perp short's margin."""
+    """USDT tied up by the open positions: what a spot position cost, a perp position's margin."""
     return sum(o.get("units", 0) * o.get("entry", 0) / o.get("leverage", 1.0)
                for k, o in state.get("open", {}).items() if k != skip and o.get("filled"))
 

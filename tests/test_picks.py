@@ -195,3 +195,25 @@ def test_trading_page_winners_only_button(tmp_path, monkeypatch):
     assert "Trade the best strategies too" in page and '<span class="v good">1</span>' in page
     c.post("/trading/paper/winners-only", data={"csrf": csrf, "on": "0"})
     assert not picks.winners_only(reg_path)
+
+
+def test_trading_page_spot_futures_switch(tmp_path, monkeypatch):
+    from aitrader.learn import wallet
+
+    monkeypatch.chdir(tmp_path)
+    runner = JobRunner(str(tmp_path / "jobs"), env_file=str(tmp_path / "none.env"))
+    paths = Paths(report=str(tmp_path / "none.json"), registry=str(tmp_path / "registry.json"),
+                  paper_state=str(tmp_path / "learn" / "paper_state.json"))
+    app = create_app(Settings(db_path=str(tmp_path / "x.db"), symbols=["BTC/USDT"]),
+                     Auth("admin", "correct horse battery", "k"), runner, paths)
+    c = TestClient(app)
+    c.post("/login", data={"user": "admin", "password": "correct horse battery"})
+    assert "Switch to futures trading" in c.get("/trading").text
+    csrf = Auth("admin", "correct horse battery", "k").csrf(c.cookies.get(COOKIE))
+    assert c.post("/trading/paper/market", data={"csrf": "x", "market": "futures"}).status_code == 403
+    r = c.post("/trading/paper/market", data={"csrf": csrf, "market": "futures"}, follow_redirects=False)
+    assert "Futures%20on" in r.headers["location"]
+    assert wallet.futures_on(wallet.market_path(paths.paper_state))
+    assert "Switch longs to spot" in c.get("/trading").text
+    c.post("/trading/paper/market", data={"csrf": csrf, "market": "spot"})
+    assert not wallet.futures_on(wallet.market_path(paths.paper_state))
