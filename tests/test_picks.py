@@ -253,6 +253,11 @@ def test_futures_mode_switches_the_whole_dashboard(tmp_path, monkeypatch):
     assert wallet.engines(eng) == {"spot": True, "futures": False} and "Turn Futures AI on" in c.get("/trading").text
     c.post("/trading/paper/market", data={"csrf": csrf, "market": "futures", "on": "1"})
     assert wallet.engines(eng) == {"spot": True, "futures": True}
+    # each engine's own limits
+    c.post("/trading/paper/limits", data={"csrf": csrf, "market": "futures", "loss": "2.5", "max_open": "1"})
+    assert wallet.limits(wallet.limits_path(paths.paper_state))["futures"] == {"daily_loss_pct": 2.5, "max_open": 1}
+    assert wallet.limits(wallet.limits_path(paths.paper_state))["spot"]["max_open"] == wallet.DEFAULT_MAX_OPEN
+    assert "PAUSED" in c.get("/trading").text and "Futures AI has 1 open positions" in c.get("/trading").text
     c.post("/market-mode", data={"csrf": csrf, "market": "spot"})
     assert not wallet.futures_on(path) and "Spot AI workspace" in c.get("/trading").text
 

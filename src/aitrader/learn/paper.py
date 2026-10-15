@@ -53,6 +53,15 @@ log = logging.getLogger(__name__)
 DEFAULT_STATE = "data/learn/paper_state.json"
 WINDOW_BARS = 1000  # history loaded per market, enough to warm up EMA200 and friends
 MIN_BARS = 250
+MAX_DATA_AGE_MS = 15 * 60_000  # a signal on a candle that closed longer ago than this (or a bar) is not taken
+
+
+def max_data_age(tf: str) -> int:
+    """How old a just-arrived candle may be before its signal is skipped as stale: 15 minutes, or one
+    bar on longer timeframes, at most an hour."""
+    return max(MAX_DATA_AGE_MS, min(TIMEFRAME_MS[tf], 3_600_000))
+
+
 FUTURES_SUFFIX = "|futures"  # a perp long's position key: the same signal's spot buy keeps the plain key
 MISSING_ENTRY_BARS = 3  # bars to wait for a missing entry candle to be filled in before moving on
 
@@ -97,6 +106,8 @@ class PaperTrader:
         self.futures_wallet_path = wallet.wallet_path(state_path, "futures")
         self.market_path = wallet.market_path(state_path)  # the futures leverage chosen
         self.engines_path = wallet.engines_path(state_path)  # Spot AI / Futures AI on or off
+        self.limits_path = wallet.limits_path(state_path)  # each engine's daily loss and open-position limits
+        self._now = 0
         self.perp_limits_path = perp_limits.DEFAULT_PATH  # each coin's maximum leverage on Bybit
         self.ai_filter = ai_filter  # Phase 4 trade filter (aitrader.ai.LiveFilter) or None
         self.control = control  # trade.Control: pause / kill switch, or None
@@ -116,6 +127,7 @@ class PaperTrader:
         now_ms = now_ms or int(time.time() * 1000)
         reg = Registry(self.registry_path)  # re-read: `learn` commands may have changed it
         events = {"opened": [], "closed": [], "retired": [], "filtered": []}
+        self._now = now_ms
         self._manage_open(reg, now_ms, events)
         allow, size_mult, cal_why = self._calendar(now_ms)
         blocked = "" if allow else f"the economic-calendar filter: {cal_why}"
@@ -172,6 +184,12 @@ class PaperTrader:
                             continue
                         sig = sigs[-1]
                         self.state["last_signal"][key] = sig.ts
+                        late = now_ms - newest_close
+                        if late > max_data_age(tf):  # the candle arrived late: its prices are old now
+                            self._log_signal(key, sig, "stale prices",
+                                             f"the candle closed {late / 60_000:.0f} min ago")
+                            events["filtered"].append(key)
+                            continue
                         legs = self._legs(key, sig, sym, on, events)
                         if not legs:
                             continue
@@ -321,8 +339,15 @@ class PaperTrader:
         if engines["spot"] and not short:
             wanted.insert(0, (key, False))
         legs = []
+        lim = wallet.limits(self.limits_path)
         for k, perp in wanted:
             if k in self.state["open"]:
+                continue
+            mkt = "futures" if perp else "spot"
+            why = wallet.entry_block(self.state, self._wallet(mkt), mkt, lim[mkt], self._now or int(time.time() * 1000))
+            if why:
+                self._log_signal(k, sig, "engine limit", why)
+                events["filtered"].append(k)
                 continue
             if perp:
                 lev = self._lev(sym)
