@@ -19,6 +19,7 @@ from ..indicators.results import fibonacci_result
 MAX_TRADES = 40
 PROFILE_BARS = 100  # volume profile and Fibonacci swing: the last 100 bars, as the strategies use
 PATTERNS = {"bullish_engulfing": "E", "hammer": "H", "doji": "D", "inside_bar": "I"}
+NR_BARS = 7  # "N": the narrowest range of the last 7 candles (NR7), as the strategies' nr(7)
 
 
 def _series(s: pd.Series, digits: int = 10, tail: int = 0) -> list:
@@ -46,6 +47,7 @@ def compute(candles: list[list], tail: int = 0) -> dict:
     m = ind.macd(close)
     srsi = ind.stoch_rsi(close)
     kc = ind.keltner(df)
+    dc = ind.donchian(df)
     overlays = {
         "ema20": series(ind.ema(close, 20)),
         "ema50": series(ind.ema(close, 50)),
@@ -57,6 +59,9 @@ def compute(candles: list[list], tail: int = 0) -> dict:
         "span_a": series(ich["span_a"]), "span_b": series(ich["span_b"]),
         "psar": series(sar["sar"]), "psar_trend": series(sar["trend"]),
         "kc_upper": series(kc["upper"]), "kc_mid": series(kc["mid"]), "kc_lower": series(kc["lower"]),
+        "sma20": series(ind.sma(close, 20)), "sma50": series(ind.sma(close, 50)),
+        "sma200": series(ind.sma(close, 200)),
+        "dc_upper": series(dc["upper"]), "dc_lower": series(dc["lower"]),
     }
     panels = {
         "rsi": series(ind.rsi(close), 2),
@@ -64,6 +69,8 @@ def compute(candles: list[list], tail: int = 0) -> dict:
         "adx": series(ind.adx(df), 2),
         "stoch_k": series(srsi["k"] * 100, 2), "stoch_d": series(srsi["d"] * 100, 2),
         "atr": series(ind.atr(df)), "cci": series(ind.cci(df), 2), "willr": series(ind.williams_r(df), 2),
+        "fi": series(ind.force_index(df)), "obv": series(ind.obv(df)), "mfi": series(ind.mfi(df), 2),
+        "cmf": series(ind.cmf(df), 4), "roc": series(close.pct_change(10) * 100, 2),
     }
     try:
         levels = ind.support_resistance(df.tail(300))
@@ -71,7 +78,10 @@ def compute(candles: list[list], tail: int = 0) -> dict:
         levels = []
     levels = sorted(levels, key=lambda lv: -lv["touches"])[:8]
     pats = core.candle_patterns(df)
-    marks = ["".join(c for col, c in PATTERNS.items() if row[col]) or None for _, row in pats.iterrows()]
+    rng = df["high"] - df["low"]
+    nr = (rng < rng.shift(1).rolling(NR_BARS - 1, min_periods=NR_BARS - 1).min()).tolist()
+    marks = ["".join(c for col, c in PATTERNS.items() if row[col]) + ("N" if nr[i] else "") or None
+             for i, (_, row) in enumerate(pats.iterrows())]
     return {"overlays": overlays, "panels": panels,
             "levels": [{"price": round(lv["price"], 10), "touches": lv["touches"]} for lv in levels],
             "fib": _fib(df), "profile": _profile(df.tail(PROFILE_BARS)),

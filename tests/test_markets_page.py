@@ -177,7 +177,13 @@ def test_chart_has_every_indicator_the_strategies_use():
     assert s["panels"]["cci"][-1] == round(float(ind.cci(df).iloc[-1]), 2)
     assert -100 <= s["panels"]["willr"][-1] <= 0
     assert s["overlays"]["kc_lower"][-1] < s["overlays"]["kc_mid"][-1] < s["overlays"]["kc_upper"][-1]
-    assert len(s["patterns"]) == 50 and set("".join(p for p in s["patterns"] if p)) <= set("EHDI")
+    assert len(s["patterns"]) == 50 and set("".join(p for p in s["patterns"] if p)) <= set("EHDIN")
+    # the indicators the strategies use that the chart lacked: SMA, Donchian, Force index, OBV, MFI, CMF, ROC
+    assert s["overlays"]["sma20"][-1] == round(float(df["close"].rolling(20).mean().iloc[-1]), 10)
+    assert s["overlays"]["dc_lower"][-1] <= s["overlays"]["dc_upper"][-1]
+    assert s["panels"]["fi"][-1] == round(float(ind.force_index(df).iloc[-1]), 10)
+    assert 0 <= s["panels"]["mfi"][-1] <= 100 and -1 <= s["panels"]["cmf"][-1] <= 1
+    assert s["panels"]["obv"][-1] is not None and s["panels"]["roc"][-1] is not None
     fib = fibonacci_result(df)
     assert s["fib"]["high"] == fib.features["swing_high"] and s["fib"]["leg"] == fib.metadata["leg"]
     assert [lv["ratio"] for lv in s["fib"]["levels"]] == [0.236, 0.382, 0.5, 0.618, 0.786]
@@ -213,7 +219,7 @@ def test_markets_page_has_indicator_switches(world):
     login(client)
     r = client.get("/markets?symbol=BTC/USDT&tf=1h")
     for key in ("ema", "bb", "vwap", "st", "ich", "psar", "sr", "trades", "vol", "rsi", "macd", "adx", "stoch",
-                "kc", "fib", "vp", "pat", "atr", "cci", "willr"):
+                "kc", "fib", "vp", "pat", "atr", "cci", "willr", "sma", "dc", "fi", "obv", "mfi", "cmf", "roc"):
         assert f'data-study="{key}"' in r.text
     assert "place orders" in r.text
 

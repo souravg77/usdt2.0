@@ -135,15 +135,21 @@ def keep_top(reg: Registry, n: int, per_tf: int = PER_TIMEFRAME) -> dict:
 
 # chart indicator key (the Markets page chips) -> words in a strategy's rules that mean it uses it
 INDICATOR_WORDS: dict[str, str] = {
-    "ema": r"\b(ema\w*|sma\d*|moving averages?)\b",
+    "ema": r"\b(ema\w*|moving averages?)\b",
+    "sma": r"\b(sma\d*|\w*_sma|simple moving average)\b",
     "bb": r"\b(bb_\w+|bollinger)",
     "vwap": r"\bvwap",
     "st": r"\bsupertrend",
     "ich": r"\b(tenkan|kijun|cloud_\w+|ichimoku)",
     "psar": r"\b(psar|parabolic)",
-    "sr": (r"\b(support|resistance|highest_high|lowest_low|highest high|lowest low|donchian"
-           r"|swing (?:high|low)s?|market structure)"),
-    "vol": r"\b(volume|rel_volume|avg_volume|obv\w*|mfi|cmf|force_index)",
+    "sr": r"\b(support|resistance|swing (?:high|low)s?|market structure)",
+    "dc": r"\b(highest_high|lowest_low|highest high|lowest low|donchian)",
+    "vol": r"\b(volume|rel_volume|avg_volume)",
+    "fi": r"\b(force_index|force index)",
+    "obv": r"\bobv",
+    "mfi": r"\b(mfi|money flow index)",
+    "cmf": r"\b(cmf|chaikin)",
+    "roc": r"(\bchange\(|\broc\b|rate of change)",
     "rsi": r"\brsi\w*",
     "macd": r"\bmacd",
     "adx": r"\b(adx|plus_di|minus_di)\b",
@@ -151,7 +157,7 @@ INDICATOR_WORDS: dict[str, str] = {
     "kc": r"\b(keltner|kc_\w+)",
     "fib": r"\b(fib\w*|retracement)",
     "vp": r"\b(volume profile|value area|point of control|poc|vah|val)\b",
-    "pat": r"\b(hammer|doji|engulfing|inside_bar|outside_bar|pin bar|ha_green|heikin|body_pct)",
+    "pat": r"\b(hammer|doji|engulfing|inside_bar|outside_bar|pin bar|ha_green|heikin|body_pct|nr\d*\(|nr7)",
     "atr": r"\b(atr\w*|true range)",
     "cci": r"\bcci",
     "willr": r"\b(williams|willr)",
@@ -183,10 +189,16 @@ def indicators(entry: Entry) -> set[str]:
     return {k for k, pat in INDICATOR_WORDS.items() if re.search(pat, text)}
 
 
-def indicators_used(reg: Registry) -> dict[str, int]:
-    """How many paper-trading strategies use each chart indicator, most used first."""
+def indicators_used(reg: Registry, market: str | None = None, only_winners: bool = False) -> dict[str, int]:
+    """How many paper-trading strategies use each chart indicator, most used first. With ``market``
+    ("spot" or "futures") only the strategies that engine trades: its own WIN strategies (all of them
+    with ``only_winners``, its WIN-only switch), and no shorts on Spot."""
+    from .picks import trades_now
+
     counts: dict[str, int] = {}
     for e in reg.with_status("paper"):
+        if market and ((market == "spot" and e.kind == "short") or not trades_now(e, only_winners, market)):
+            continue
         try:
             used = indicators(e)
         except Exception:

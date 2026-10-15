@@ -62,7 +62,7 @@ def test_indicators_come_from_the_rules():
     assert indicators(entry("a", name="trend_pullback")) == {"ema", "adx", "rsi", "sr", "atr"}  # market structure
     assert indicators(entry("b", name="supertrend_trend")) >= {"st"}
     assert "ema" not in indicators(entry("f", name="fibonacci_reaction"))  # "smaller" isn't SMA
-    assert indicators(entry("d", name="range_support_bounce")) >= {"sr", "adx"}  # its channel
+    assert indicators(entry("d", name="range_support_bounce")) >= {"dc", "adx"}  # its Donchian channel
     assert {"fib"} <= indicators(entry("f", name="fibonacci_reaction"))
     assert {"vp"} <= indicators(entry("v", name="value_area_reversion"))
     assert {"kc"} <= indicators(entry("k", name="keltner_breakout"))
@@ -87,8 +87,25 @@ def test_indicators_used_counts_paper_strategies(tmp_path):
     reg = make(tmp_path, entry("a", name="trend_pullback"), entry("b", name="buy_the_dip"),
                entry("c", name="supertrend_trend", status="retired"))
     used = indicators_used(reg)
-    assert used["ema"] == 2 and used["rsi"] == 2 and used["adx"] == 1 and "st" not in used
-    assert list(used)[:3] == ["atr", "ema", "rsi"]  # most used first, then by name
+    assert used["ema"] == 1 and used["sma"] == 1 and used["rsi"] == 2 and used["adx"] == 1 and "st" not in used
+    assert list(used)[:3] == ["atr", "rsi", "adx"]  # most used first, then by name
+
+
+def test_indicators_used_follows_what_each_engine_trades(tmp_path):
+    """Shawn: the chart indicators follow the strategies set of the engine shown."""
+    from aitrader.learn import picks
+    from aitrader.learn.registry import short_twin
+
+    st = entry("c", name="supertrend_trend")
+    win = picks.pick_copy(st, "1h", "futures")
+    win.status = "paper"
+    reg = make(tmp_path, entry("a", name="trend_pullback"), short_twin(entry("b", name="buy_the_dip")), win)
+    for e in reg.entries.values():
+        e.status = "paper"
+    spot, fut = indicators_used(reg, "spot"), indicators_used(reg, "futures")
+    assert "st" not in spot and fut["st"] == 1  # the Futures WIN copy trades only on Futures
+    assert spot["ema"] == 1 and fut["rsi"] == 2  # the short twin of buy_the_dip only on Futures
+    assert indicators_used(reg, "futures", only_winners=True) == indicators_used(make(tmp_path / "x", win), "futures")
 
 
 def test_saved_n_is_clamped(tmp_path):
