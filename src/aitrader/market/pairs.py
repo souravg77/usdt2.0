@@ -307,7 +307,9 @@ def configured_symbols(fallback: list[str], env=None, path: str | None = None,
     """The pairs to trade: the fixed list unless ``AITRADER_PAIRS=ranked`` and a fresh ranking
     exists, plus today's top gainers while that switch is on (``market.gainers``): the Spot
     scanner's for ``market="spot"``, the Futures scanner's for ``"futures"``, both by default.
-    ``market="futures"`` is the Futures gainers alone, without the usual list: with that scanner off
+    The squeeze scanner's pairs (``market.squeeze``) join the Futures list while that switch is on.
+    ``market="futures"`` is the Futures gainers and squeeze pairs alone, without the usual list: with
+    both scanners off
     or its list stale, Futures AI opens nothing new.
     ``keep`` (e.g. pairs with open paper positions) is always added."""
     env = os.environ if env is None else env
@@ -328,6 +330,10 @@ def configured_symbols(fallback: list[str], env=None, path: str | None = None,
              "futures": env.get("AITRADER_GAINERS_FILE") or gainers.DEFAULT_PATH}
     hot = [s for m in ((market,) if market in files else ("spot", "futures"))
            for s in gainers.symbols(files[m], now_ms=now_ms)]
+    if market in (None, "futures"):  # the squeeze scanner's pairs are Futures AI's too
+        from . import squeeze
+
+        hot += squeeze.symbols(squeeze.path_from_env(env), now_ms=now_ms)
     if market == "futures":  # Futures AI trades only the Futures top gainers, never the usual list
         return list(dict.fromkeys([*hot, *(keep or [])]))
     return list(dict.fromkeys([*symbols, *hot, *(keep or [])]))
