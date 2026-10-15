@@ -148,6 +148,7 @@
       var cls = ch === null || ch === undefined ? "" : ch >= 0 ? "good" : "bad";
       html += '<button type="button" class="tick' + (t.symbol === state.symbol ? " active" : "") + flash +
         '" data-symbol="' + escapeHtml(t.symbol) + '"><span class="tick-sym">' + escapeHtml(t.symbol) +
+        (t.gainer ? ' <span class="hot">top gainer</span>' : "") +
         '</span><span class="tick-px">' + fmt(t.price) + '</span><span class="tick-ch ' + cls + '">' +
         (ch === null || ch === undefined ? "" : (ch >= 0 ? "+" : "") + ch.toFixed(2) + "%") +
         '</span><span class="tick-vol muted">Vol ' + fmtVol(t.volume) + "</span></button>";

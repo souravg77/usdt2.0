@@ -304,7 +304,8 @@ def ranked_symbols(path: str = DEFAULT_PATH, top: int = 20, max_age_hours: float
 def configured_symbols(fallback: list[str], env=None, path: str | None = None,
                        now_ms: int | None = None, keep: list[str] | None = None) -> list[str]:
     """The pairs to trade: the fixed list unless ``AITRADER_PAIRS=ranked`` and a fresh ranking
-    exists. ``keep`` (e.g. pairs with open paper positions) is always added."""
+    exists, plus today's top gainers while that switch is on (``market.gainers``). ``keep`` (e.g.
+    pairs with open paper positions) is always added."""
     env = os.environ if env is None else env
     symbols = list(fallback)
     if (env.get("AITRADER_PAIRS") or "fixed").strip().lower() == "ranked":
@@ -317,7 +318,10 @@ def configured_symbols(fallback: list[str], env=None, path: str | None = None,
         else:
             log.warning("AITRADER_PAIRS=ranked but the pair ranking is missing or stale; "
                         "using the fixed list (run `aitrader pairs rank`)")
-    return list(dict.fromkeys([*symbols, *(keep or [])]))
+    from . import gainers  # the Pairs page's "Trade the top gainers" switch
+
+    hot = gainers.symbols(env.get("AITRADER_GAINERS_FILE") or gainers.DEFAULT_PATH, now_ms=now_ms)
+    return list(dict.fromkeys([*symbols, *hot, *(keep or [])]))
 
 
 def open_paper_symbols(state_path: str) -> list[str]:
