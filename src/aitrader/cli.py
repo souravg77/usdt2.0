@@ -613,10 +613,11 @@ def cmd_learn(s: Settings, args) -> int:
                   f"up {r['quarters_up']}/{r['quarters_up'] + r['quarters_down']} quarters")
         return 0
     if cmd == "add-shorts":
+        from .learn.picks import picked_for
         from .learn.registry import short_twin
 
-        added = 0
-        for e in [e for e in reg.entries.values() if e.kind != "short"]:
+        added = 0  # a "WIN 4h" copy gets no twin: the short twin of its original has its own pick
+        for e in [e for e in reg.entries.values() if e.kind != "short" and not picked_for(e)]:
             added += reg.add(short_twin(e))
         reg.save()
         print(f"{added} new short twins (Bybit USDT perpetual futures) -> {args.registry}")

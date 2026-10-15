@@ -63,6 +63,12 @@ def picked_for(entry: Entry) -> str:
     return (entry.spec or {}).get("pick", "") or ""
 
 
+def is_copy(entry: Entry) -> bool:
+    """A pick copy, a short twin of one, or another twin: judged through the strategy it came from."""
+    spec = entry.spec or {}
+    return bool(spec.get("pick") or (spec.get("base_spec") or {}).get("pick") or spec.get("twin_of"))
+
+
 def allowed(entry: Entry, timeframes, picks: dict) -> list[str]:
     """``timeframes`` without the picked ones this strategy wasn't kept for."""
     mine = picked_for(entry)
@@ -85,7 +91,7 @@ def evaluate(entries: list[Entry], store: CandleStore, exchange: str, symbols: l
             frames[sym] = candles_to_frame(candles)
     out = []
     for entry in entries:
-        if picked_for(entry) or (entry.spec or {}).get("twin_of"):
+        if is_copy(entry):
             continue  # copies: the strategy they were made from is judged instead
         try:
             strat = make_strategy(entry)

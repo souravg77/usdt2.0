@@ -146,3 +146,13 @@ def test_a_kept_builtin_strategy_still_builds_under_its_win_name():
     # a copy saved before the name was kept in its spec still builds
     old = Entry(id=c.id, kind="builtin", name=c.name, spec={k: v for k, v in c.spec.items() if k != "builtin"})
     assert make_strategy(old).spec.timeframes == ("4h",)
+
+
+def test_a_short_twin_of_a_win_copy_is_not_picked_again(tmp_path):
+    store = make_store(tmp_path / "c.db")
+    copy = picks.pick_copy(UP, "1h")
+    twin_of_copy = short_twin(copy)
+    assert picks.is_copy(twin_of_copy) and not picks.is_copy(short_twin(UP))
+    res = picks.evaluate([UP, copy, twin_of_copy], store, "bybit", ["BTC/USDT"], "1h")
+    assert [r["id"] for r in res] == ["up"]
+    store.close()

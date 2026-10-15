@@ -47,9 +47,10 @@ def known_entries(registry_entries: dict, builtins: bool = True) -> list[Entry]:
         for name in STRATEGIES:
             entries.setdefault(f"builtin-{name}", Entry(id=f"builtin-{name}", kind="builtin", name=name,
                                                        source=STRATEGIES[name].spec.source))
+    from .picks import picked_for
     from .registry import short_twin
 
-    for e in [e for e in entries.values() if e.kind != "short"]:  # and each one's short twin
+    for e in [e for e in entries.values() if e.kind != "short" and not picked_for(e)]:  # and each one's short twin
         twin = short_twin(e)
         entries.setdefault(twin.id, twin)
     return list(entries.values())
