@@ -433,6 +433,10 @@ def test_logins_posted_from_another_site_are_refused(site):
     r = client.post("/signup", data={"email": "e@example.com", "password": "p" * 12, "password2": "p" * 12,
                                      "agree": "1"}, headers={"origin": "https://evil.example"}, follow_redirects=False)
     assert r.status_code == 403
+    # our own pages say no-referrer, so a phone browser posts our login form with Origin: null
+    r = client.post("/login", data={"user": "admin", "password": PW},
+                    headers={"origin": "null", "sec-fetch-site": "same-origin"}, follow_redirects=False)
+    assert r.status_code == 303 and client.cookies.get(COOKIE)
     r = client.post("/login", data={"user": "admin", "password": PW}, headers={"origin": "http://testserver"},
                     follow_redirects=False)
     assert r.status_code == 303 and client.cookies.get(COOKIE)  # this site's own form
