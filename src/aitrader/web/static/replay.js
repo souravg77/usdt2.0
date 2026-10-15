@@ -92,7 +92,8 @@
         " · " + d.candles.length + " candles · " + d.trades.length + " trades in this period." +
         (d.fee_skipped ? " " + d.fee_skipped + " more signals were skipped because fees and slippage would cost over " +
           Math.round(d.max_cost_r * 100) + "% of the risk." : "") +
-        (d.strategies.length ? "" : " No strategy uses this timeframe: try 1h or 4h.");
+        (d.strategies.length ? "" : " No strategy uses this timeframe: try 1h or 4h.") +
+        (d.picked ? " Only the strategies kept by the " + d.timeframe + " pick trade this timeframe." : "");
       titleEl.textContent = d.symbol + " · " + d.timeframe + " · from " + when(d.start).slice(0, 7);
       seek.max = String(d.candles.length);
       S.pos = Math.min(60, d.candles.length);

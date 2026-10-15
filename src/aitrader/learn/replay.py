@@ -12,6 +12,7 @@ from ..backtest import BacktestConfig, run_backtest
 from ..data.store import CandleStore
 from ..indicators import candles_to_frame
 from ..models import TIMEFRAME_MS
+from . import picks
 from .lab import MIN_BARS
 from .registry import Entry, make_strategy
 
@@ -21,9 +22,10 @@ MAX_BARS = 20_000
 
 def replay(entries: list[Entry], store: CandleStore, exchange: str, symbol: str, timeframe: str,
            start_ms: int, end_ms: int, only: str | list[str] = "", cfg: BacktestConfig | None = None,
-           top: int = 0) -> dict:
+           top: int = 0, tf_picks: dict | None = None) -> dict:
     """``only``: one strategy id, or a list of ids best first; with ``top``, the first ``top`` of
-    that list that trade ``timeframe`` (so "the best 10" means 10 that can trade this chart)."""
+    that list that trade ``timeframe`` (so "the best 10" means 10 that can trade this chart).
+    ``tf_picks`` (``learn.picks``): on a picked timeframe only the strategies kept for it trade."""
     step = TIMEFRAME_MS[timeframe]
     end_ms = min(end_ms, start_ms + MAX_BARS * step)
     rows = store.load(exchange, symbol, timeframe, start=start_ms - WARMUP_BARS * step, end=end_ms)
@@ -51,7 +53,7 @@ def replay(entries: list[Entry], store: CandleStore, exchange: str, symbol: str,
         except Exception as exc:
             out["skipped"].append({"id": entry.id, "why": f"can't build it ({type(exc).__name__})"})
             continue
-        if timeframe not in strat.spec.timeframes:
+        if timeframe not in picks.allowed(entry, strat.spec.timeframes, tf_picks or {}):
             continue
         out["strategies"].append({"id": entry.id, "name": entry.name, "source": entry.source})
         costly: list = []

@@ -37,7 +37,7 @@ from ..market.regime import breakdown, classify
 from ..models import TIMEFRAME_MS, Side
 from ..strategies.base import Signal
 from ..trade import futures
-from . import wallet
+from . import picks, wallet
 from .lab import with_context
 from .registry import Registry, make_strategy
 
@@ -104,6 +104,7 @@ class PaperTrader:
         frames: dict = {}  # (exchange, symbol, timeframe) -> (frame, newest close, new candle since last tick)
         regimes: dict = {}  # (exchange, symbol, timeframe) -> regime of the newest closed bar
         symbols = self._symbols()
+        tf_picks = picks.load(picks.picks_path(self.registry_path))  # timeframes kept for their winners
         built, broken, checks = 0, 0, 0  # what this pass looked at, for the dashboard
         for entry in reg.with_status("paper"):
             try:
@@ -115,7 +116,7 @@ class PaperTrader:
             built += 1
             for ex in self.exchanges:
                 for sym in symbols:
-                    for tf in strat.spec.timeframes:
+                    for tf in picks.allowed(entry, strat.spec.timeframes, tf_picks):
                         key = f"{entry.id}|{ex}|{sym}|{tf}"
                         if key in self.state["open"] or not allow:
                             continue

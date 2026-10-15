@@ -56,7 +56,8 @@ def benched(entry: Entry) -> bool:
 
 def rank(reg: Registry) -> list[tuple[Entry, float]]:
     """Strategies that may paper trade (in paper now, or benched earlier), best first."""
-    pool = [e for e in reg.entries.values() if e.status == "paper" or benched(e)]
+    pool = [e for e in reg.entries.values() if (e.status == "paper" or benched(e))
+            and not (e.spec or {}).get("pick")]  # timeframe picks (learn.picks) are kept apart
     scored = [(e, s) for e in pool if (s := score(e)) is not None]
     return sorted(scored, key=lambda es: (_passed(es[0]), es[1]), reverse=True)
 
@@ -124,7 +125,7 @@ def keep_top(reg: Registry, n: int, per_tf: int = PER_TIMEFRAME) -> dict:
             out["benched"].append(e.id)
     # strategies without a backtest yet can't be ranked: they leave paper trading too
     for e in reg.entries.values():
-        if e.status == "paper" and e.id not in keep_ids and score(e) is None:
+        if e.status == "paper" and e.id not in keep_ids and score(e) is None and not (e.spec or {}).get("pick"):
             e.set_status("retired", f"{BENCHED} {n} (no backtest result yet)")
             out["benched"].append(e.id)
     return out
@@ -156,7 +157,7 @@ INDICATOR_WORDS: dict[str, str] = {
     "willr": r"\b(williams|willr)",
 }
 # a book rule's notes (why it was coded so, what couldn't be) can name indicators it doesn't use
-NOT_RULES = ("name", "description", "source", "decisions", "uncodable", "twin_of")
+NOT_RULES = ("name", "description", "source", "decisions", "uncodable", "twin_of", "pick", "pick_of")
 
 
 def _rules_text(entry: Entry) -> str:

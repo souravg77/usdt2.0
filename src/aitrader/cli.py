@@ -583,6 +583,35 @@ def cmd_learn(s: Settings, args) -> int:
         reg.save()
         print(f"{added} new {tf} versions of strategies that trade {', '.join(sorted(near))} -> {args.registry}")
         return 0
+    if cmd == "pick-timeframe":
+        import time as _time
+
+        from .learn import picks
+        from .learn.report import known_entries
+
+        tf, path = args.timeframe, picks.picks_path(args.registry)
+        if args.clear:
+            gone = picks.clear(reg, tf, path)
+            print(f"{tf} pick undone: every strategy may trade {tf} again; {len(gone)} pick copies stopped")
+            return 0
+        since = int(_time.time() * 1000) - int(args.years * 365.25 * 86_400_000)
+        entries = known_entries(reg.entries)
+        store = CandleStore(s.db_path)
+        try:
+            results = picks.evaluate(entries, store, exchanges[0], list(symbols), tf, since, cfg)
+        finally:
+            store.close()
+        if not any(r["trades"] for r in results):
+            print(f"no {tf} trades: download {tf} prices first (aitrader download --since ... --timeframe {tf})")
+            return 1
+        out = picks.apply(reg, entries, tf, results, path, min_trades=args.min_trades,
+                          info={"since": since, "pairs": list(symbols), "years": args.years})
+        print(f"{tf}: tested {out['tested']} strategies on {len(symbols)} pairs; kept {len(out['picked'])} "
+              f"(total above 0R, at least {args.min_trades} trades, up in at least half their quarters)")
+        for r in picks.winners(results, args.min_trades):
+            print(f"  {r['name']:<45} {r['trades']:>4} trades {r['win_rate']:>5.1f}% win {r['total_r']:+8.2f}R "
+                  f"up {r['quarters_up']}/{r['quarters_up'] + r['quarters_down']} quarters")
+        return 0
     if cmd == "add-shorts":
         from .learn.registry import short_twin
 
@@ -1489,6 +1518,12 @@ def build_parser() -> argparse.ArgumentParser:
                                                   "timeframe, running on this one (default 30m, from 15m and 1h)")
     lat.add_argument("timeframe", nargs="?", default="30m", choices=["5m", "15m", "30m", "1h", "4h", "1d"])
     lat.add_argument("--near", default="15m,1h", help="copy strategies that trade any of these (comma separated)")
+    lpt = le_sub.add_parser("pick-timeframe", help="on one timeframe, trade only the strategies that made "
+                                                   "money there steadily (the rest stop trading it)")
+    lpt.add_argument("timeframe", nargs="?", default="4h", choices=["5m", "15m", "30m", "1h", "4h", "1d"])
+    lpt.add_argument("--years", type=float, default=2.0, help="how much saved history to test (default 2)")
+    lpt.add_argument("--min-trades", type=int, default=10, help="fewest trades to judge a strategy (default 10)")
+    lpt.add_argument("--clear", action="store_true", help="undo the pick: every strategy trades it again")
     le_sub.add_parser("add-shorts", help="add a short twin (Bybit perpetual futures) of every long strategy")
     le_sub.add_parser("paper-all", help="paper-trade every strategy, including untested and rejected "
                                         "ones (fake money; poor ones retire on their paper results)")
