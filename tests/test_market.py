@@ -388,7 +388,7 @@ async def test_pairs_page_shows_ranking_regimes_and_results(tmp_path, monkeypatc
     [now] = current_regimes(store, ["BTC/USDT"], ["1h"], ["bybit"])
     store.close()
     assert f'>1h {now["label"]}</span>' in page and now["exchange"] == "bybit"
-    assert "Paper trades" in page and "trend-up" in page and "unknown" in page
+    assert "Spot AI paper trades" in page and "trend-up" in page and "unknown" in page
     assert "Backtest report" in page and "-0.050" in page
 
     csrf = Auth("admin", PW, "k").csrf(client.cookies.get(COOKIE))

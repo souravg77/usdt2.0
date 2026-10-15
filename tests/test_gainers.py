@@ -122,7 +122,15 @@ def test_pairs_page_button_and_markets_badge(tmp_path, monkeypatch):
     page = c.get("/markets").text
     assert 'data-symbol="DOGE/USDT"' in page and 'data-symbol="ADA/USDT"' in page and "open position" in page
     assert 'data-symbol="ETH/USDT"' not in page
+    # the Futures Pairs page: the Futures AI pairs, not the spot ranking or the fixed list
+    page = c.get("/pairs").text
+    assert "Futures AI pairs" in page and "Futures pairs" in page and "open position" in page
+    assert "<b>PEPE/USDT</b>" in page and "<b>DOGE/USDT</b>" in page and "<b>ADA/USDT</b>" in page
+    assert "<b>ETH/USDT</b>" not in page
+    assert "Rank pairs now" not in page and "Pair ranking" not in page and "Futures AI paper trades" in page
     wallet.set_market(wallet.market_path(str(tmp_path / "paper.json")), False)
+    page = c.get("/pairs").text
+    assert "Rank pairs now" in page and "Futures AI pairs" not in page and "Spot AI paper trades" in page
     page = c.get("/markets").text
     assert 'data-symbol="ETH/USDT"' in page and 'data-symbol="DOGE/USDT"' not in page
     wallet.set_market(wallet.market_path(str(tmp_path / "paper.json")), True)
