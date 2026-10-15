@@ -803,6 +803,45 @@ def test_paper_winners_only_trades_just_the_win_copies(tmp_path):
     store.close()
 
 
+def test_paper_futures_mode_trades_longs_as_perpetuals(tmp_path, monkeypatch):
+    from aitrader.backtest.engine import as_perp
+    from aitrader.learn import wallet
+    from aitrader.trade import futures
+
+    monkeypatch.setenv("AITRADER_LEVERAGE", "2")
+    assert futures.long_stop_ok(100.0, 90.0, 2.0) and not futures.long_stop_ok(100.0, 70.0, 2.0)
+    assert not futures.long_stop_ok(100.0, 101.0, 2.0)
+    cfg = as_perp(BacktestConfig())
+    assert cfg.taker_fee == cfg.perp_taker_fee and cfg.funding_rate_8h == cfg.perp_funding_8h
+
+    def run(on: bool, d):
+        df = synthetic(n=700)
+        store = CandleStore(str(d / "c.db"))
+        fill_store(store, df)
+        reg_path = str(d / "reg.json")
+        reg = Registry(reg_path)
+        reg.add(Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR), status="paper"))
+        reg.save()
+        state = str(d / "s.json")
+        wallet.set_market(wallet.market_path(state), on)
+        trader = PaperTrader(store, reg_path, ["bybit"], ["BTC/USDT"], state_path=state)
+        for i in range(600, 700):
+            trader.tick(now_ms=int(df.ts.iloc[i]) + H)
+        store.close()
+        return trader.state
+
+    (tmp_path / "spot").mkdir()
+    (tmp_path / "perp").mkdir()
+    spot, perp = run(False, tmp_path / "spot"), run(True, tmp_path / "perp")
+    assert spot["trades"] and perp["trades"]
+    assert not any(t["perp"] for t in spot["trades"]) and all(t["perp"] for t in perp["trades"])
+    # the same trades, with the cheaper perpetual fees
+    assert [t["signal_ts"] for t in spot["trades"]] == [t["signal_ts"] for t in perp["trades"]]
+    assert perp["trades"][0]["fee_r"] < spot["trades"][0]["fee_r"]
+    opened = [p for p in perp["open"].values() if p.get("filled")]
+    assert all(p["perp"] and p["leverage"] == 2.0 for p in opened)
+
+
 def test_a_missing_entry_candle_doesnt_keep_a_paper_trade_open_forever(tmp_path, monkeypatch):
     import aitrader.learn.paper as paper_mod
 

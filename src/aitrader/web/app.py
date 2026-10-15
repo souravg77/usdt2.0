@@ -550,6 +550,21 @@ paper trading. Nothing trades real money.</p>
                     "the indicators they use.")
         return _control_post(request, csrf, act)
 
+    @app.post("/trading/paper/market")
+    def trading_paper_market(request: Request, csrf: str = Form(""), market: str = Form("")):
+        def act(user):
+            from ..learn import wallet
+            from ..trade import futures
+
+            to_futures = market == "futures"
+            wallet.set_market(wallet.market_path(paths.paper_state), to_futures, by=user)
+            _event("paper_market", f"paper longs switched to {'futures' if to_futures else 'spot'} from the dashboard by {user}")
+            if to_futures:
+                return (f"Futures on: new paper longs open as Bybit USDT perpetual futures at {futures.leverage():g}x "
+                        "isolated margin (shorts already are). Open trades keep the market they opened with.")
+            return "Spot on: new paper longs are spot buys again. Shorts stay futures. Open trades are not changed."
+        return _control_post(request, csrf, act)
+
     @app.post("/trading/paper/winners-only")
     def trading_paper_winners_only(request: Request, csrf: str = Form(""), on: str = Form("")):
         def act(user):
@@ -902,7 +917,7 @@ def _positions_table(paper: dict, execs: dict, csrf: str = "", asked: dict | Non
             total, counted = total + usdt, counted + 1
         # the money and price columns come first so a phone shows them without scrolling sideways
         pid = "paper|" + key
-        rows.append(f"<tr><td>paper{_close_button(key, csrf, asked or {})}</td><td>{_e(sym)}{_short(sig.get('side'))} <span class=muted>{_e(ex)} {_e(tf)}</span></td>"
+        rows.append(f"<tr><td>paper{_close_button(key, csrf, asked or {})}</td><td>{_e(sym)}{_short(sig.get('side'), p.get('perp'))} <span class=muted>{_e(ex)} {_e(tf)}</span></td>"
                     f"{_usdt_cell(usdt, pos_id=pid)}"
                     f"{_price_cells(pid, p.get('mark') if p.get('filled') else None, sig.get('stop', 0), sig.get('side'), _num(sig.get('target')), sig.get('trailing'))}"
                     f"<td>{'' if mark is None else f'{mark:+.2f}R'}</td>"
@@ -1039,8 +1054,11 @@ def live_position_usdt(paper: dict, execs: dict, prices: dict, source: str = "")
             "total": round(sum(rows.values()), 4) if rows else None, "prices": px_by_pos}
 
 
-def _short(side) -> str:
-    return ' <span class="badge warn">short (perp)</span>' if side == "sell" else ""
+def _short(side, perp: bool = False) -> str:
+    """The futures badge: every short is a perpetual; a long is one when it opened in Futures mode."""
+    if side == "sell":
+        return ' <span class="badge warn">short (perp)</span>'
+    return ' <span class="badge">long (perp)</span>' if perp else ""
 
 
 def _prob(p) -> str:
@@ -1102,7 +1120,7 @@ def _trades_table(paper: dict, execs: dict, limit: int = 40) -> str:
     for mode, t in rows[:limit]:
         r = t.get("r", 0)
         twin = f" (paper {t['paper_r']:+.2f}R)" if t.get("paper_r") is not None else ""
-        out.append(f"<tr><td>{_ms(t.get('exit_ts'))}</td><td>{_e(mode)}</td><td>{_e(t.get('symbol', ''))}{_short(t.get('side'))}</td>"
+        out.append(f"<tr><td>{_ms(t.get('exit_ts'))}</td><td>{_e(mode)}</td><td>{_e(t.get('symbol', ''))}{_short(t.get('side'), t.get('perp'))}</td>"
                    f"<td>{_e(t.get('entry_id', ''))}</td><td>{t.get('entry', 0):.6g} → {t.get('exit', 0):.6g}</td>"
                    f'<td class="{"good" if r > 0 else "bad"}">{r:+.2f}R{_e(twin)}</td>'
                    f"<td>{t.get('pnl_usdt', 0):+,.2f}</td><td>{_prob(t.get('ai_prob'))}</td>"
@@ -1302,7 +1320,29 @@ def _paper_switch_card(c: dict, paths: Paths, events: list[dict], jobs: list[dic
             f'<form method="post" action="/trading/paper/keep" class="row">{csrf}'
             f'<label class="small">Keep the best <input type="number" name="n" min="{MIN_N}" max="{MAX_N}" '
             f'value="{keep_n}" style="width:4.5em"> strategies</label><button class="ghost">Keep only the best</button></form>'
-            + _winners_only_form(only, wins, csrf) + '</div>')
+            + _winners_only_form(only, wins, csrf) + _market_form(paths, csrf) + '</div>')
+
+
+def _market_form(paths: Paths, csrf: str) -> str:
+    """The Spot / Futures switch for paper longs (shorts are always perpetual futures)."""
+    from ..learn import wallet
+    from ..trade import futures
+
+    on = wallet.futures_on(wallet.market_path(paths.paper_state))
+    lev = futures.leverage()
+    if on:
+        head = (f'<p><b>Market: <span class="good">FUTURES</span></b>. Longs and shorts trade as Bybit USDT perpetual '
+                f'futures at {lev:g}x isolated margin.')
+        btn = '<input type="hidden" name="market" value="spot"><button class="ghost">Switch longs to spot</button>'
+    else:
+        head = ('<p><b>Market: <span class="muted">SPOT</span></b>. Longs are spot buys; shorts are already '
+                f'perpetual futures at {lev:g}x.')
+        btn = '<input type="hidden" name="market" value="futures"><button>Switch to futures trading</button>'
+    return (head + '</p><p class="small muted">Futures longs pay perpetual fees (0.055% instead of spot\'s 0.1%) and '
+            'funding, and tie up only their margin. A long whose stop sits too close to its liquidation price is '
+            f'skipped. Leverage is AITRADER_LEVERAGE in .env (now {lev:g}x, at most {futures.MAX_LEVERAGE:g}x). '
+            'Paper only: the live trader is not changed.</p>'
+            f'<form method="post" action="/trading/paper/market" class="row">{csrf}{btn}</form>')
 
 
 def _winners_only_form(only: bool, wins: int, csrf: str) -> str:

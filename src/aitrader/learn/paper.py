@@ -17,7 +17,9 @@ Short signals (the short twins, ``strategies.mirror``) are paper-traded as Bybit
 shorts: perp fees and funding in the result, isolated margin at ``AITRADER_LEVERAGE`` (only the
 margin counts against the wallet), and a short whose stop is too close to the
 liquidation price is skipped. The AI trade filter learned from long trades, so it doesn't judge
-shorts.
+shorts. With the Trading page's market switch on Futures (``wallet.futures_on``), long signals
+are paper-traded as USDT perpetual longs the same way (perp fees and funding, margin at
+``AITRADER_LEVERAGE``, liquidation check); each position keeps the market it opened with.
 """
 
 from __future__ import annotations
@@ -30,7 +32,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 
 from ..backtest import BacktestConfig, metrics
-from ..backtest.engine import Trade, cost_r, simulate_signal, too_costly
+from ..backtest.engine import Trade, as_perp, cost_r, simulate_signal, too_costly
 from ..data.store import CandleStore
 from ..indicators import candles_to_frame
 from ..market.regime import breakdown, classify
@@ -83,6 +85,7 @@ class PaperTrader:
         self.cfg = cfg or PaperConfig()
         self.state_path, self.calendar = state_path, calendar
         self.wallet_path = wallet.wallet_path(state_path)  # the starting amount you chose
+        self.market_path = wallet.market_path(state_path)  # Spot or Futures for longs
         self.ai_filter = ai_filter  # Phase 4 trade filter (aitrader.ai.LiveFilter) or None
         self.control = control  # trade.Control: pause / kill switch, or None
         self.context = context  # market-context filter (funding, open interest...), or None
@@ -113,6 +116,7 @@ class PaperTrader:
         regimes: dict = {}  # (exchange, symbol, timeframe) -> regime of the newest closed bar
         symbols = self._symbols()
         tf_picks = picks.load(picks.picks_path(self.registry_path))  # timeframes kept for their winners
+        perp_longs = wallet.futures_on(self.market_path)  # the Trading page's Spot / Futures switch
         only_winners = picks.winners_only(self.registry_path)  # the Trading page's "WIN strategies only"
         built, broken, checks = 0, 0, 0  # what this pass looked at, for the dashboard
         for entry in reg.with_status("paper"):
@@ -157,13 +161,21 @@ class PaperTrader:
                             log.info("paper short %s skipped: stop %.6g too close to liquidation at %gx",
                                      key, sig.stop, self._lev())
                             continue
-                        if too_costly(sig, self.cfg.backtest):  # fees would eat too much of the risk
+                        perp = perp_longs and sig.side is Side.BUY  # a long as a perpetual future
+                        if perp and not futures.long_stop_ok(sig.entry, sig.stop, self._lev()):
+                            self._log_signal(key, sig, "stop too close to liquidation")
+                            events["filtered"].append(key)
+                            log.info("paper perp long %s skipped: stop %.6g too close to liquidation at %gx",
+                                     key, sig.stop, self._lev())
+                            continue
+                        bcfg = as_perp(self.cfg.backtest) if perp else self.cfg.backtest
+                        if too_costly(sig, bcfg):  # fees would eat too much of the risk
                             self._log_signal(key, sig, "fees too high for the stop",
-                                             f"fees and slippage {cost_r(sig, self.cfg.backtest):.2f}R of the risk, "
-                                             f"limit {self.cfg.backtest.max_cost_r:.2f}R")
+                                             f"fees and slippage {cost_r(sig, bcfg):.2f}R of the risk, "
+                                             f"limit {bcfg.max_cost_r:.2f}R")
                             events["filtered"].append(key)
                             log.info("paper signal %s skipped: fees and slippage are %.2fR of the risk "
-                                     "(limit %.2fR)", key, cost_r(sig, self.cfg.backtest), self.cfg.backtest.max_cost_r)
+                                     "(limit %.2fR)", key, cost_r(sig, bcfg), bcfg.max_cost_r)
                             continue
                         ctx_mult = self._context(ex, sym, now_ms)
                         if ctx_mult <= 0:
@@ -190,7 +202,7 @@ class PaperTrader:
                                                    "situation": tch["situation"], "teacher": tch["version"],
                                                    "size_mult": size_mult * ctx_mult * ai["size"], "filled": False,
                                                    "ai_prob": ai["prob"], "ai_version": ai["version"],
-                                                   "regime": regimes[market]}
+                                                   "regime": regimes[market], "perp": perp}
                         events["opened"].append(key)
                         self._log_signal(key, sig, "")
                         log.info("paper signal %s entry~%.6g stop %.6g ai p=%s size x%.2f regime %s", key,
@@ -381,7 +393,8 @@ class PaperTrader:
             try:
                 if entry_id in reg.entries:
                     make_strategy(reg.entries[entry_id])  # registers its custom exit rules
-                t = simulate_signal(sig, df, entry_i, self.cfg.backtest, {})
+                bcfg = as_perp(self.cfg.backtest) if pos.get("perp") else self.cfg.backtest
+                t = simulate_signal(sig, df, entry_i, bcfg, {})
             except Exception:  # never close a trade on the wrong rule: keep it open and say so
                 log.exception("paper %s: can't evaluate its exits; kept open", key)
                 left += closing
@@ -395,12 +408,12 @@ class PaperTrader:
             if not pos["filled"]:
                 # sized from the one paper wallet every strategy shares (learn.wallet)
                 bal = wallet.balance(self.state, wallet.load(self.wallet_path))
-                lev = self._lev() if short else 1.0
+                lev = self._lev() if short or pos.get("perp") else 1.0
                 risk_usdt = bal * sig.risk_pct * pos.get("size_mult", 1.0)
                 units = risk_usdt / abs(sig.entry - sig.stop)
                 units = min(units, bal * self.cfg.max_position_frac / t.entry)
                 # all open positions together may not tie up more than the wallet
-                # (a spot position ties up what it cost; a perp short only its margin)
+                # (a spot position ties up what it cost; a perp position only its margin)
                 units = min(units, max(0.0, bal - wallet.in_use(self.state, skip=key)) * lev / t.entry)
                 skip = ("the wallet's money is all in open positions" if units <= 0 else
                         f"below Bybit's {wallet.MIN_ORDER_USDT:g} USDT minimum order"
@@ -412,7 +425,7 @@ class PaperTrader:
                     log.info("paper %s skipped: %s", key, skip)
                     continue
                 pos.update(filled=True, entry=t.entry, units=units, entry_ts=t.entry_ts)
-                if short:
+                if short or pos.get("perp"):
                     pos["leverage"] = lev
             if t.exit_reason == "end" and t.exit_ts == int(df["ts"].iloc[-1]):
                 if not closing:
@@ -423,7 +436,7 @@ class PaperTrader:
             pnl = t.r * abs(sig.entry - sig.stop) * pos["units"]
             self.state["equity"][entry_id] = equity + pnl
             row = {**_trade_dict(t), "key": key, "entry_id": entry_id, "units": pos["units"],
-                   "side": sig.side.value,
+                   "side": sig.side.value, "perp": short or bool(pos.get("perp")),
                    "pnl_usdt": pnl, "equity_after": equity + pnl,
                    "wallet_after": wallet.balance(self.state, wallet.load(self.wallet_path)) + pnl,
                    "ai_prob": pos.get("ai_prob"), "ai_version": pos.get("ai_version"),

@@ -49,5 +49,19 @@ def short_stop_ok(entry: float, stop: float, lev: float) -> bool:
     return stop - entry <= room * STOP_BUFFER
 
 
+def long_liquidation_price(entry: float, lev: float) -> float:
+    """Roughly where Bybit liquidates an isolated long opened at ``entry`` with ``lev``."""
+    return entry * (1 - 1 / lev + MAINTENANCE_MARGIN)
+
+
+def long_stop_ok(entry: float, stop: float, lev: float) -> bool:
+    """True when the stop is below the entry and at most ``STOP_BUFFER`` of the way down to the
+    liquidation price."""
+    if not (entry > stop > 0):
+        return False
+    room = entry - long_liquidation_price(entry, lev)
+    return entry - stop <= room * STOP_BUFFER
+
+
 def margin(notional: float, lev: float) -> float:
     return notional / max(lev, 1.0)
