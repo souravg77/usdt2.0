@@ -382,39 +382,41 @@ paper trading. Nothing trades real money.</p>
         live = ('<span class="good">locked</span>' if live_gate_problems(settings)
                 else '<span class="bad">UNLOCKED</span>')
         csrf = _csrf(auth, token)
+        fut_view = _futures_state(paths)[0]
+        ws = "futures" if fut_view else "spot"
+        name = "Futures AI" if fut_view else "Spot AI"
+        close_ws = (f'<form method="post" action="/trading/close-all" class="row">{csrf}'
+                    f'<input type="hidden" name="market" value="{ws}">'
+                    f'<button class="warn-btn">Close all {name} positions</button>')
         controls = (f'<div class="card"><h3>Controls</h3><p>Trading {state}<br>Mode <b>{_e(settings.mode.value)}</b>'
                     f' · live orders {live}</p><div class="row">'
                     f'<form method="post" action="/trading/pause">{csrf}<button>Pause new entries</button></form>'
                     f'<form method="post" action="/trading/resume">{csrf}<button class="ghost">Resume</button></form>'
                     '</div>'
-                    f'<form method="post" action="/trading/close-all" class="row">{csrf}'
-                    '<button class="warn-btn">Close all open positions</button>'
-                    '<span class="small muted">Closes every paper position at the last closed candle\'s price '
-                    '(fees included) within a minute. Paper trading keeps running: press Pause new entries '
-                    'first if you don\'t want new ones.</span></form>'
+                    + close_ws +
+                    f'<span class="small muted">Closes every {name} paper position at the last closed candle\'s '
+                    f'price (fees included) within a minute; the other engine\'s positions are not touched. '
+                    f'{name} keeps running: turn it off first if you don\'t want new ones.</span></form>'
                     f'<form method="post" action="/trading/kill" class="kill">{csrf}'
                     '<label>Kill switch: stops entries, closes every paper position and sells everything the live executor bought. '
                     'Type KILL to confirm <input name="confirm" autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false" required placeholder="KILL"></label>'
                     '<button class="danger">Pull the kill switch</button></form></div>')
         note = f'<p class="{"bad" if bad else "good"}">{_e(msg)}</p>' if msg else ""
         events = EventLog(paths.events).read(limit=600)
-        fut_view = _futures_state(paths)[0]
-        ws = "futures" if fut_view else "spot"
         full = paper
         paper, execs = _workspace(paper, ws), {m: _workspace(st, ws) for m, st in execs.items()}
         body = [note, _workspace_note(ws), _trading_stats(c, settings, paths, paper, events, acct, ws),
-                '<div class="grid">', _market_card(paths, full, csrf, ws), _wallet_card(paths, paper, csrf, ws), _account_card(acct, csrf), _paper_switch_card(c, paths, events, jobs.list(), csrf),
+                '<div class="grid">', _market_card(paths, full, csrf, ws), _wallet_card(paths, paper, csrf, ws),
+                "" if fut_view else _account_card(acct, csrf), _paper_switch_card(c, paths, events, jobs.list(), csrf),
                 _ai_card(paths, jobs.list(), csrf), _live_card(settings, paths, events), "</div>",
                 '<div class="grid">', controls, _gate_card(paths, csrf), "</div>",
                 "<h2>Equity</h2>", _equity_svg(paper, execs),
                 "<h2>Open positions</h2>",
-                (f'<form method="post" action="/trading/close-all" class="row">{csrf}'
-                 '<button class="warn-btn">Close all open positions</button></form>'
-                 if (paper.get("open") if isinstance(paper, dict) else None) else ""),
+                (close_ws + "</form>" if (paper.get("open") if isinstance(paper, dict) else None) else ""),
                 _positions_table(paper, execs, csrf, _control().close_requests(), futures_view=fut_view),
                 "<h2>Signals</h2>", _signals_section(paper, int(time.time() * 1000)),
                 "<h2>Trade log</h2>", _trades_table(paper, execs),
-                "<h2>Events</h2>", _events_table(events)]
+                "<h2>Events</h2>", _events_table(_workspace_events(events, ws))]
         body.append('<script src="/static/positions.js" defer></script>')
         return page("Trading", "".join(body), user, token, refresh=60)
 
@@ -491,8 +493,18 @@ paper trading. Nothing trades real money.</p>
         return _control_post(request, csrf, act)
 
     @app.post("/trading/close-all")
-    def trading_close_all(request: Request, csrf: str = Form("")):
+    def trading_close_all(request: Request, csrf: str = Form(""), market: str = Form("")):
         def act(user):
+            if market in ("spot", "futures"):  # one workspace: each of its positions, as its own Close
+                ctl = _control()
+                name = "Futures AI" if market == "futures" else "Spot AI"
+                mine = _workspace(_load_json(paths.paper_state), market).get("open", {})
+                for key, pos in mine.items():
+                    ctl.request_close(key, (pos.get("signal") or {}).get("ts"), by=user)
+                _event("close_all", f"close all {name} paper positions ({len(mine)}) asked from the dashboard by {user}",
+                       "warning")
+                return (f"Closing all {len(mine)} {name} paper positions at the last closed candle's price; they'll be "
+                        "gone within a minute. The other engine's positions are not touched.")
             _control().request_close_all(by=user)
             _event("close_all", f"close all open paper positions asked from the dashboard by {user}", "warning")
             return ("Closing every open paper position at the last closed candle's price; they'll be gone within "
@@ -957,6 +969,20 @@ def _workspace(state: dict, ws: str) -> dict:
     return out
 
 
+def _workspace_events(events: list[dict], ws: str) -> list[dict]:
+    """The events table of one workspace: paper trade events of the other engine are left out."""
+    def other(e: dict) -> bool:
+        d = e.get("data") if isinstance(e.get("data"), dict) else {}
+        key = str(d.get("key") or "")
+        if e.get("kind") not in ("trade_open", "trade_close") or not key or d.get("mode") != "paper":
+            return False
+        text = str(e.get("text") or "")
+        fut = (d["market"] == "futures" if d.get("market") in ("spot", "futures")
+               else key.endswith("|futures") or "perp" in text or "SELL" in text)
+        return fut != (ws == "futures")
+    return [e for e in events if not other(e)]
+
+
 def _workspace_note(ws: str) -> str:
     if ws == "futures":
         return ('<p class="small"><b>Futures AI workspace</b>: the futures wallet, positions, signals and trades. '
@@ -1318,7 +1344,7 @@ def _trading_stats(c: dict, settings, paths: Paths, paper: dict, events: list[di
     tiles = [
         ("Trading", trading[0], trading[1], "new entries" if not c["paused"] and not c["killed"] else ""),
         ("Mode", settings.mode.value, "", "live orders locked" if live_gate_problems(settings) else "LIVE UNLOCKED"),
-        _account_tile(acct),
+        *([] if ws == "futures" else [_account_tile(acct)]),  # the real spot balance: Spot workspace only
         ("Strategies trading", str(in_paper), "good" if in_paper else "warn", "in paper trading"),
         (f"{'Futures' if ws == 'futures' else 'Spot'} AI paper P&L", f"{pnl:+,.2f}", "good" if pnl > 0 else "bad" if pnl < 0 else "",
          f"{len(paper.get('open', {}))} open · {len(trades)} closed"),

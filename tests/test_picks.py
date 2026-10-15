@@ -237,6 +237,22 @@ def test_futures_mode_switches_the_whole_dashboard(tmp_path, monkeypatch):
     page = c.get("/trading").text
     assert "Futures AI 1x" in page and "Futures AI workspace" in page and "<th>Liquidation</th>" in page
     assert "Turn Futures AI off" in page and "Set leverage" in page and "Turn Spot AI" not in page
+    # the Futures view shows and closes only Futures AI's positions; no spot account card
+    assert "Close all Futures AI positions" in page and "Bybit real account" not in page
+    from aitrader.trade import Control
+    ctl = Control(str(tmp_path / "data" / "trade" / "control.json"))
+    c.post("/trading/close-all", data={"csrf": csrf, "market": "spot"})
+    assert key not in ctl.close_requests() and ctl.close_all_requested() is None
+    c.post("/trading/close-all", data={"csrf": csrf, "market": "futures"})
+    assert key in ctl.close_requests() and ctl.close_all_requested() is None
+    from aitrader.web.app import _workspace_events
+    evs = [{"kind": "trade_open", "text": "paper BUY signal a", "data": {"key": "a|bybit|X/USDT|1h", "mode": "paper",
+                                                                       "market": "spot"}},
+           {"kind": "trade_close", "text": "paper close b", "data": {"key": "b|bybit|X/USDT|1h", "mode": "paper",
+                                                                     "market": "futures"}},
+           {"kind": "kill", "text": "kill switch"}]
+    assert [e["kind"] for e in _workspace_events(evs, "futures")] == ["trade_close", "kill"]
+    assert [e["kind"] for e in _workspace_events(evs, "spot")] == ["trade_open", "kill"]
     assert "long (perp)" in page and "Futures AI paper wallet" in page
     assert "50.5" in page  # a 2x long from 100: liquidation about 100 x (1 - 1/2 + 0.005)
     # Bybit's leverage choices for paper futures, 1x-100x
