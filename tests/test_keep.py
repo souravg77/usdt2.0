@@ -62,7 +62,7 @@ def test_indicators_come_from_the_rules():
     assert indicators(entry("a", name="trend_pullback")) == {"ema", "adx", "rsi", "sr", "atr"}  # market structure
     assert indicators(entry("b", name="supertrend_trend")) >= {"st"}
     assert "ema" not in indicators(entry("f", name="fibonacci_reaction"))  # "smaller" isn't SMA
-    assert indicators(entry("d", name="range_support_bounce")) >= {"sr", "adx"}  # its channel
+    assert indicators(entry("d", name="range_support_bounce")) >= {"dc", "adx"}  # its Donchian channel
     assert {"fib"} <= indicators(entry("f", name="fibonacci_reaction"))
     assert {"vp"} <= indicators(entry("v", name="value_area_reversion"))
     assert {"kc"} <= indicators(entry("k", name="keltner_breakout"))
@@ -87,8 +87,8 @@ def test_indicators_used_counts_paper_strategies(tmp_path):
     reg = make(tmp_path, entry("a", name="trend_pullback"), entry("b", name="buy_the_dip"),
                entry("c", name="supertrend_trend", status="retired"))
     used = indicators_used(reg)
-    assert used["ema"] == 2 and used["rsi"] == 2 and used["adx"] == 1 and "st" not in used
-    assert list(used)[:3] == ["atr", "ema", "rsi"]  # most used first, then by name
+    assert used["ema"] == 1 and used["sma"] == 1 and used["rsi"] == 2 and used["adx"] == 1 and "st" not in used
+    assert list(used)[:3] == ["atr", "rsi", "adx"]  # most used first, then by name
 
 
 def test_indicators_used_follows_what_each_engine_trades(tmp_path):

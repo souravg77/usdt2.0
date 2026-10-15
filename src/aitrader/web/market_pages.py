@@ -176,6 +176,8 @@ def add_market_routes(app, *, settings, page, guard, exchange: str = EXCHANGE, c
 # key, label, colour, panel (drawn below the price) or overlay, on by default
 STUDIES = [
     ("ema", "EMA 20/50/200", "#f5c542", False, True),
+    ("sma", "SMA 20/50/200", "#fde68a", False, False),
+    ("dc", "Donchian 20", "#60a5fa", False, False),
     ("bb", "Bollinger", "#94a3b8", False, False),
     ("vwap", "VWAP", "#f472b6", False, False),
     ("st", "Supertrend", "#22c55e", False, True),
@@ -195,6 +197,11 @@ STUDIES = [
     ("atr", "ATR", "#f97316", True, False),
     ("cci", "CCI", "#22d3ee", True, False),
     ("willr", "Williams %R", "#e879f9", True, False),
+    ("fi", "Force index", "#34d399", True, False),
+    ("obv", "OBV", "#a3e635", True, False),
+    ("mfi", "MFI", "#fbbf24", True, False),
+    ("cmf", "CMF", "#f87171", True, False),
+    ("roc", "ROC 10", "#93c5fd", True, False),
 ]
 
 

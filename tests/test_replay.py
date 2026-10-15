@@ -138,7 +138,7 @@ def test_replay_page_offers_the_best_strategies_with_their_indicators(client, mo
     assert 'id="legend"' in page and 'id="read"' in page
     r = c.get("/api/replay?symbol=BTC/USDT&tf=1h&month=2025-03&strategy=top:10").json()
     assert r["top"] == 10 and {s["id"] for s in r["strategies"]} == {"up", "rsi"}
-    assert r["indicators"] == {"ema": 1, "rsi": 1}  # up_bar uses sma(20), drawn with the EMAs
+    assert r["indicators"] == {"sma": 1, "rsi": 1}  # up_bar uses sma(20), drawn as SMA
     assert [s["indicators"] for s in r["strategies"] if s["id"] == "rsi"] == [["rsi"]]
     st = r["studies"]
     n = len(r["candles"])

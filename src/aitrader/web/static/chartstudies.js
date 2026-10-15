@@ -1,7 +1,7 @@
 // Indicator drawing shared by the Markets chart (market.js) and the Replay chart (replay.js):
 // the overlays on the price (EMA, Bollinger, VWAP, Supertrend, Ichimoku, SAR, Keltner, support/
 // resistance, Fibonacci, volume profile, candle patterns), the panels below it (volume, RSI, MACD,
-// ADX, Stoch RSI, ATR, CCI, Williams %R), the legend values, and a plain-words read of the market
+// ADX, Stoch RSI, ATR, CCI, Williams %R, Force index, OBV, MFI, CMF, ROC; overlays also SMA and Donchian), the legend values, and a plain-words read of the market
 // at one candle. The values come from the server (web/studies.py, the strategies' own formulas).
 // Drawing only: nothing here trades.
 (function () {
@@ -9,10 +9,12 @@
   var COLORS = { ema20: "#f5c542", ema50: "#4cc3ff", ema200: "#c084fc", bb: "#94a3b8", vwap: "#f472b6",
                  tenkan: "#38bdf8", kijun: "#fb923c", psar: "#fb923c", rsi: "#c084fc", macd: "#4cc3ff",
                  signal: "#fb923c", adx: "#f5c542", k: "#2dd4bf", d: "#f472b6", sr: "#a3a3a3",
-                 kc: "#a78bfa", fib: "#eab308", vp: "#64748b", atr: "#f97316", cci: "#22d3ee", willr: "#e879f9" };
-  var PANELS = ["vol", "rsi", "macd", "adx", "stoch", "atr", "cci", "willr"];
-  var OVERLAYS = ["ema", "bb", "vwap", "st", "ich", "psar", "sr", "kc", "fib", "vp", "pat"];
-  var PATTERN_NAMES = { E: "engulfing", H: "hammer", D: "doji", I: "inside bar" };
+                 kc: "#a78bfa", fib: "#eab308", vp: "#64748b", atr: "#f97316", cci: "#22d3ee", willr: "#e879f9",
+                 sma20: "#fde68a", sma50: "#93c5fd", sma200: "#f9a8d4", dc: "#60a5fa", fi: "#34d399", obv: "#a3e635",
+                 mfi: "#fbbf24", cmf: "#f87171", roc: "#93c5fd" };
+  var PANELS = ["vol", "rsi", "macd", "adx", "stoch", "atr", "cci", "willr", "fi", "obv", "mfi", "cmf", "roc"];
+  var OVERLAYS = ["ema", "sma", "dc", "bb", "vwap", "st", "ich", "psar", "sr", "kc", "fib", "vp", "pat"];
+  var PATTERN_NAMES = { E: "engulfing", H: "hammer", D: "doji", I: "inside bar", N: "NR7 (narrowest range of 7)" };
   var PANEL_H = 84;
 
   function css(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
@@ -62,6 +64,8 @@
   function overlayKeys(on) {
     var k = [];
     if (on.ema) k.push("ema20", "ema50", "ema200");
+    if (on.sma) k.push("sma20", "sma50", "sma200");
+    if (on.dc) k.push("dc_upper", "dc_lower");
     if (on.bb) k.push("bb_upper", "bb_lower");
     if (on.vwap) k.push("vwap");
     if (on.st) k.push("supertrend");
@@ -250,6 +254,11 @@
         polyline(ctx, n, ov("ema20"), y, step, COLORS.ema20); polyline(ctx, n, ov("ema50"), y, step, COLORS.ema50);
         polyline(ctx, n, ov("ema200"), y, step, COLORS.ema200, 2);
       }
+      if (on.sma) {
+        polyline(ctx, n, ov("sma20"), y, step, COLORS.sma20, 1.5, [2, 2]); polyline(ctx, n, ov("sma50"), y, step, COLORS.sma50, 1.5, [2, 2]);
+        polyline(ctx, n, ov("sma200"), y, step, COLORS.sma200, 2, [2, 2]);
+      }
+      if (on.dc) { polyline(ctx, n, ov("dc_upper"), y, step, COLORS.dc, 1); polyline(ctx, n, ov("dc_lower"), y, step, COLORS.dc, 1); }
       if (on.vwap) polyline(ctx, n, ov("vwap"), y, step, COLORS.vwap, 1.5, [6, 3]);
       if (on.ich) { polyline(ctx, n, ov("tenkan"), y, step, COLORS.tenkan, 1); polyline(ctx, n, ov("kijun"), y, step, COLORS.kijun, 1); }
       if (on.st) {  // green under price in an uptrend, red above it in a downtrend
@@ -301,8 +310,9 @@
       var pTop = o.top + k * PANEL_H + 6, pH = PANEL_H - 12;
       ctx.strokeStyle = T.line; ctx.globalAlpha = 0.8;
       ctx.beginPath(); ctx.moveTo(0, pTop - 3.5); ctx.lineTo(o.w, pTop - 3.5); ctx.stroke(); ctx.globalAlpha = 1;
-      var fixed = { rsi: [0, 100, [30, 70]], adx: [0, 60, [25]], stoch: [0, 100, [20, 80]], willr: [-100, 0, [-80, -20]] }[key];
-      var guides = fixed ? fixed[2] : key === "cci" ? [-100, 100] : [];
+      var fixed = { rsi: [0, 100, [30, 70]], adx: [0, 60, [25]], stoch: [0, 100, [20, 80]], willr: [-100, 0, [-80, -20]],
+                    mfi: [0, 100, [20, 80]] }[key];
+      var guides = fixed ? fixed[2] : key === "cci" ? [-100, 100] : ["fi", "cmf", "roc"].indexOf(key) >= 0 ? [0] : [];
       var series = [], pmin = Infinity, pmax = -Infinity;
       var pv = function (name) { return function (i) { return o.get ? o.get("panels", name, i) : null; }; };
       if (key === "vol") series = [{ f: function (i) { return o.bars[i][5] || 0; }, bars: true }];
@@ -311,6 +321,11 @@
       if (key === "atr") series = [{ f: pv("atr"), c: COLORS.atr, name: "ATR" }];
       if (key === "cci") series = [{ f: pv("cci"), c: COLORS.cci, name: "CCI" }];
       if (key === "willr") series = [{ f: pv("willr"), c: COLORS.willr, name: "%R" }];
+      if (key === "fi") series = [{ f: pv("fi"), c: COLORS.fi, name: "Force" }];
+      if (key === "obv") series = [{ f: pv("obv"), c: COLORS.obv, name: "OBV" }];
+      if (key === "mfi") series = [{ f: pv("mfi"), c: COLORS.mfi, name: "MFI" }];
+      if (key === "cmf") series = [{ f: pv("cmf"), c: COLORS.cmf, name: "CMF" }];
+      if (key === "roc") series = [{ f: pv("roc"), c: COLORS.roc, name: "ROC %" }];
       if (key === "stoch") series = [{ f: pv("stoch_k"), c: COLORS.k, name: "K" }, { f: pv("stoch_d"), c: COLORS.d, name: "D" }];
       if (key === "macd") series = [{ f: pv("macd_hist"), hist: true, name: "hist" }, { f: pv("macd"), c: COLORS.macd, name: "MACD" },
                                     { f: pv("macd_signal"), c: COLORS.signal, name: "signal" }];
@@ -327,6 +342,7 @@
         if (key === "vol") pmin = 0;
         if (key === "macd") { var m = Math.max(Math.abs(pmin), Math.abs(pmax)); pmin = -m; pmax = m; }
         if (key === "cci") { pmin = Math.min(pmin, -150); pmax = Math.max(pmax, 150); }
+        if (["fi", "cmf", "roc"].indexOf(key) >= 0) { var z = Math.max(Math.abs(pmin), Math.abs(pmax)); pmin = -z; pmax = z; }
       }
       if (!isFinite(pmin) || !isFinite(pmax) || pmax === pmin) { pmin = 0; pmax = 1; }
       var py = function (val) { return pTop + (pmax - val) / (pmax - pmin) * pH; };
@@ -352,12 +368,14 @@
       });
       ctx.fillStyle = T.muted; ctx.textAlign = "left";
       ctx.fillText({ vol: "Volume", rsi: "RSI 14", macd: "MACD 12/26/9", adx: "ADX 14", stoch: "Stoch RSI",
-                     atr: "ATR 14", cci: "CCI 20", willr: "Williams %R 14" }[key], 4, pTop + 11);
+                     atr: "ATR 14", cci: "CCI 20", willr: "Williams %R 14", fi: "Force index 13", obv: "OBV",
+                     mfi: "MFI 14", cmf: "CMF 20", roc: "ROC 10 (%)" }[key], 4, pTop + 11);
       series.forEach(function (sr) {
         var q = sr.f(o.hIdx);
         if (q === null || q === undefined || sr.bars) return;
         legend.push('<span style="color:' + (sr.c || (q >= 0 ? T.up : T.down)) + '">' + (sr.name === "hist" ? "MACD hist" : sr.name) +
-                    " <b>" + (key === "macd" ? Number(q.toPrecision(4)) : key === "atr" ? o.fmt(q) : q.toFixed(1)) + "</b></span>");
+                    " <b>" + (key === "macd" || key === "fi" || key === "obv" ? Number(q.toPrecision(4)) : key === "atr" ? o.fmt(q) :
+                     key === "cmf" ? q.toFixed(3) : q.toFixed(1)) + "</b></span>");
       });
     });
     return legend;
@@ -369,12 +387,14 @@
     if (!o.get) return out;
     var named = { ema20: "EMA20", ema50: "EMA50", ema200: "EMA200", vwap: "VWAP", supertrend: "Supertrend",
                   tenkan: "Tenkan", kijun: "Kijun", psar: "SAR", bb_upper: "BB up", bb_lower: "BB low",
-                  kc_upper: "KC up", kc_lower: "KC low" };
+                  kc_upper: "KC up", kc_lower: "KC low", sma20: "SMA20", sma50: "SMA50", sma200: "SMA200",
+                  dc_upper: "DC up", dc_lower: "DC low" };
     overlayKeys(o.on).forEach(function (k) {
       var q = o.get("overlays", k, i);
       if (q === null || q === undefined || !named[k]) return;
       var col = COLORS[k] || (k === "supertrend" ? (o.get("overlays", "supertrend_dir", i) === 1 ? T.up : T.down) :
-                              k.indexOf("bb") === 0 ? COLORS.bb : k.indexOf("kc") === 0 ? COLORS.kc : COLORS.psar);
+                              k.indexOf("bb") === 0 ? COLORS.bb : k.indexOf("kc") === 0 ? COLORS.kc :
+                              k.indexOf("dc") === 0 ? COLORS.dc : COLORS.psar);
       out.push('<span style="color:' + col + '">' + named[k] + " <b>" + o.fmt(q) + "</b></span>");
     });
     var hp = o.on.pat ? o.get("patterns", null, i) : null;
