@@ -10,7 +10,8 @@ of the next, so the quarter rule asks for steadiness, not a single lucky run.
 
 What a pick changes, in paper trading and on the Replay page:
 
-* each kept strategy gets a copy that trades that timeframe only (id ``<id>@4h``, status paper);
+* each kept strategy gets a copy that trades that timeframe only, named "WIN 4h: <name>" (id
+  ``win4h-<id>``, status paper), so it stands out on every page and in the trade log;
 * every other strategy stops trading that timeframe (its other timeframes carry on).
 
 The backtest report and keep-top still test everything, so a later pick can change its mind.
@@ -129,8 +130,12 @@ def pick_copy(entry: Entry, timeframe: str) -> Entry:
     else:
         spec["timeframes"] = [timeframe]
     spec["pick"], spec["pick_of"] = timeframe, entry.id
-    return Entry(id=f"{entry.id}@{timeframe}", kind=entry.kind, name=entry.name, spec=spec,
-                 source=entry.source)
+    return Entry(id=copy_id(entry.id, timeframe), kind=entry.kind, name=f"WIN {timeframe}: {entry.name}",
+                 spec=spec, source=entry.source)
+
+
+def copy_id(entry_id: str, timeframe: str) -> str:
+    return f"win{timeframe}-{entry_id}"
 
 
 def apply(reg: Registry, entries: list[Entry], timeframe: str, results: list[dict], picks_file: str,
@@ -139,7 +144,7 @@ def apply(reg: Registry, entries: list[Entry], timeframe: str, results: list[dic
     longer win, and save the pick (``info`` is stored with it: pairs, period...)."""
     by_id = {e.id: e for e in entries}
     keep = [r for r in winners(results, min_trades) if r["id"] in by_id]
-    keep_ids = {f"{r['id']}@{timeframe}" for r in keep}
+    keep_ids = {copy_id(r["id"], timeframe) for r in keep}
     added, back, dropped = [], [], []
     for r in keep:
         c = pick_copy(by_id[r["id"]], timeframe)
@@ -153,7 +158,7 @@ def apply(reg: Registry, entries: list[Entry], timeframe: str, results: list[dic
             back.append(c.id)
     for e in reg.entries.values():
         if picked_for(e) == timeframe and e.id not in keep_ids and e.status == "paper":
-            e.set_status("retired", f"no longer a winner on {timeframe} (new pick)")
+            e.set_status("retired", f"not kept by the new {timeframe} pick")
             dropped.append(e.id)
     reg.save()
     picks = load(picks_file)

@@ -50,8 +50,9 @@ def test_a_pick_copies_the_winners_and_takes_the_timeframe_from_the_rest(tmp_pat
     path = picks.picks_path(reg.path)
     out = picks.apply(reg, [UP, other, short], "4h", [result("other"), result(short.id), result("up", total=-2)],
                       path, info={"pairs": ["BTC/USDT"]})
-    assert out["picked"] == ["other", short.id] and out["added"] == ["other@4h", f"{short.id}@4h"]
-    copy, short_copy = reg.entries["other@4h"], reg.entries[f"{short.id}@4h"]
+    assert out["picked"] == ["other", short.id] and out["added"] == ["win4h-other", f"win4h-{short.id}"]
+    copy, short_copy = reg.entries["win4h-other"], reg.entries[f"win4h-{short.id}"]
+    assert copy.name == "WIN 4h: other" and short_copy.name == f"WIN 4h: {short.name}"
     assert copy.status == "paper" and make_strategy(copy).spec.timeframes == ("4h",)
     assert make_strategy(short_copy).spec.timeframes == ("4h",)
     tf_picks = picks.load(path)
@@ -65,9 +66,9 @@ def test_a_pick_copies_the_winners_and_takes_the_timeframe_from_the_rest(tmp_pat
     assert copy.status == "paper"
     # a new pick without "other" stops its copy; undo stops the rest
     again = picks.apply(Registry(reg.path), [UP, other, short], "4h", [result(short.id)], path)
-    assert again["dropped"] == ["other@4h"]
+    assert again["dropped"] == ["win4h-other"]
     reg = Registry(reg.path)
-    assert picks.clear(reg, "4h", path) == [f"{short.id}@4h"]
+    assert picks.clear(reg, "4h", path) == [f"win4h-{short.id}"]
     assert picks.load(path) == {}
 
 
@@ -78,7 +79,8 @@ def test_replay_on_a_picked_timeframe_shows_only_the_kept_strategies(tmp_path):
     assert res["strategies"] == [] and res["trades"] == []
     kept = picks.pick_copy(UP, "1h")
     res = replay([UP, kept], store, "bybit", "BTC/USDT", "1h", START, END, tf_picks=tf_picks)
-    assert [s["id"] for s in res["strategies"]] == ["up@1h"] and res["trades"]
+    assert [s["id"] for s in res["strategies"]] == ["win1h-up"] and res["trades"]
+    assert res["strategies"][0]["name"] == "WIN 1h: up_bar"
     store.close()
 
 
