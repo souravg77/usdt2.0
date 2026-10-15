@@ -163,15 +163,19 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
         ids = on_tf + ranked + [i for i, _label in ranked_strategies()] + [e.id for e in entries]
         return list(dict.fromkeys(ids)), len(on_tf)
 
-    picks_file = picks.picks_path(registry_path)
+    def picks_file() -> str:
+        """The workspace engine's own picks (Spot AI's or Futures AI's)."""
+        return picks.picks_path(registry_path, "futures" if futures_mode() else "spot")
 
     def compute(symbol: str, tf: str, start: datetime, months: int, strategy: str) -> dict:
-        tf_picks = picks.load(picks_file)
+        tf_picks = picks.load(picks_file())
         key = (symbol, tf, start, months, strategy, (tf_picks.get(tf) or {}).get("at"), futures_mode())
         if key in cache:
             cache.move_to_end(key)
             return cache[key]
-        entries = known_entries(Registry(registry_path).entries)
+        mkt = "futures" if futures_mode() else "spot"
+        # the workspace's strategies: no WIN copies made by the other engine's picks
+        entries = [e for e in known_entries(Registry(registry_path).entries) if picks.trades_now(e, False, mkt)]
         if not futures_mode():  # Spot AI never shorts: its replay leaves the short twins out
             entries = [e for e in entries if e.kind != "short"]
         store = CandleStore(settings.db_path)
@@ -291,9 +295,12 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
             return RedirectResponse(f"/replay?tf={_q(tf)}&error=" + _q("A pick is already running; see Recent "
                                                                        "jobs on the Overview page."), status_code=303)
         if undo:
-            jobs.submit(f"Undo the {tf} pick", [["learn", "pick-timeframe", tf, "--clear"]],
+            where = "Futures AI" if futures_mode() else "Spot AI"
+            jobs.submit(f"Undo the {where} {tf} pick",
+                        [["learn", "pick-timeframe", tf, "--clear", "--market",
+                          "futures" if futures_mode() else "spot"]],
                         meta={"kind": "pick", "by": user})
-            msg = f"Undoing the {tf} pick: every strategy may trade {tf} again."
+            msg = f"Undoing the {where} {tf} pick: every strategy may trade {tf} on {where} again."
         else:
             since = (datetime.now(timezone.utc) - timedelta(days=round(PICK_YEARS * 365.25))).strftime("%Y-%m-%d")
             # the workspace's own pairs: in the Futures view only Futures AI's (its top gainers)
@@ -301,17 +308,19 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
             where = "Futures AI" if futures_mode() else "Spot AI"
             jobs.submit(f"Keep only the {tf} winners on {where} pairs",
                         [["download", "--since", since, "--exchange", exchange, "--timeframe", tf, *sym_args],
-                         ["learn", *sym_args, "pick-timeframe", tf, "--years", str(PICK_YEARS)]],
+                         ["learn", *sym_args, "pick-timeframe", tf, "--years", str(PICK_YEARS),
+                          "--market", "futures" if futures_mode() else "spot"]],
                         meta={"kind": "pick", "by": user, "market": "futures" if futures_mode() else "spot"})
             msg = (f"Testing every {tf} strategy on {PICK_YEARS:g} years of {tf} prices for the {len(pairs())} "
                    f"{where} pairs. "
-                   f"The steady winners keep trading {tf}; the rest stop trading it. This page shows the "
+                   f"The steady winners keep trading {tf} on {where} only, as its new WIN strategies; the rest "
+                   f"stop trading {tf} there, and the other engine is not changed. This page shows the "
                    "list when it's done (reload it in a few minutes).")
         cache.clear()
         return RedirectResponse(f"/replay?tf={_q(tf)}&msg=" + _q(msg), status_code=303)
 
     def pick_card(tf: str, token: str) -> str:
-        p = picks.load(picks_file)
+        p = picks.load(picks_file())
         cur = p.get(tf)
         others = ", ".join(t for t in REPLAY_TIMEFRAMES if t in p and t != tf)
         opts = "".join(f'<option value="{t}"{" selected" if t == tf else ""}>{t}</option>' for t in REPLAY_TIMEFRAMES)
@@ -323,7 +332,8 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
                'pairs, in the Spot view the Spot AI pairs), after fees. A strategy is kept when its '
                f'total is above 0R over at least {picks.MIN_TRADES} trades and it made money in at least as '
                'many 3-month quarters as it lost in, so one lucky quarter is not enough. Kept strategies '
-               'paper trade that timeframe only; the others stop trading it (their other timeframes carry on).</p>'
+               'become this engine\'s WIN strategies on that timeframe; the others stop trading it on this engine '
+               '(their other timeframes carry on). Each engine has its own picks.</p>'
                f'<form method="post" action="/replay/pick" class="row">{_csrf(auth, token)}'
                f'<label>Timeframe <select name="tf">{opts}</select></label>'
                '<button>Keep only the winners</button></form>')

@@ -1505,7 +1505,7 @@ def _trading_count(paths: Paths, ws: str = "spot") -> int:
     try:
         only = picks.winners_only(paths.registry, ws)
         return sum(1 for e in Registry(paths.registry).entries.values()
-                   if e.status == "paper" and picks.trades_now(e, only))
+                   if e.status == "paper" and picks.trades_now(e, only, ws))
     except Exception:
         return 0
 
@@ -1520,7 +1520,8 @@ def _paper_switch_card(c: dict, paths: Paths, events: list[dict], jobs: list[dic
     other = "Spot AI" if ws == "futures" else "Futures AI"
     in_paper = _trading_count(paths, ws)
     try:
-        wins = sum(1 for e in Registry(paths.registry).entries.values() if e.status == "paper" and picks.picked_for(e))
+        wins = sum(1 for e in Registry(paths.registry).entries.values()
+                   if e.status == "paper" and picks.pick_market(e) == ws)
     except Exception:
         wins = 0
     only = picks.winners_only(paths.registry, ws)
@@ -1676,8 +1677,9 @@ def _winners_only_form(only: bool, wins: int, csrf: str, ws: str = "spot") -> st
         head = (f'<p><b>{name} WIN strategies only: <span class="muted">OFF</span></b>. The best strategies and the '
                 f'{wins} WIN strategies all open {name} trades.')
         btn = hidden + '<input type="hidden" name="on" value="1"><button>Trade only the WIN strategies</button>'
-    return (head + '</p><p class="small muted">WIN strategies are the ones kept by Keep only the winners on the Replay '
-            f'page. When this is on, the best strategies above stop opening {name} trades; their open trades still '
+    return (head + f'</p><p class="small muted">{name}\'s WIN strategies are the ones kept by Keep only the winners on '
+            f'the Replay page while it shows the {name} workspace (the other engine\'s picks never trade here). '
+            'When this is on, the best strategies above stop opening {name} trades; their open trades still '
             'close normally. The other engine has its own switch on its workspace.</p>'
             f'<form method="post" action="/trading/paper/winners-only" class="row">{csrf}{btn}</form>')
 

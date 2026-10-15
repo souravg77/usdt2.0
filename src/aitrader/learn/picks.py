@@ -17,6 +17,11 @@ What a pick changes, in paper trading and on the Replay page:
 The backtest report and keep-top still test everything, so a later pick can change its mind.
 ``learn pick-timeframe 4h --clear`` undoes it. The picks are a JSON file next to the registry.
 
+Each engine has its own picks (``--market spot`` or ``futures``): a Futures pick tests the Futures
+AI pairs with perpetual costs, saves to ``timeframe_picks_futures.json`` and makes "WIN 4h Futures"
+copies (id ``fwin4h-<id>``) that only Futures AI trades; Spot AI's picks and copies are the
+original ones and only Spot AI trades them.
+
 "Winners only" (a switch on the Trading page, ``winners_only.json`` next to the registry, one per
 engine): that engine's paper trading then opens trades for the WIN copies only, so the best-N
 strategies of keep-top stop opening their own there. Their open trades still close normally, and switching it off brings them back.
@@ -40,8 +45,9 @@ MIN_TRADES = 10
 PICKED = "kept for its timeframe pick"
 
 
-def picks_path(registry_path: str) -> str:
-    return os.path.join(os.path.dirname(os.path.abspath(registry_path)), "timeframe_picks.json")
+def picks_path(registry_path: str, market: str = "spot") -> str:
+    name = "timeframe_picks_futures.json" if market == "futures" else "timeframe_picks.json"
+    return os.path.join(os.path.dirname(os.path.abspath(registry_path)), name)
 
 
 def load(path: str) -> dict:
@@ -95,9 +101,20 @@ def set_winners_only(registry_path: str, on: bool, by: str = "", market: str | N
     os.replace(tmp, path)
 
 
-def trades_now(entry: Entry, only_winners: bool) -> bool:
-    """Whether paper trading opens trades for ``entry`` (status aside)."""
+def trades_now(entry: Entry, only_winners: bool, market: str | None = None) -> bool:
+    """Whether ``market``'s engine opens paper trades for ``entry`` (status aside). A pick copy
+    trades only on the engine whose pick made it."""
+    if market and picked_for(entry) and pick_market(entry) != market:
+        return False
     return not only_winners or bool(picked_for(entry))
+
+
+def pick_market(entry: Entry) -> str:
+    """The engine whose pick made this copy: "futures", or "spot" (every copy from before the
+    engines had their own picks); "" for a strategy that isn't a pick copy."""
+    if not picked_for(entry):
+        return ""
+    return "futures" if (entry.spec or {}).get("pick_market") == "futures" else "spot"
 
 
 def picked_for(entry: Entry) -> str:
@@ -168,8 +185,8 @@ def winners(results: list[dict], min_trades: int = MIN_TRADES) -> list[dict]:
             and r["quarters_up"] >= r["quarters_down"]]
 
 
-def pick_copy(entry: Entry, timeframe: str) -> Entry:
-    """A copy of ``entry`` that trades ``timeframe`` only."""
+def pick_copy(entry: Entry, timeframe: str, market: str = "spot") -> Entry:
+    """A copy of ``entry`` that trades ``timeframe`` only, on ``market``'s engine."""
     spec = copy.deepcopy(entry.spec or {})
     if entry.kind == "short":
         base = dict(spec.get("base_spec") or {})
@@ -180,24 +197,28 @@ def pick_copy(entry: Entry, timeframe: str) -> Entry:
         if entry.kind == "builtin":  # its new name no longer names the hand-coded strategy
             spec["builtin"] = entry.name
     spec["pick"], spec["pick_of"] = timeframe, entry.id
-    return Entry(id=copy_id(entry.id, timeframe), kind=entry.kind, name=f"WIN {timeframe}: {entry.name}",
+    if market == "futures":
+        spec["pick_market"] = "futures"
+    label = f"WIN {timeframe} Futures" if market == "futures" else f"WIN {timeframe}"
+    return Entry(id=copy_id(entry.id, timeframe, market), kind=entry.kind, name=f"{label}: {entry.name}",
                  spec=spec, source=entry.source)
 
 
-def copy_id(entry_id: str, timeframe: str) -> str:
-    return f"win{timeframe}-{entry_id}"
+def copy_id(entry_id: str, timeframe: str, market: str = "spot") -> str:
+    return f"{'f' if market == 'futures' else ''}win{timeframe}-{entry_id}"
 
 
 def apply(reg: Registry, entries: list[Entry], timeframe: str, results: list[dict], picks_file: str,
-          info: dict | None = None, min_trades: int = MIN_TRADES) -> dict:
-    """Paper-trade a ``timeframe`` copy of each winner, retire the copies of earlier picks that no
-    longer win, and save the pick (``info`` is stored with it: pairs, period...)."""
+          info: dict | None = None, min_trades: int = MIN_TRADES, market: str = "spot") -> dict:
+    """Paper-trade a ``timeframe`` copy of each winner on ``market``'s engine, retire that engine's
+    copies of earlier picks that no longer win, and save the pick (``info`` is stored with it:
+    pairs, period...)."""
     by_id = {e.id: e for e in entries}
     keep = [r for r in winners(results, min_trades) if r["id"] in by_id]
-    keep_ids = {copy_id(r["id"], timeframe) for r in keep}
+    keep_ids = {copy_id(r["id"], timeframe, market) for r in keep}
     added, back, dropped = [], [], []
     for r in keep:
-        c = pick_copy(by_id[r["id"]], timeframe)
+        c = pick_copy(by_id[r["id"]], timeframe, market)
         if reg.add(c):
             c = reg.entries[c.id]
             c.set_status("paper", f"{PICKED} {timeframe}: {r['total_r']:+.2f}R over {r['trades']} trades, "
@@ -207,23 +228,25 @@ def apply(reg: Registry, entries: list[Entry], timeframe: str, results: list[dic
             reg.entries[c.id].set_status("paper", f"{PICKED} {timeframe} again")
             back.append(c.id)
     for e in reg.entries.values():
-        if picked_for(e) == timeframe and e.id not in keep_ids and e.status == "paper":
+        if (picked_for(e) == timeframe and pick_market(e) == market and e.id not in keep_ids
+                and e.status == "paper"):
             e.set_status("retired", f"not kept by the new {timeframe} pick")
             dropped.append(e.id)
     reg.save()
     picks = load(picks_file)
-    picks[timeframe] = {"at": int(time.time() * 1000), "min_trades": min_trades,
+    picks[timeframe] = {"at": int(time.time() * 1000), "min_trades": min_trades, "market": market,
                         "picked": [r["id"] for r in keep], "results": results, **(info or {})}
     save(picks_file, picks)
     return {"picked": [r["id"] for r in keep], "added": added, "returned": back, "dropped": dropped,
             "tested": len(results)}
 
 
-def clear(reg: Registry, timeframe: str, picks_file: str) -> list[str]:
-    """Undo a pick: every strategy trades ``timeframe`` again and the pick copies stop."""
+def clear(reg: Registry, timeframe: str, picks_file: str, market: str = "spot") -> list[str]:
+    """Undo ``market``'s pick: every strategy trades ``timeframe`` again on that engine and its
+    pick copies stop."""
     gone = []
     for e in reg.entries.values():
-        if picked_for(e) == timeframe and e.status == "paper":
+        if picked_for(e) == timeframe and pick_market(e) == market and e.status == "paper":
             e.set_status("retired", f"the {timeframe} pick was undone")
             gone.append(e.id)
     reg.save()

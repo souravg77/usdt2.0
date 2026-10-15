@@ -141,7 +141,8 @@ class PaperTrader:
         regimes: dict = {}  # (exchange, symbol, timeframe) -> regime of the newest closed bar
         symbols = self._symbols()
         per_market = {m: set(symbols if self.market_symbols is None else self._symbols(m)) for m in wallet.MARKETS}
-        tf_picks = picks.load(picks.picks_path(self.registry_path))  # timeframes kept for their winners
+        # each engine's timeframe picks: on a picked timeframe only its WIN copies trade there
+        tf_picks = {m: picks.load(picks.picks_path(self.registry_path, m)) for m in wallet.MARKETS}
         engines = wallet.engines(self.engines_path)  # the Trading page's Spot AI / Futures AI switches
         # each engine's "WIN strategies only" switch and its use of the AI filter and the teacher
         only_winners = {m: picks.winners_only(self.registry_path, m) for m in wallet.MARKETS}
@@ -149,7 +150,7 @@ class PaperTrader:
         built, broken, checks = 0, 0, 0  # what this pass looked at, for the dashboard
         for entry in reg.with_status("paper"):
             benched = self.state.get("benched") or {}
-            trades = {m: picks.trades_now(entry, only_winners[m]) and entry.id not in (benched.get(m) or {})
+            trades = {m: picks.trades_now(entry, only_winners[m], m) and entry.id not in (benched.get(m) or {})
                       for m in wallet.MARKETS}
             if not any(trades.values()):
                 continue
@@ -162,8 +163,10 @@ class PaperTrader:
             built += 1
             for ex in self.exchanges:
                 for sym in symbols:
-                    on = {m: engines[m] and trades[m] and sym in per_market[m] for m in wallet.MARKETS}
-                    for tf in picks.allowed(entry, strat.spec.timeframes, tf_picks):
+                    live = {m: engines[m] and trades[m] and sym in per_market[m] for m in wallet.MARKETS}
+                    tfs = {m: picks.allowed(entry, strat.spec.timeframes, tf_picks[m]) for m in wallet.MARKETS}
+                    for tf in [t for t in strat.spec.timeframes if any(t in tfs[m] for m in wallet.MARKETS)]:
+                        on = {m: live[m] and tf in tfs[m] for m in wallet.MARKETS}
                         key = f"{entry.id}|{ex}|{sym}|{tf}"
                         # a long takes the plain key on Spot and key|futures on Futures; a short
                         # (Futures only) takes the plain key

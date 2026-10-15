@@ -999,3 +999,35 @@ def test_a_missing_entry_candle_doesnt_keep_a_paper_trade_open_forever(tmp_path,
     assert not seen  # waits a little: the collector may still fill it in
     trader.tick(now_ms=sig_ts + 5 * H)
     assert seen and seen[0] == sig_ts + H  # entered on the next candle
+
+
+def test_each_engine_trades_only_the_winners_its_own_view_picked(tmp_path):
+    """Shawn: Futures AI trades the winners picked in the Futures view; the old WIN copies stay on Spot."""
+    from aitrader.learn import picks
+
+    df = synthetic(n=700)
+    store = CandleStore(str(tmp_path / "c.db"))
+    fill_store(store, df)
+    reg_path = str(tmp_path / "reg.json")
+    reg = Registry(reg_path)
+    up = Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR), status="paper")
+    old, new = picks.pick_copy(up, "1h"), picks.pick_copy(up, "1h", "futures")
+    assert (old.id, new.id) == ("win1h-up", "fwin1h-up") and new.name == "WIN 1h Futures: up_bar"
+    assert (picks.pick_market(old), picks.pick_market(new), picks.pick_market(up)) == ("spot", "futures", "")
+    for e in (up, old, new):
+        e.status = "paper"
+        reg.add(e)
+    reg.save()
+    for m, kept in (("spot", ["up"]), ("futures", ["up"])):
+        with open(picks.picks_path(reg_path, m), "w") as fh:
+            json.dump({"1h": {"picked": kept}}, fh)
+    state = str(tmp_path / "s.json")
+    picks.set_winners_only(reg_path, True, market="futures")
+    trader = PaperTrader(store, reg_path, ["bybit"], ["BTC/USDT"], state_path=state)
+    opened = []
+    for i in range(600, 660):
+        opened += trader.tick(now_ms=int(df.ts.iloc[i]) + H)["opened"]
+    spot = {k.split("|")[0] for k in opened if not k.endswith("|futures")}
+    fut = {k.split("|")[0] for k in opened if k.endswith("|futures")}
+    assert spot == {"win1h-up"} and fut == {"fwin1h-up"}
+    store.close()
