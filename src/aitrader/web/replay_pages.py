@@ -39,6 +39,7 @@ from .app import _csrf, _e, _q
 from .market_pages import STATIC, _study_chips
 
 REPLAY_TIMEFRAMES = ["5m", "15m", "30m", "1h", "4h", "1d"]
+PICK_ALL_ORDER = ["1d", "4h", "1h", "30m", "15m", "5m"]  # "every timeframe": the fewest candles first
 SPEEDS = [1, 2, 5, 10, 50, 200]
 CACHE_SIZE = 6
 TOPS = [10, 20, 30]
@@ -288,7 +289,7 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
             return redirect
         if not auth.check_csrf(token, csrf):
             return PlainTextResponse("bad form token; reload the page", status_code=403)
-        if tf not in REPLAY_TIMEFRAMES:
+        if tf not in REPLAY_TIMEFRAMES and not (tf == "all" and not undo):
             return RedirectResponse("/replay?error=" + _q("pick a timeframe"), status_code=303)
         if any(j["status"] in ("queued", "running") and j.get("meta", {}).get("kind") == "pick"
                for j in jobs.list()):
@@ -301,6 +302,24 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
                           "futures" if futures_mode() else "spot"]],
                         meta={"kind": "pick", "by": user})
             msg = f"Undoing the {where} {tf} pick: every strategy may trade {tf} on {where} again."
+        elif tf == "all":
+            since = (datetime.now(timezone.utc) - timedelta(days=round(PICK_YEARS * 365.25))).strftime("%Y-%m-%d")
+            sym_args = [a for sym in pairs() for a in ("--symbol", sym)]
+            where, mkt = ("Futures AI", "futures") if futures_mode() else ("Spot AI", "spot")
+            if not sym_args:
+                return RedirectResponse("/replay?error=" + _q(f"{where} has no pairs to test yet"), status_code=303)
+            steps = []
+            for t in PICK_ALL_ORDER:  # the quick timeframes first, 5m (the most candles) last
+                steps += [["download", "--since", since, "--exchange", exchange, "--timeframe", t, *sym_args],
+                          ["learn", *sym_args, "pick-timeframe", t, "--years", str(PICK_YEARS),
+                           "--market", mkt, "--skip-empty"]]
+            jobs.submit(f"Keep only the winners on every timeframe on {where} pairs", steps,
+                        meta={"kind": "pick", "by": user, "market": mkt})
+            msg = (f"Testing every strategy on each timeframe ({', '.join(PICK_ALL_ORDER)}) on {PICK_YEARS:g} years "
+                   f"of prices for the {len(pairs())} {where} pairs. On each timeframe the steady winners become "
+                   f"{where}'s WIN strategies and the rest stop trading it there; the other engine is not changed. "
+                   "It takes a while: each timeframe's result appears here as soon as it is done.")
+            tf = "1h"
         else:
             since = (datetime.now(timezone.utc) - timedelta(days=round(PICK_YEARS * 365.25))).strftime("%Y-%m-%d")
             # the workspace's own pairs: in the Futures view only Futures AI's (its top gainers)
@@ -336,7 +355,10 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
                '(their other timeframes carry on). Each engine has its own picks.</p>'
                f'<form method="post" action="/replay/pick" class="row">{_csrf(auth, token)}'
                f'<label>Timeframe <select name="tf">{opts}</select></label>'
-               '<button>Keep only the winners</button></form>')
+               '<button>Keep only the winners</button></form>'
+               f'<form method="post" action="/replay/pick" class="row">{_csrf(auth, token)}'
+               '<input type="hidden" name="tf" value="all">'
+               '<button class="ghost">Keep the winners on every timeframe</button></form>')
         if others:
             out += f'<p class="small">Also picked: {_e(others)}.</p>'
         if cur:

@@ -641,7 +641,7 @@ def cmd_learn(s: Settings, args) -> int:
             store.close()
         if not any(r["trades"] for r in results):
             print(f"no {tf} trades: download {tf} prices first (aitrader download --since ... --timeframe {tf})")
-            return 1
+            return 0 if args.skip_empty else 1
         out = picks.apply(reg, entries, tf, results, path, min_trades=args.min_trades, market=mkt,
                           info={"since": since, "pairs": list(symbols), "years": args.years})
         print(f"{tf}: tested {out['tested']} strategies on {len(symbols)} pairs; kept {len(out['picked'])} "
@@ -1594,6 +1594,8 @@ def build_parser() -> argparse.ArgumentParser:
     lpt.add_argument("--years", type=float, default=2.0, help="how much saved history to test (default 2)")
     lpt.add_argument("--min-trades", type=int, default=10, help="fewest trades to judge a strategy (default 10)")
     lpt.add_argument("--clear", action="store_true", help="undo the pick: every strategy trades it again")
+    lpt.add_argument("--skip-empty", action="store_true",
+                     help="no trades on this timeframe: leave it as it is and exit 0 (for a run over every timeframe)")
     lpt.add_argument("--market", choices=["spot", "futures"], default="spot",
                      help="whose pick: Spot AI's (default) or Futures AI's; each engine trades only its own")
     le_sub.add_parser("add-shorts", help="add a short twin (Bybit perpetual futures) of every long strategy")
