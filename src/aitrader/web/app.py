@@ -416,7 +416,8 @@ paper trading. Nothing trades real money.</p>
                 "<h2>Equity</h2>", _equity_svg(paper, execs),
                 "<h2>Open positions</h2>",
                 (close_ws + "</form>" if (paper.get("open") if isinstance(paper, dict) else None) else ""),
-                _positions_table(paper, execs, csrf, _control().close_requests(), futures_view=fut_view),
+                _positions_table(paper, execs, csrf, _control().close_requests(), futures_view=fut_view,
+                                 why=_indicator_names(paths.registry)),
                 "<h2>Signals</h2>", _signals_section(paper, int(time.time() * 1000)),
                 "<h2>Trade log</h2>", _trades_table(paper, execs),
                 "<h2>Events</h2>", _events_table(_workspace_events(events, ws))]
@@ -1142,8 +1143,41 @@ def _liq_cell(p: dict, side) -> str:
     return f"<td>{liq:.6g}{away}</td>"
 
 
+def _indicator_names(registry_path: str):
+    """entry id -> the chart indicators its rules use ("EMA 20/50/200, RSI"), from the registry."""
+    from .market_pages import STUDIES
+
+    labels = {k: label for k, label, *_ in STUDIES}
+    from ..learn.keep import indicators
+
+    try:
+        from ..learn import Registry
+
+        entries = Registry(registry_path).entries
+    except Exception:
+        entries = {}
+    memo: dict[str, str] = {}
+
+    def names(entry_id: str) -> str:
+        if entry_id not in memo:
+            try:
+                memo[entry_id] = ", ".join(labels.get(k, k) for k in sorted(indicators(entries[entry_id])))
+            except Exception:
+                memo[entry_id] = ""
+        return memo[entry_id]
+    return names
+
+
+def _why_cell(sig: dict, used: str) -> str:
+    """Why a position was opened: the strategy's own words for its signal and the indicators its rules
+    read (the same ones the Markets and Replay charts draw)."""
+    reason = (sig.get("reason") or "").strip()
+    return (f'<td class="small">{_e(reason[:160])}{"…" if len(reason) > 160 else ""}'
+            f'{"<br><span class=muted>Indicators: " + _e(used) + "</span>" if used else ""}</td>')
+
+
 def _positions_table(paper: dict, execs: dict, csrf: str = "", asked: dict | None = None,
-                     futures_view: bool = False) -> str:
+                     futures_view: bool = False, why=None) -> str:
     rows, total, counted = [], 0.0, 0
     for key, p in paper.get("open", {}).items():
         sig = p.get("signal", {})
@@ -1161,7 +1195,7 @@ def _positions_table(paper: dict, execs: dict, csrf: str = "", asked: dict | Non
                     f"<td>{'' if mark is None else f'{mark:+.2f}R'}</td>"
                     f"<td>{_e(entry_id)}</td><td>{p.get('entry', sig.get('entry', 0)):.6g}"
                     f"{'' if p.get('filled') else ' <span class=muted>(waiting)</span>'}</td>"
-                    f"<td>{_prob(p.get('ai_prob'))}</td></tr>")
+                    f"<td>{_prob(p.get('ai_prob'))}</td>{_why_cell(sig, why(p.get('entry_id') or entry_id) if why else '')}</tr>")
     for mode, st in execs.items():
         for p in st.get("positions", {}).values():
             cls = "" if p.get("status") == "open" else "bad"
@@ -1173,15 +1207,15 @@ def _positions_table(paper: dict, execs: dict, csrf: str = "", asked: dict | Non
                         f'{_usdt_cell(usdt, pos_id=pid)}{_price_cells(pid, p.get("mark"), p["stop"], p.get("side"), _num(p.get("target")))}'
                         f'{"<td>-</td>" if futures_view else ""}<td class="{cls}">{_e(p.get("status"))}</td>'
                         f"<td>{_e(p['entry_id'])}</td><td>{p.get('entry') or 0:.6g}</td>"
-                        f'<td>{_prob(p.get("ai_prob"))}</td></tr>')
+                        f'<td>{_prob(p.get("ai_prob"))}</td>{_why_cell({}, why(p["entry_id"]) if why else "")}</tr>')
     if not rows:
         return "<p class=muted>No open positions.</p>"
     foot = (f'<tr><td colspan="2"><b>Total now</b> <span class="muted" id="pos-live">at the last closed candle</span></td>'
-            f'{_usdt_cell(total if counted else None, bold=True, pos_id="total")}<td colspan="{8 if futures_view else 7}"></td></tr>')
+            f'{_usdt_cell(total if counted else None, bold=True, pos_id="total")}<td colspan="{9 if futures_view else 8}"></td></tr>')
     return ("<table><tr><th>Where</th><th>Market</th><th>Now USDT</th><th>Price now</th><th>Stop loss</th><th>Take profit</th>"
             + ("<th>Liquidation</th>" if futures_view else "") +
             "<th>R (last candle)</th><th>Strategy</th><th>Entry</th>"
-            f"<th>AI p</th></tr>{''.join(rows)}{foot}</table>")
+            f"<th>AI p</th><th>Why (indicators)</th></tr>{''.join(rows)}{foot}</table>")
 
 
 def _num(x) -> float | None:
