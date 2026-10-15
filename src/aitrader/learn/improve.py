@@ -40,7 +40,7 @@ import time
 from ..backtest import BacktestConfig, metrics, run_backtest, split_periods
 from ..indicators import candles_to_frame
 from .lab import MIN_BARS, evaluate, with_context
-from .registry import Entry, Registry, make_strategy
+from .registry import Entry, Registry, builtin_name, make_strategy
 
 log = logging.getLogger(__name__)
 
@@ -71,7 +71,7 @@ def tunables(entry: Entry) -> dict:
     if entry.kind == "builtin":
         from ..strategies import STRATEGIES
 
-        params = {**STRATEGIES[entry.name].default_params(), **((entry.spec or {}).get("params") or {})}
+        params = {**STRATEGIES[builtin_name(entry)].default_params(), **((entry.spec or {}).get("params") or {})}
         return {k: v for k, v in params.items()
                 if k not in FIXED and isinstance(v, (int, float)) and not isinstance(v, bool) and v != 0}
     rule = entry.spec or {}

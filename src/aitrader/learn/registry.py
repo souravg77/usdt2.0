@@ -111,7 +111,7 @@ def make_strategy(entry: Entry):
     from .rules import RuleStrategy
 
     if entry.kind == "builtin":  # an improved version carries its own settings (learn.improve)
-        strat = STRATEGIES[entry.name](**((entry.spec or {}).get("params") or {}))
+        strat = STRATEGIES[builtin_name(entry)](**((entry.spec or {}).get("params") or {}))
         tfs = (entry.spec or {}).get("timeframes")
         if tfs:  # a timeframe twin (``timeframe_twin``): the same rules on another chart
             strat.spec = replace(strat.spec, timeframes=tuple(tfs))
@@ -123,6 +123,17 @@ def make_strategy(entry: Entry):
         base = Entry(id=s["base_id"], kind=s["base_kind"], name=s["base_name"], spec=s.get("base_spec"))
         return ShortMirror(make_strategy(base))
     return RuleStrategy(entry.spec)
+
+
+def builtin_name(entry: Entry) -> str:
+    """The hand-coded strategy a builtin entry runs: its name, or for a timeframe pick's copy
+    (named "WIN 4h: <name>", ``learn.picks``) the name it was copied from."""
+    spec = entry.spec or {}
+    if spec.get("builtin"):
+        return spec["builtin"]
+    if spec.get("pick") and entry.name.startswith("WIN "):
+        return entry.name.split(": ", 1)[-1]
+    return entry.name
 
 
 def timeframe_twin(entry: Entry, timeframe: str) -> Entry | None:
