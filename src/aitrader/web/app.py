@@ -406,7 +406,7 @@ paper trading. Nothing trades real money.</p>
                 (f'<form method="post" action="/trading/close-all" class="row">{csrf}'
                  '<button class="warn-btn">Close all open positions</button></form>'
                  if (paper.get("open") if isinstance(paper, dict) else None) else ""),
-                _positions_table(paper, execs),
+                _positions_table(paper, execs, csrf, _control().close_requests()),
                 "<h2>Signals</h2>", _signals_section(paper, int(time.time() * 1000)),
                 "<h2>Trade log</h2>", _trades_table(paper, execs),
                 "<h2>Events</h2>", _events_table(events)]
@@ -489,6 +489,20 @@ paper trading. Nothing trades real money.</p>
             _event("close_all", f"close all open paper positions asked from the dashboard by {user}", "warning")
             return ("Closing every open paper position at the last closed candle's price; they'll be gone within "
                     "a minute. Paper trading keeps running.")
+        return _control_post(request, csrf, act)
+
+    @app.post("/trading/close-one")
+    def trading_close_one(request: Request, csrf: str = Form(""), key: str = Form("")):
+        def act(user):
+            paper = _load_json(paths.paper_state)
+            pos = (paper.get("open") or {}).get(key) if isinstance(paper, dict) else None
+            if pos is None:
+                return "That position isn't open any more.", False
+            _control().request_close(key, (pos.get("signal") or {}).get("ts"), by=user)
+            _entry_id, _ex, sym, tf = (key.split("|") + ["", "", "", ""])[:4]
+            _event("close_one", f"close paper position {key} asked from the dashboard by {user}", "warning")
+            return (f"Closing the {sym} {tf} position at the last closed candle's price; it'll be gone within a "
+                    "minute. The others stay open.")
         return _control_post(request, csrf, act)
 
     @app.post("/trading/paper/on")
@@ -853,7 +867,17 @@ def _ms(ts) -> str:
     return _when(ts / 1000) if ts else "-"
 
 
-def _positions_table(paper: dict, execs: dict) -> str:
+def _close_button(key: str, csrf: str, asked: dict) -> str:
+    """A paper position's own Close button (only on the admin's Trading page, where csrf is set)."""
+    if not csrf:
+        return ""
+    if key in asked:  # the paper trader clears it once the position is closed
+        return '<br><span class="small muted">closing...</span>'
+    return (f'<form method="post" action="/trading/close-one">{csrf}<input type="hidden" name="key" value="{_e(key)}">'
+            '<button class="warn-btn mini">Close</button></form>')
+
+
+def _positions_table(paper: dict, execs: dict, csrf: str = "", asked: dict | None = None) -> str:
     rows, total, counted = [], 0.0, 0
     for key, p in paper.get("open", {}).items():
         sig = p.get("signal", {})
@@ -864,7 +888,7 @@ def _positions_table(paper: dict, execs: dict) -> str:
             total, counted = total + usdt, counted + 1
         # the money and price columns come first so a phone shows them without scrolling sideways
         pid = "paper|" + key
-        rows.append(f"<tr><td>paper</td><td>{_e(sym)}{_short(sig.get('side'))} <span class=muted>{_e(ex)} {_e(tf)}</span></td>"
+        rows.append(f"<tr><td>paper{_close_button(key, csrf, asked or {})}</td><td>{_e(sym)}{_short(sig.get('side'))} <span class=muted>{_e(ex)} {_e(tf)}</span></td>"
                     f"{_usdt_cell(usdt, pos_id=pid)}"
                     f"{_price_cells(pid, p.get('mark') if p.get('filled') else None, sig.get('stop', 0), sig.get('side'))}"
                     f"<td>{'' if mark is None else f'{mark:+.2f}R'}</td>"
@@ -1364,6 +1388,7 @@ font:inherit;font-weight:600;font-size:.92em}
 button:hover{background:var(--accent2)}button.ghost{background:transparent;color:var(--accent)}
 button.ghost:hover{background:color-mix(in srgb,var(--accent) 12%,transparent)}
 button.danger{background:var(--bad);border-color:var(--bad)}button.warn-btn{background:#d97706;border-color:#d97706}button.danger:hover{filter:brightness(1.1)}
+button.mini{padding:3px 10px;font-size:.8em;margin-top:6px}
 button.link,form.inline button{background:none;border:none;color:var(--accent);padding:0;font-weight:500}
 form.inline{display:inline}
 table{width:100%;border-collapse:collapse;display:block;overflow-x:auto;background:var(--card);border:1px solid var(--line);

@@ -180,10 +180,20 @@ def test_trading_page_and_controls(web):
     r = client.post("/trading/close-all", data={"csrf": csrf}, follow_redirects=False)
     assert "Closing" in r.headers["location"] and json.load(open("data/trade/close_all.json"))["by"] == "admin"
     assert not json.load(open("data/trade/control.json"))["paused"]  # paper trading keeps running
+    # each paper position has its own Close button
+    key = next(iter(json.load(open(paths.paper_state))["open"]))
+    assert 'action="/trading/close-one"' in page and f'value="{key}"' in page
+    assert client.post("/trading/close-one", data={"key": key}, follow_redirects=False).status_code == 403
+    r = client.post("/trading/close-one", data={"csrf": csrf, "key": "nope"}, follow_redirects=False)
+    assert r.headers["location"].endswith("&bad=1")
+    r = client.post("/trading/close-one", data={"csrf": csrf, "key": key}, follow_redirects=False)
+    assert "Closing%20the%20BTC/USDT" in r.headers["location"]
+    assert json.load(open("data/trade/close_one.json"))[key]["by"] == "admin"
+    assert "closing..." in client.get("/trading").text
     client.post("/trading/gate", data={"csrf": csrf})
     assert "does not pass yet" in client.get("/trading").text
     kinds = [json.loads(line)["kind"] for line in open("data/ops/events.jsonl")]
-    assert kinds[:4] == ["risk_pause", "kill", "resume", "close_all"]
+    assert kinds[:5] == ["risk_pause", "kill", "resume", "close_all", "close_one"]
 
 
 def test_trading_page_status_tiles_and_grouped_events(web):
