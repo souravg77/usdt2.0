@@ -129,6 +129,8 @@ def pick_copy(entry: Entry, timeframe: str) -> Entry:
         spec["base_spec"] = base
     else:
         spec["timeframes"] = [timeframe]
+        if entry.kind == "builtin":  # its new name no longer names the hand-coded strategy
+            spec["builtin"] = entry.name
     spec["pick"], spec["pick_of"] = timeframe, entry.id
     return Entry(id=copy_id(entry.id, timeframe), kind=entry.kind, name=f"WIN {timeframe}: {entry.name}",
                  spec=spec, source=entry.source)

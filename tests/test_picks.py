@@ -134,3 +134,15 @@ def test_cli_pick_timeframe_and_undo(tmp_path, monkeypatch, capsys):
     assert "1h" in tf_picks and tf_picks["1h"]["results"]
     assert main(["--env-file", "none", "learn", "pick-timeframe", "1h", "--clear"]) == 0
     assert picks.load("data/learn/timeframe_picks.json") == {}
+
+
+def test_a_kept_builtin_strategy_still_builds_under_its_win_name():
+    from aitrader.strategies import STRATEGIES
+
+    name = sorted(STRATEGIES)[0]
+    orig = Entry(id=f"builtin-{name}", kind="builtin", name=name)
+    c = picks.pick_copy(orig, "4h")
+    assert c.name == f"WIN 4h: {name}" and make_strategy(c).spec.timeframes == ("4h",)
+    # a copy saved before the name was kept in its spec still builds
+    old = Entry(id=c.id, kind="builtin", name=c.name, spec={k: v for k, v in c.spec.items() if k != "builtin"})
+    assert make_strategy(old).spec.timeframes == ("4h",)

@@ -432,5 +432,5 @@
   resize();
   var dlJob = new URLSearchParams(location.search).get("download");
   if (dlJob) watchDownload(dlJob);
-  else if (new URLSearchParams(location.search).get("month")) load();
+  else load();  // the chosen (or default) pair, timeframe and month, straight away
 })();

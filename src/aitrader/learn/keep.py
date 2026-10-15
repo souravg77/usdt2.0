@@ -157,7 +157,7 @@ INDICATOR_WORDS: dict[str, str] = {
     "willr": r"\b(williams|willr)",
 }
 # a book rule's notes (why it was coded so, what couldn't be) can name indicators it doesn't use
-NOT_RULES = ("name", "description", "source", "decisions", "uncodable", "twin_of", "pick", "pick_of")
+NOT_RULES = ("name", "description", "source", "decisions", "uncodable", "twin_of", "pick", "pick_of", "builtin")
 
 
 def _rules_text(entry: Entry) -> str:
