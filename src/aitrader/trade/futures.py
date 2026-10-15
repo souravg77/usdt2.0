@@ -30,6 +30,22 @@ def leverage(environ=None) -> float:
     return min(max(value, 1.0), MAX_LEVERAGE)
 
 
+# Paper futures only: the leverage choices Bybit offers (each coin also has its own maximum,
+# ``market.perp_limits``). The live trader stays capped at MAX_LEVERAGE.
+PAPER_LEVERAGE_CHOICES = (1.0, 2.0, 3.0, 5.0, 10.0, 20.0, 25.0, 50.0, 75.0, 100.0)
+PAPER_MAX_LEVERAGE = 100.0
+
+
+def clamp_leverage(value: float) -> float:
+    return min(max(float(value), 1.0), MAX_LEVERAGE)
+
+
+def clamp_paper_leverage(value: float, coin_max: float | None = None) -> float:
+    """A paper leverage choice, 1x up to Bybit's 100x and to the coin's own maximum when known."""
+    top = min(PAPER_MAX_LEVERAGE, coin_max) if coin_max else PAPER_MAX_LEVERAGE
+    return min(max(float(value), 1.0), top)
+
+
 def perp_symbol(symbol: str) -> str:
     """The ccxt name of the USDT perpetual for a spot pair: BTC/USDT -> BTC/USDT:USDT."""
     return symbol if ":" in symbol else f"{symbol}:{symbol.split('/')[1]}"

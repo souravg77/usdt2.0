@@ -3,7 +3,8 @@
 One shared, keyless ccxt client serves every viewer. Answers are cached for about a second, so
 however many browsers poll, Bybit sees at most one request per pair and timeframe per second
 (far under its public rate limits). When Bybit can't be reached, the candles saved by the
-``collector`` service are served instead, and the answer says so.
+``collector`` service are served instead, and the answer says so. With ``perp=True`` (the
+dashboard's Futures mode) prices and candles are the USDT perpetual's, with its funding rate.
 """
 
 from __future__ import annotations
@@ -22,8 +23,9 @@ LIMIT = 500  # enough history for the 200-bar EMA on the chart
 
 
 class LiveMarket:
-    def __init__(self, db_path: str, exchange: str = EXCHANGE, client=None, clock=time.monotonic):
-        self.db_path, self.exchange = db_path, exchange
+    def __init__(self, db_path: str, exchange: str = EXCHANGE, client=None, clock=time.monotonic,
+                 perp: bool = False):
+        self.db_path, self.exchange, self.perp = db_path, exchange, perp
         self._client, self._clock = client, clock
         self._cache: dict[tuple, tuple[float, dict]] = {}
         self._locks: dict[tuple, asyncio.Lock] = {}
@@ -34,9 +36,10 @@ class LiveMarket:
 
             # the charts are spot only: loading just the spot markets keeps the first request fast
             # (Bybit's full list adds perpetuals and options, several slow calls)
+            kind = ("swap", "linear") if self.perp else ("spot", "spot")
             self._client = getattr(ccxt_async, self.exchange)(
                 {"enableRateLimit": True,
-                 "options": {"defaultType": "spot", "fetchMarkets": {"types": ["spot"]}}})
+                 "options": {"defaultType": kind[0], "fetchMarkets": {"types": [kind[1]]}}})
         return self._client
 
     async def _cached(self, key: tuple, fetch) -> dict:
@@ -56,7 +59,7 @@ class LiveMarket:
         async def fetch():
             try:
                 rows = await asyncio.wait_for(
-                    self.client().fetch_ohlcv(symbol, timeframe, limit=limit), timeout=8)
+                    self.client().fetch_ohlcv(self._name(symbol), timeframe, limit=limit), timeout=8)
                 return {"source": "live", "candles": [r[:6] for r in rows]}
             except Exception as exc:
                 return {"source": "database", "note": _why(exc),
@@ -71,8 +74,9 @@ class LiveMarket:
                 # on the collector's hourly candles
                 raw = await asyncio.wait_for(self.client().fetch_tickers(), timeout=8)
                 rows = [{"symbol": s, "price": t.get("last"), "change": t.get("percentage"),
-                         "high": t.get("high"), "low": t.get("low"), "volume": t.get("quoteVolume")}
-                        for s in symbols if (t := raw.get(s))]
+                         "high": t.get("high"), "low": t.get("low"), "volume": t.get("quoteVolume"),
+                         **({"funding": _funding(t)} if self.perp else {})}
+                        for s in symbols if (t := raw.get(self._name(s)))]
                 if not rows:
                     raise LookupError("none of the pairs came back")
                 return {"source": "live", "tickers": rows}
@@ -80,6 +84,10 @@ class LiveMarket:
                 log.warning("live tickers failed, using saved prices: %s: %s", type(exc).__name__, exc)
                 return {"source": "database", "note": _why(exc), "tickers": self._saved_tickers(symbols)}
         return await self._cached(("t", tuple(symbols)), fetch)
+
+    def _name(self, symbol: str) -> str:
+        """The ccxt market name: BTC/USDT, or BTC/USDT:USDT for the perpetual."""
+        return f"{symbol}:{symbol.split('/')[-1]}" if self.perp and ":" not in symbol else symbol
 
     # ---- fallback: the collector's candles --------------------------------------------------
 
@@ -108,6 +116,17 @@ class LiveMarket:
     async def close(self) -> None:
         if self._client is not None and hasattr(self._client, "close"):
             await self._client.close()
+
+
+def _funding(t: dict) -> float | None:
+    """The perpetual's current funding rate (per 8h, as a fraction) from Bybit's ticker."""
+    for raw in ((t.get("info") or {}).get("fundingRate"), t.get("fundingRate")):
+        try:
+            if raw not in (None, ""):
+                return float(raw)
+        except (TypeError, ValueError):
+            pass
+    return None
 
 
 def _why(exc: Exception) -> str:
