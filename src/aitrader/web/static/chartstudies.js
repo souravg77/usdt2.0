@@ -1,7 +1,8 @@
 // Indicator drawing shared by the Markets chart (market.js) and the Replay chart (replay.js):
 // the overlays on the price (EMA, Bollinger, VWAP, Supertrend, Ichimoku, SAR, Keltner, support/
 // resistance, Fibonacci, volume profile, candle patterns), the panels below it (volume, RSI, MACD,
-// ADX, Stoch RSI, ATR, CCI, Williams %R, Force index, OBV, MFI, CMF, ROC; overlays also SMA and Donchian), the legend values, and a plain-words read of the market
+// ADX, Stoch RSI, ATR, CCI, Williams %R, Force index, OBV, MFI, CMF, ROC; overlays also SMA, Donchian, and
+// open fair value gaps / order blocks with liquidity-sweep marks), the legend values, and a plain-words read of the market
 // at one candle. The values come from the server (web/studies.py, the strategies' own formulas).
 // Drawing only: nothing here trades.
 (function () {
@@ -11,9 +12,9 @@
                  signal: "#fb923c", adx: "#f5c542", k: "#2dd4bf", d: "#f472b6", sr: "#a3a3a3",
                  kc: "#a78bfa", fib: "#eab308", vp: "#64748b", atr: "#f97316", cci: "#22d3ee", willr: "#e879f9",
                  sma20: "#fde68a", sma50: "#93c5fd", sma200: "#f9a8d4", dc: "#60a5fa", fi: "#34d399", obv: "#a3e635",
-                 mfi: "#fbbf24", cmf: "#f87171", roc: "#93c5fd" };
+                 mfi: "#fbbf24", cmf: "#f87171", roc: "#93c5fd", fvg: "#2dd4bf", ob: "#a78bfa" };
   var PANELS = ["vol", "rsi", "macd", "adx", "stoch", "atr", "cci", "willr", "fi", "obv", "mfi", "cmf", "roc"];
-  var OVERLAYS = ["ema", "sma", "dc", "bb", "vwap", "st", "ich", "psar", "sr", "kc", "fib", "vp", "pat"];
+  var OVERLAYS = ["ema", "sma", "dc", "bb", "vwap", "st", "ich", "psar", "sr", "kc", "fib", "vp", "pat", "smc"];
   var PATTERN_NAMES = { E: "engulfing", H: "hammer", D: "doji", I: "inside bar", N: "NR7 (narrowest range of 7)" };
   var PANEL_H = 84;
 
@@ -197,6 +198,18 @@
       if (!first) ctx.fill();
       ctx.globalAlpha = 1;
     }
+    if (o.get && on.smc) {  // open fair value gaps and order blocks: a shaded band per candle
+      [["fvg_bull", COLORS.fvg], ["fvg_bear", T.down], ["ob_bull", COLORS.ob], ["ob_bear", T.down]].forEach(function (z) {
+        ctx.fillStyle = z[1]; ctx.globalAlpha = z[0].indexOf("ob") === 0 ? 0.13 : 0.18;
+        for (var zi = 0; zi < n; zi++) {
+          var zt = o.get("overlays", z[0] + "_top", zi), zb = o.get("overlays", z[0] + "_bottom", zi);
+          if (zt === null || zt === undefined || zb === null || zb === undefined) continue;
+          var zy = y(zt);
+          ctx.fillRect(zi * step, zy, step, Math.max(1, y(zb) - zy));
+        }
+      });
+      ctx.globalAlpha = 1;
+    }
     if (on.sr && o.levels) {
       o.levels.forEach(function (lv) {
         if (lv.price < lo || lv.price > hi) return;
@@ -278,6 +291,15 @@
           if (pm) ctx.fillText(pm, (q + 0.5) * step, y(o.bars[q][2]) - 4);
         }
         ctx.font = "12px system-ui, sans-serif";
+      }
+      if (on.smc && o.bars) {  // liquidity sweeps: a triangle under (lows swept) or over (highs swept) the candle
+        for (var w = 0; w < n; w++) {
+          var swv = o.get("overlays", "sweep", w);
+          if (swv !== 1 && swv !== -1) continue;
+          var sx = (w + 0.5) * step, sy = swv === 1 ? y(o.bars[w][3]) + 4 : y(o.bars[w][2]) - 4;
+          ctx.fillStyle = swv === 1 ? T.up : T.down; ctx.beginPath();
+          ctx.moveTo(sx, sy); ctx.lineTo(sx - 4, sy + 6 * swv); ctx.lineTo(sx + 4, sy + 6 * swv); ctx.closePath(); ctx.fill();
+        }
       }
       if (on.psar) {
         for (var p = 0; p < n; p++) {
@@ -397,6 +419,16 @@
                               k.indexOf("dc") === 0 ? COLORS.dc : COLORS.psar);
       out.push('<span style="color:' + col + '">' + named[k] + " <b>" + o.fmt(q) + "</b></span>");
     });
+    if (o.on.smc) {
+      [["fvg_bull", "bull FVG", COLORS.fvg], ["fvg_bear", "bear FVG", T.down], ["ob_bull", "bull OB", COLORS.ob],
+       ["ob_bear", "bear OB", T.down]].forEach(function (z) {
+        var zt = o.get("overlays", z[0] + "_top", i), zb = o.get("overlays", z[0] + "_bottom", i);
+        if (zt === null || zt === undefined || zb === null || zb === undefined) return;
+        out.push('<span style="color:' + z[2] + '">' + z[1] + " <b>" + o.fmt(zb) + "–" + o.fmt(zt) + "</b></span>");
+      });
+      var swl = o.get("overlays", "sweep", i);
+      if (swl === 1 || swl === -1) out.push("<span>" + (swl === 1 ? "swept the lows" : "swept the highs") + "</span>");
+    }
     var hp = o.on.pat ? o.get("patterns", null, i) : null;
     if (hp) out.push("<span>" + hp.split("").map(function (c) { return PATTERN_NAMES[c]; }).join(", ") + "</span>");
     return out;

@@ -48,6 +48,9 @@ def compute(candles: list[list], tail: int = 0) -> dict:
     srsi = ind.stoch_rsi(close)
     kc = ind.keltner(df)
     dc = ind.donchian(df)
+    fvg = ind.fair_value_gaps(df)
+    ob = ind.order_blocks(df)
+    sw = ind.liquidity_sweeps(df)
     overlays = {
         "ema20": series(ind.ema(close, 20)),
         "ema50": series(ind.ema(close, 50)),
@@ -62,6 +65,12 @@ def compute(candles: list[list], tail: int = 0) -> dict:
         "sma20": series(ind.sma(close, 20)), "sma50": series(ind.sma(close, 50)),
         "sma200": series(ind.sma(close, 200)),
         "dc_upper": series(dc["upper"]), "dc_lower": series(dc["lower"]),
+        # the newest open zone at each candle (what the strategies' in_bull_fvg / in_bull_ob test)
+        "fvg_bull_top": series(fvg["bull_top"]), "fvg_bull_bottom": series(fvg["bull_bottom"]),
+        "fvg_bear_top": series(fvg["bear_top"]), "fvg_bear_bottom": series(fvg["bear_bottom"]),
+        "ob_bull_top": series(ob["bull_top"]), "ob_bull_bottom": series(ob["bull_bottom"]),
+        "ob_bear_top": series(ob["bear_top"]), "ob_bear_bottom": series(ob["bear_bottom"]),
+        "sweep": series(sw["low"] - sw["high"], 0),  # +1 swept the lows, -1 swept the highs
     }
     panels = {
         "rsi": series(ind.rsi(close), 2),

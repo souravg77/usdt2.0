@@ -46,8 +46,13 @@ from .core import (
     missing_candles,
     indicator_valid,
 )
+from .smc import fair_value_gaps, liquidity_sweeps, order_blocks, retest
 
 __all__ = [
+    "fair_value_gaps",
+    "liquidity_sweeps",
+    "order_blocks",
+    "retest",
     "streak",
     "stochastic",
     "heikin_ashi",

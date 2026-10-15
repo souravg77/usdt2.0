@@ -71,6 +71,10 @@ from ..indicators import (
     sma,
     stoch_rsi,
     vwap,
+    fair_value_gaps,
+    liquidity_sweeps,
+    order_blocks,
+    retest,
 )
 from ..backtest.engine import CUSTOM_EXITS
 from ..market.regime import REGIMES, regime_labels
@@ -149,6 +153,18 @@ FEATURES: dict[str, tuple[tuple[float, ...], str]] = {
     "cmf": ((20,), "Chaikin Money Flow, -1 to +1 (above 0 = buying pressure)"),
     "sma_dev_atr": ((20, 14), "(close - SMA(N)) / ATR(M): how far price is stretched from its average"),
     "no_gaps": ((200,), "1 if the last N bars exist with no missing candle, else 0"),
+    "fvg_bull": ((), "1 if a bullish fair value gap formed on this bar (its low above the high 2 bars back)"),
+    "fvg_bear": ((), "1 if a bearish fair value gap formed on this bar (its high below the low 2 bars back)"),
+    "fvg_bull_top": ((50,), "top of the newest unfilled bullish fair value gap of the last N bars (none: no value)"),
+    "fvg_bull_bottom": ((50,), "bottom of the newest unfilled bullish fair value gap of the last N bars"),
+    "in_bull_fvg": ((50,), "1 if this bar dips into the open bullish fair value gap and closes above its bottom"),
+    "in_bear_fvg": ((50,), "1 if this bar rises into the open bearish fair value gap and closes below its top"),
+    "bull_ob_top": ((10,), "top of the newest valid bullish order block (last down candle before a break of the N-bar high)"),
+    "bull_ob_bottom": ((10,), "bottom of the newest valid bullish order block"),
+    "in_bull_ob": ((10,), "1 if this bar dips into the valid bullish order block and closes above its bottom"),
+    "in_bear_ob": ((10,), "1 if this bar rises into the valid bearish order block and closes below its top"),
+    "sweep_low": ((20,), "1 if this bar went below the previous N bars' low and closed back above it"),
+    "sweep_high": ((20,), "1 if this bar went above the previous N bars' high and closed back below it"),
 }
 OPS = (">", "<", ">=", "<=", "crosses_above", "crosses_below")
 TRAILING = re.compile(r"^(close<ema\d{1,3}|close<psar|rsi>\d{2}(\.\d+)?)$")
@@ -486,6 +502,26 @@ def _feature(df: pd.DataFrame, e: Expr, cache: dict) -> pd.Series:
             s = (close - sma(close, a[0])) / atr(df, a[1]).replace(0, np.nan)
         elif n == "no_gaps":
             s = indicator_valid(df, a[0])
+        elif n in ("fvg_bull", "fvg_bear"):
+            s = fair_value_gaps(df)[n[4:] + "_new"]
+        elif n in ("fvg_bull_top", "fvg_bull_bottom", "in_bull_fvg", "in_bear_fvg"):
+            g = fair_value_gaps(df, a[0])
+            if n == "in_bull_fvg":
+                s = retest(df, g["bull_top"], g["bull_bottom"], bull=True)
+            elif n == "in_bear_fvg":
+                s = retest(df, g["bear_top"], g["bear_bottom"], bull=False)
+            else:
+                s = g["bull_" + n.split("_")[-1]]
+        elif n in ("bull_ob_top", "bull_ob_bottom", "in_bull_ob", "in_bear_ob"):
+            ob = order_blocks(df, a[0])
+            if n == "in_bull_ob":
+                s = retest(df, ob["bull_top"], ob["bull_bottom"], bull=True)
+            elif n == "in_bear_ob":
+                s = retest(df, ob["bear_top"], ob["bear_bottom"], bull=False)
+            else:
+                s = ob["bull_" + n.split("_")[-1]]
+        elif n in ("sweep_low", "sweep_high"):
+            s = liquidity_sweeps(df, a[0])[n[6:]]
         else:  # pragma: no cover - parse_expr already rejects unknown names
             raise RuleError(f"unknown feature {n}")
         cache[k] = s.astype(float)
