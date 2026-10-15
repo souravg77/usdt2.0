@@ -1,4 +1,6 @@
 """The Pairs page: the Bybit spot pair ranking with its reasons, and each pair's market regime.
+In the Futures view it shows the Futures AI pairs instead (its top gainers and the pairs it holds),
+since Futures AI never trades the spot ranking or the fixed list.
 
 "Rank pairs" queues ``aitrader pairs rank`` (Bybit public data, no key). The regimes come from the
 candles the collector stored, worked out on each page load from closed bars only. Paper and
@@ -17,7 +19,7 @@ from fastapi.responses import PlainTextResponse, RedirectResponse
 from ..config import EXCHANGE
 from ..data.store import CandleStore
 from ..market import gainers
-from ..market.pairs import configured_symbols, load_ranking, ranked_symbols
+from ..market.pairs import configured_symbols, load_ranking, open_paper_symbols, ranked_symbols
 from ..market.regime import current_regimes
 from .app import _csrf, _e, _ms, _q
 
@@ -84,8 +86,17 @@ def add_pair_routes(app, *, settings, auth, jobs, page, guard, ranking_path: str
 
         ws = "futures" if wallet.futures_on(wallet.market_path(paper_state)) else "spot"
         body += _gainers_card(auth, token, now, gainer_job(), ws)
-        body += _run_card(auth, token, rk, job, now, settings.symbols, ranking_path)
-        symbols = [p["symbol"] for p in rk.get("pairs", [])[:20]] or list(settings.symbols)
+        if ws == "futures":
+            try:
+                held = open_paper_symbols(paper_state, "futures")
+            except Exception:
+                held = []
+            hot = configured_symbols(settings.symbols, now_ms=now, market="futures")
+            symbols = list(dict.fromkeys([*hot, *held]))
+            body += _futures_card(hot, held)
+        else:
+            body += _run_card(auth, token, rk, job, now, settings.symbols, ranking_path)
+            symbols = [p["symbol"] for p in rk.get("pairs", [])[:20]] or list(settings.symbols)
         try:
             db = CandleStore(settings.db_path)
             try:
@@ -97,8 +108,11 @@ def add_pair_routes(app, *, settings, auth, jobs, page, guard, ranking_path: str
         by_pair: dict = {}
         for r in regimes:
             by_pair.setdefault(r["symbol"], {})[r["timeframe"]] = r
-        body += _ranking(rk, by_pair) if rk.get("pairs") else _regimes_only(symbols, by_pair)
-        body += _by_regime(_load(paper_state), _load(report_path))
+        if ws == "futures":
+            body += _futures_regimes(symbols, set(hot), by_pair)
+        else:
+            body += _ranking(rk, by_pair) if rk.get("pairs") else _regimes_only(symbols, by_pair)
+        body += _by_regime(_load(paper_state), _load(report_path), ws)
         body += ('<p class="muted small">The ranking describes today\'s market, not future returns. '
                  'Backtesting today\'s top pairs over past years leaves out coins that were delisted or '
                  'faded (survivorship bias), so it flatters results. Regimes use closed candles only and '
@@ -146,6 +160,27 @@ def _run_card(auth, token, rk: dict, job, now: int, fixed: list[str], ranking_pa
             f'{_e(", ".join(used[:20]))}{" ..." if len(used) > 20 else ""}. Set AITRADER_PAIRS=ranked in .env to '
             f'trade the top ranked pairs.</p><form method="post" action="/pairs/rank" class="row">'
             f'{_csrf(auth, token)}<button{disabled}>Rank pairs now</button></form></div>')
+
+
+def _futures_card(hot: list[str], held: list[str]) -> str:
+    """What Futures AI trades: its top gainers, plus the pairs it still holds a position in."""
+    extra = [s for s in held if s not in hot]
+    trades = (f'Futures AI opens new trades on its top gainers only: {_e(", ".join(hot))}.' if hot else
+              '<span class="warn">Futures AI has no pairs to open new trades on</span>: turn on the Futures top '
+              'gainers above.')
+    holds = (f' It also follows the pairs it still holds until they close: {_e(", ".join(extra))}.' if extra else "")
+    return (f'<div class="card"><h3>Futures AI pairs</h3><p class="small">{trades}{holds} The spot ranking and '
+            'the fixed pair list are for Spot AI only; switch to Spot AI to see them.</p></div>')
+
+
+def _futures_regimes(symbols: list[str], hot: set[str], by_pair: dict) -> str:
+    rows = "".join(f'<tr><td><b>{_e(s)}</b></td><td>{"top gainer" if s in hot else "open position"}</td>'
+                   f'<td>{_badges(by_pair.get(s, {}))}</td></tr>' for s in symbols)
+    if not rows:
+        return '<h2>Futures pairs</h2><p class="muted">No Futures AI pairs yet.</p>'
+    return ('<h2>Futures pairs</h2><p class="muted small">Bybit USDT perpetual futures that Futures AI trades now. '
+            'Regimes come from their candles.</p>'
+            f"<table><tr><th>Pair</th><th>Why</th><th>Regime now</th></tr>{rows}</table>")
 
 
 def _gainers_card(auth, token, now: int, job, market: str = "futures") -> str:
@@ -256,13 +291,16 @@ def _regimes_only(symbols: list[str], by_pair: dict) -> str:
             f"<table><tr><th>Pair</th><th>Regime now</th></tr>{rows}</table>")
 
 
-def _by_regime(paper: dict, report: dict) -> str:
+def _by_regime(paper: dict, report: dict, market: str | None = None) -> str:
     from ..backtest.engine import Trade
+    from ..learn.wallet import market_of
     from ..market.regime import breakdown
 
     trades = [(t.get("regime"), Trade("", "", "", 0, 0, 0.0, 0.0, None, r=float(t.get("r") or 0)))
-              for t in paper.get("trades", [])]
-    sections = [("Paper trades", breakdown(trades) if trades else {}),
+              for t in paper.get("trades", [])
+              if market is None or (t.get("market") or market_of(t)) == market]
+    name = {"spot": "Spot AI paper trades", "futures": "Futures AI paper trades"}.get(market or "", "Paper trades")
+    sections = [(name, breakdown(trades) if trades else {}),
                 ("Backtest report (all strategies pooled)", report.get("by_regime") or {})]
     out = '<h2>Results by market regime</h2>'
     for title, rows in sections:
