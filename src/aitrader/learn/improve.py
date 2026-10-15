@@ -46,6 +46,10 @@ log = logging.getLogger(__name__)
 
 DEFAULT_REPORT = "data/learn/improve.json"
 STEPS = (0.75, 1.25)
+# a book rule's settings stay inside what the rule checker accepts (``rules.validate_spec``), so the
+# search never tries a value that can't run (e.g. a 12R target when 10R is the most)
+RULE_LIMITS = {"stop.mult": (0.25, 10), "stop.n": (2, 200), "stop.pct": (0.002, 0.25), "target.r": (0.5, 10),
+               "exit.time_stop_bars": (1, 1000)}
 MAX_EVALS = 30
 MIN_TRADES = 30
 PRIOR = 20
@@ -162,6 +166,9 @@ def search(entry: Entry, markets: Markets, cfg: BacktestConfig, max_evals: int =
         for name, value in current.items():
             for step in STEPS:
                 new = _round_like(value, (best_settings.get(name, value)) * step)
+                if name in RULE_LIMITS:
+                    lo, hi = RULE_LIMITS[name]
+                    new = type(new)(min(max(new, lo), hi))
                 trial = {**best_settings, name: new}
                 if new == best_settings.get(name, value):
                     continue

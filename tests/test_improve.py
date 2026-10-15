@@ -179,3 +179,23 @@ def test_teacher_page_improve_button_and_results(tmp_path, monkeypatch):
                            "after": {"expectancy_r": 0.09, "win_rate": 0.45}}}]}))
     page = client.get("/teacher").text
     assert "IMPROVED" in page and "target.r 1.5 → 2.5" in page and "up~abc123" in page and "+0.090R" in page
+
+
+class PeakAt:
+    """In sample keeps getting better the bigger the target, so the search pushes it up to the cap."""
+
+    store = None
+
+    def run(self, entry, part, cfg):
+        t = imp.tunables(entry)
+        if t["target.r"] > 10:  # what the rule checker would refuse
+            raise AssertionError("tried a target above 10R")
+        return {"trades": 100, "expectancy_r": t["target.r"] / 100, "win_rate": 0.5, "profit_factor": 1.2,
+                "max_drawdown_r": 5.0}
+
+
+def test_search_stays_inside_what_a_book_rule_allows():
+    """Shawn's improve job logged "target.r must be a number from 0.5 to 10, got 11.92"."""
+    found = imp.search(_rule(), PeakAt(), BacktestConfig(), max_evals=500)
+    assert found["settings"]["target.r"] == 10.0
+    validate_spec(imp.with_settings(_rule(), found["settings"]).spec)  # still a valid rule
