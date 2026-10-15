@@ -394,7 +394,14 @@ def cmd_news(s: Settings, args) -> int:
     from .ops import EventLog
     from .ops.secrets import apply_to_env
 
-    symbols = args.symbol or s.symbols
+    def both_engines() -> list[str]:  # Spot AI's pairs and the Futures top gainers
+        try:
+            return list(dict.fromkeys([*configured_symbols(s.symbols, market="spot"),
+                                       *configured_symbols(s.symbols, market="futures")]))
+        except Exception:
+            return list(s.symbols)
+
+    symbols = args.symbol or both_engines()
     if args.news_cmd in ("update", "run"):
         from .news.service import x_reader
 
@@ -416,6 +423,7 @@ def cmd_news(s: Settings, args) -> int:
                                         f"{hot[0]['text'][:200]}", url=hot[0]["url"])
                     due = time.time() - last_brief >= 3600
             if due:
+                symbols = args.symbol or both_engines()  # the gainers change through the day
                 out = update(symbols, events=events, max_searches=args.max_searches)
                 last_brief = time.time()
                 b = out["brief"]

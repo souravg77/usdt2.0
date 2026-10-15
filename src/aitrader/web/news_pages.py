@@ -23,7 +23,20 @@ DEMAND_CLS = {"falling": "bad", "steady": "", "rising": "good", "hype": "warn"}
 EFFECT = {"high": "new buys paused", "elevated": "new buys at half size"}
 
 
-def add_news_routes(app, *, settings, auth, jobs, page, guard, news_dir: str = DEFAULT_DIR) -> None:
+def add_news_routes(app, *, settings, auth, jobs, page, guard, news_dir: str = DEFAULT_DIR,
+                    paper_state: str = "") -> None:
+    def workspace() -> tuple[str, list[str]]:
+        """("Spot AI" or "Futures AI", the pairs that engine trades): each view shows its own pairs."""
+        from ..learn import wallet
+        from ..market.pairs import configured_symbols
+
+        fut = bool(paper_state) and wallet.futures_on(wallet.market_path(paper_state))
+        try:
+            syms = configured_symbols(settings.symbols, market="futures" if fut else "spot")
+        except Exception:
+            syms = [] if fut else list(settings.symbols)
+        return ("Futures AI" if fut else "Spot AI"), syms
+
     def running() -> dict | None:
         for j in jobs.list():
             if j.get("meta", {}).get("kind") == "news" and j["status"] in ("queued", "running"):
@@ -42,13 +55,17 @@ def add_news_routes(app, *, settings, auth, jobs, page, guard, news_dir: str = D
         if job:
             body += ('<p class="warn">The AI is searching the web now; this page refreshes by itself. '
                      f'<a href="/jobs/{_e(job["id"])}">Follow the job</a></p>')
-        body += _top(auth, token, latest, job, NewsFilter(news_dir, cache_s=0), list(settings.symbols))
+        name, syms = workspace()
+        body += (f'<p class="small muted">{name} workspace: news about the {len(syms)} {name} pairs'
+                 f'{" (the Futures top gainers)" if name == "Futures AI" else ""}, plus world, economic and '
+                 'fundamental news. Each search covers both engines\' pairs.</p>')
+        body += _top(auth, token, latest, job, NewsFilter(news_dir, cache_s=0), syms)
         if latest:
-            body += _brief(latest.get("brief"))
+            body += _brief(latest.get("brief"), syms, name)
         body += _sites_section(auth, token, load_sites(news_dir))
         body += _x_section(auth, token, XReader(os.path.join(news_dir, "x.json")))
         if latest:
-            body += _feeds(latest.get("feeds") or {})
+            body += _feeds(latest.get("feeds") or {}, syms, name)
         return page("News", body, user, token, refresh=20 if job else 300)
 
     @app.post("/news/sites")
@@ -131,7 +148,7 @@ def _link(url: str, text: str = "source") -> str:
     return f'<a href="{_e(url)}" rel="noopener noreferrer" target="_blank">{_e(text)}</a>'
 
 
-def _brief(b: dict | None) -> str:
+def _brief(b: dict | None, symbols: list[str] | None = None, name: str = "") -> str:
     if not b:
         return ""
     risk = b.get("market_risk", "normal")
@@ -141,15 +158,19 @@ def _brief(b: dict | None) -> str:
            f'<p>{_e(b.get("market_risk_why", ""))}</p><p class="muted">{_e(b.get("summary", ""))}</p>')
     world = b.get("world_events") or []
     if world:
-        out += "<h2>World events</h2><table><tr><th>Event</th><th>Impact</th><th>Effect on crypto</th><th></th></tr>"
+        out += "<h2>World and economic events</h2><table><tr><th>Event</th><th>Impact</th><th>Effect on crypto</th><th></th></tr>"
         for w in world:
             out += (f'<tr><td>{_e(w["title"])}<div class="muted small">{_e(w.get("date", ""))}</div></td>'
                     f'<td><span class="badge {RISK_CLS.get({"medium": "elevated"}.get(w["impact"], w["impact"]), "")}">'
                     f'{_e(w["impact"])}</span></td><td>{_e(w["direction"])}</td><td>{_link(w.get("url", ""))}</td></tr>')
         out += "</table>"
-    out += ("<h2>Pairs</h2><table><tr><th>Pair</th><th>Risk</th><th>Demand</th><th>Sentiment</th>"
+    pairs = [p for p in b.get("pairs", []) if symbols is None or p["symbol"] in symbols]
+    if symbols is not None and not pairs:
+        return out + (f'<h2>{_e(name)} pairs</h2><p class="muted">The last search had nothing on these pairs yet '
+                      f'({_e(", ".join(symbols)) or "none"}); press Search the web now.</p>')
+    out += (f"<h2>{_e(name + ' pairs' if name else 'Pairs')}</h2><table><tr><th>Pair</th><th>Risk</th><th>Demand</th><th>Sentiment</th>"
             "<th>Why</th><th>Coming events</th></tr>")
-    for p in b.get("pairs", []):
+    for p in pairs:
         sent = p.get("sentiment", 0)
         events = "".join(f'<div class="small">{_e(e.get("date", ""))} {_e(e["title"])} {_link(e.get("url", ""), "↗")}</div>'
                          for e in p.get("events", [])) or '<span class="muted">-</span>'
@@ -162,7 +183,15 @@ def _brief(b: dict | None) -> str:
     return out + "</table>"
 
 
-def _feeds(f: dict) -> str:
+def _mentions(title: str, symbols: list[str]) -> bool:
+    """Whether a headline names one of the coins by its ticker as a whole word (e.g. ZEREBRO)."""
+    import re
+
+    words = set(re.findall(r"[A-Za-z0-9]+", title.upper()))
+    return any(s.split("/")[0].upper() in words for s in symbols)
+
+
+def _feeds(f: dict, symbols: list[str] | None = None, name: str = "") -> str:
     out = ""
     fg, trend = f.get("fear_greed"), f.get("trending") or []
     tiles = []
@@ -175,8 +204,14 @@ def _feeds(f: dict) -> str:
                      + _e(", ".join(t["symbol"] for t in trend)) + "</span></div>")
     if tiles:
         out += '<h2>Sentiment</h2><div class="stats">' + "".join(tiles) + "</div>"
-    for key, title in (("crypto_headlines", "Crypto headlines"), ("world_headlines", "World headlines")):
-        items = f.get(key) or []
+    crypto = f.get("crypto_headlines") or []
+    lists = [("crypto_headlines", "Crypto headlines", crypto)]
+    if symbols is not None:
+        mine = [i for i in crypto if _mentions(i.get("title", ""), symbols)]
+        lists = [("mine", f"Headlines about the {name} pairs", mine),
+                 ("crypto_headlines", "Other crypto headlines", [i for i in crypto if i not in mine])]
+    lists.append(("world_headlines", "World and economic headlines", f.get("world_headlines") or []))
+    for _key, title, items in lists:
         if items:
             out += (f'<details class="card health"><summary>{title} ({len(items)})</summary><ul class="small">'
                     + "".join(f'<li>{_link(i["url"], i["title"])} <span class="muted">· {_e(i["source"])}'
