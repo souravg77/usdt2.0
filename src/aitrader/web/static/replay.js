@@ -151,14 +151,13 @@
     poll();
   }
 
-  // switch on the indicators the loaded strategies use, with how many use each on its switch
-  // (for "All strategies" that would be nearly every indicator, so the switches stay as they are)
-  var AUTO_MAX = 30;
+  // switch on every indicator the loaded strategies use (all of them for "All strategies"), with how
+  // many use each on its switch
   function showUsed(d) {
     var used = d.indicators || {}, keys = Object.keys(used);
+    document.querySelectorAll(".chip[data-study] small").forEach(function (x) { x.remove(); });
     if (!keys.length) { usedEl.textContent = ""; return; }
-    if (d.strategies.length <= AUTO_MAX) sw.set(keys, ["vol"]);
-    else document.querySelectorAll(".chip[data-study] small").forEach(function (x) { x.remove(); });
+    sw.set(keys, ["vol"]);
     var names = [];
     document.querySelectorAll(".chip[data-study]").forEach(function (b) {
       var k = b.dataset.study;

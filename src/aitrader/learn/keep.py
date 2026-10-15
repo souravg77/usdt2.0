@@ -183,10 +183,16 @@ def indicators(entry: Entry) -> set[str]:
     return {k for k, pat in INDICATOR_WORDS.items() if re.search(pat, text)}
 
 
-def indicators_used(reg: Registry) -> dict[str, int]:
-    """How many paper-trading strategies use each chart indicator, most used first."""
+def indicators_used(reg: Registry, market: str | None = None, only_winners: bool = False) -> dict[str, int]:
+    """How many paper-trading strategies use each chart indicator, most used first. With ``market``
+    ("spot" or "futures") only the strategies that engine trades: its own WIN strategies (all of them
+    with ``only_winners``, its WIN-only switch), and no shorts on Spot."""
+    from .picks import trades_now
+
     counts: dict[str, int] = {}
     for e in reg.with_status("paper"):
+        if market and ((market == "spot" and e.kind == "short") or not trades_now(e, only_winners, market)):
+            continue
         try:
             used = indicators(e)
         except Exception:

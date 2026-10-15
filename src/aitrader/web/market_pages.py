@@ -146,7 +146,7 @@ def add_market_routes(app, *, settings, page, guard, exchange: str = EXCHANGE, c
                 db.close()
         except Exception:
             pass  # the live script fills the page from Bybit anyway
-        used = _strategy_indicators(registry)
+        used = _strategy_indicators(registry, "futures" if futures_mode() else "spot")
         tabs = "".join(f'<button type="button" class="seg{" active" if t == tf else ""}" data-tf="{t}">{t}</button>'
                        for t in tfs)
         body = (
@@ -202,15 +202,17 @@ STUDIES = [
 ALWAYS_ON = {"trades", "vol"}
 
 
-def _strategy_indicators(registry_path: str) -> dict[str, int]:
-    """How many paper-trading strategies use each chart indicator ({} when none can be read)."""
+def _strategy_indicators(registry_path: str, market: str | None = None) -> dict[str, int]:
+    """How many of the strategies ``market``'s engine trades use each chart indicator ({} when none
+    can be read)."""
     if not registry_path:
         return {}
     try:
-        from ..learn import Registry
+        from ..learn import Registry, picks
         from ..learn.keep import indicators_used
 
-        return indicators_used(Registry(registry_path))
+        only = bool(market) and picks.winners_only(registry_path, market)
+        return indicators_used(Registry(registry_path), market, only)
     except Exception:
         return {}
 
@@ -231,7 +233,7 @@ def _used_line(used: dict[str, int]) -> str:
         return ""
     labels = {k: label for k, label, *_ in STUDIES}
     names = ", ".join(f"{_e(labels[k])} ({n})" for k, n in used.items() if k in labels)
-    return (f'<p class="small muted js-only">Indicators your paper-trading strategies use (how many use each): '
+    return (f'<p class="small muted js-only">Indicators the strategies this engine trades use (how many use each): '
             f'{names}. <button type="button" id="studies-reset" class="linkish">Show just these</button></p>')
 
 

@@ -91,6 +91,23 @@ def test_indicators_used_counts_paper_strategies(tmp_path):
     assert list(used)[:3] == ["atr", "ema", "rsi"]  # most used first, then by name
 
 
+def test_indicators_used_follows_what_each_engine_trades(tmp_path):
+    """Shawn: the chart indicators follow the strategies set of the engine shown."""
+    from aitrader.learn import picks
+    from aitrader.learn.registry import short_twin
+
+    st = entry("c", name="supertrend_trend")
+    win = picks.pick_copy(st, "1h", "futures")
+    win.status = "paper"
+    reg = make(tmp_path, entry("a", name="trend_pullback"), short_twin(entry("b", name="buy_the_dip")), win)
+    for e in reg.entries.values():
+        e.status = "paper"
+    spot, fut = indicators_used(reg, "spot"), indicators_used(reg, "futures")
+    assert "st" not in spot and fut["st"] == 1  # the Futures WIN copy trades only on Futures
+    assert spot["ema"] == 1 and fut["rsi"] == 2  # the short twin of buy_the_dip only on Futures
+    assert indicators_used(reg, "futures", only_winners=True) == indicators_used(make(tmp_path / "x", win), "futures")
+
+
 def test_saved_n_is_clamped(tmp_path):
     path = str(tmp_path / "learn" / "registry.json")
     assert saved_n(path) == 15
