@@ -252,7 +252,8 @@ class PaperTrader:
                                                      "filled": False,
                                                      "ai_prob": leg_ai["prob"], "ai_version": leg_ai["version"],
                                                      "regime": regimes[market], "perp": perp,
-                                                     "split_tp": self._guards[leg_mkt]["split_tp"]}
+                                                     "split_tp": self._guards[leg_mkt]["split_tp"],
+                                                     "maker_entry": self._guards[leg_mkt]["maker_entry"]}
                             events["opened"].append(k)
                             self._log_signal(k, leg_sig, "")
                             log.info("paper signal %s entry~%.6g stop %.6g ai p=%s size x%.2f regime %s", k,
@@ -430,9 +431,12 @@ class PaperTrader:
             legs.append((k, perp))
         return legs
 
-    def _bcfg(self, perp: bool, min_rr: float = 0.0, split_tp: bool = False) -> BacktestConfig:
+    def _bcfg(self, perp: bool, min_rr: float = 0.0, split_tp: bool = False,
+              maker_entry: bool = False) -> BacktestConfig:
         base = as_perp(self.cfg.backtest) if perp else self.cfg.backtest
-        return replace(base, min_rr=min_rr, split_tp=split_tp) if (min_rr or split_tp) else base
+        if min_rr or split_tp or maker_entry:
+            return replace(base, min_rr=min_rr, split_tp=split_tp, maker_entry=maker_entry)
+        return base
 
     def _exposure_block(self, mkt: str, ex: str, sym: str, short: bool, g: dict) -> str:
         """Why one more position on this side would be too much for the engine, or "": its cap of
@@ -578,7 +582,8 @@ class PaperTrader:
             try:
                 if entry_id in reg.entries:
                     make_strategy(reg.entries[entry_id])  # registers its custom exit rules
-                bcfg = self._bcfg(bool(pos.get("perp")), split_tp=bool(pos.get("split_tp")))
+                bcfg = self._bcfg(bool(pos.get("perp")), split_tp=bool(pos.get("split_tp")),
+                                  maker_entry=bool(pos.get("maker_entry")))
                 t = simulate_signal(sig, df, entry_i, bcfg, {})
             except Exception:  # never close a trade on the wrong rule: keep it open and say so
                 log.exception("paper %s: can't evaluate its exits; kept open", key)
@@ -586,7 +591,12 @@ class PaperTrader:
                 continue
             if t is None:
                 del self.state["open"][key]
-                log.info("paper %s skipped: price opened past the stop", key)
+                if pos.get("maker_entry") and not pos.get("filled"):
+                    self._mark_signal(key, sig.ts, "limit order not filled",
+                                      "price never came back to the limit price during the entry candle")
+                    log.info("paper %s skipped: its limit entry was not filled", key)
+                else:
+                    log.info("paper %s skipped: price opened past the stop", key)
                 continue
             equity = self.state["equity"].get(entry_id, self.cfg.start_equity)
             short = sig.side is Side.SELL

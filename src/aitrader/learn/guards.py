@@ -15,6 +15,9 @@
   most ``max_correlated`` positions on the same side whose hourly returns over the last week move
   together with the new pair (correlation of at least ``corr_min``), so one Bitcoin move can't hit
   every position at once.
+- **Limit entries** (``maker_entry``): enter with a post-only limit order at the signal price or
+  the open, paying the maker fee instead of taker fee and slippage; when the entry candle never
+  trades through that price the order is cancelled and the trade is missed (``engine.maker_fill``).
 
 Settings live in ``paper_guards.json`` next to the paper state; the engines' breaker state lives in
 the paper state itself. Paper only: the live trader keeps its own limits.
@@ -30,14 +33,14 @@ from datetime import datetime, timedelta
 from . import wallet
 
 DEFAULTS = {"breaker": True, "day_pause_pct": 3.0, "pause_hours": 24.0, "week_close_pct": 6.0,
-            "min_rr": 0.0, "trend": False, "split_tp": False,
+            "min_rr": 0.0, "trend": False, "split_tp": False, "maker_entry": False,
             "max_long": 8.0, "max_short": 8.0, "max_correlated": 3.0, "corr_min": 0.8}
 RANGES = {"day_pause_pct": (0.5, 50.0), "pause_hours": (1.0, 168.0), "week_close_pct": (1.0, 90.0),
           "min_rr": (0.0, 10.0), "max_long": (1.0, 200.0), "max_short": (1.0, 200.0),
           "max_correlated": (1.0, 50.0), "corr_min": (0.5, 0.99)}
 WHOLE = ("max_long", "max_short", "max_correlated")
 CORR_BARS = 168  # hourly returns of the last week
-SWITCHES = ("breaker", "trend", "split_tp")
+SWITCHES = ("breaker", "trend", "split_tp", "maker_entry")
 
 HIGHER = {"5m": ("4h", "1d"), "15m": ("4h", "1d"), "30m": ("4h", "1d"), "1h": ("4h", "1d"), "4h": ("1d",)}
 TREND_BARS = 120  # candles of a higher timeframe read for its trend (EMA 50 needs ~60 to settle)

@@ -140,7 +140,7 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
             from ..learn import guards
 
             g = guards.load(guards.path_for(paper_state))["futures" if futures_mode() else "spot"]
-            base = replace(base, min_rr=g["min_rr"], split_tp=g["split_tp"])
+            base = replace(base, min_rr=g["min_rr"], split_tp=g["split_tp"], maker_entry=g["maker_entry"])
         return base
 
     def report_rows() -> list[dict]:

@@ -662,8 +662,8 @@ paper trading. Nothing trades real money.</p>
     def trading_paper_guards(request: Request, csrf: str = Form(""), market: str = Form(""),
                              breaker: str = Form(""), day_pause_pct: str = Form(""), pause_hours: str = Form(""),
                              week_close_pct: str = Form(""), min_rr: str = Form(""), trend: str = Form(""),
-                             split_tp: str = Form(""), max_long: str = Form(""), max_short: str = Form(""),
-                             max_correlated: str = Form(""), corr_min: str = Form("")):
+                             split_tp: str = Form(""), maker_entry: str = Form(""), max_long: str = Form(""),
+                             max_short: str = Form(""), max_correlated: str = Form(""), corr_min: str = Form("")):
         """One engine's loss breakers, minimum reward, higher-timeframe trend check and split take-profit."""
         def act(user):
             from ..learn import guards
@@ -674,8 +674,8 @@ paper trading. Nothing trades real money.</p>
                 g = guards.save(guards.path_for(paths.paper_state), market, {
                     "breaker": breaker == "1", "day_pause_pct": day_pause_pct, "pause_hours": pause_hours,
                     "week_close_pct": week_close_pct, "min_rr": min_rr or 0, "trend": trend == "1",
-                    "split_tp": split_tp == "1", "max_long": max_long, "max_short": max_short,
-                    "max_correlated": max_correlated, "corr_min": corr_min}, by=user)
+                    "split_tp": split_tp == "1", "maker_entry": maker_entry == "1", "max_long": max_long,
+                    "max_short": max_short, "max_correlated": max_correlated, "corr_min": corr_min}, by=user)
             except ValueError:
                 return "Not changed: enter numbers for the loss limits, hours and minimum reward.", False
             name = "Futures AI" if market == "futures" else "Spot AI"
@@ -1665,6 +1665,7 @@ def _guards_text(g: dict) -> str:
              f"minimum reward {g['min_rr']:g}R" if g["min_rr"] else "no minimum reward",
              "higher-timeframe trend check on" if g["trend"] else "no trend check",
              "split take-profit on" if g["split_tp"] else "one take-profit",
+             "limit (maker) entries" if g["maker_entry"] else "market entries",
              f"at most {g['max_long']:g} longs and {g['max_short']:g} shorts, {g['max_correlated']:g} that move "
              f"together (correlation {g['corr_min']:g}+)"]
     return ", ".join(parts)
@@ -1691,6 +1692,7 @@ def _guards_form(paths: Paths, csrf: str, ws: str) -> str:
             f'{num("pause_hours", "for hours")} {num("week_close_pct", "Close all at week loss %")} '
             f'{num("min_rr", "Min reward R (0 off)")} {box("trend", "Trade with the 4h/1d trend")} '
             f'{box("split_tp", "Half at halfway, half at target")} '
+            f'{box("maker_entry", "Enter with limit orders (maker fee)")} '
             f'{num("max_long", "Max longs", "1")} {num("max_short", "Max shorts", "1")} '
             f'{num("max_correlated", "Max moving together", "1")} {num("corr_min", "at correlation", "0.05")}'
             '<button class="ghost">Set rules</button></form>'
@@ -1702,7 +1704,9 @@ def _guards_form(paths: Paths, csrf: str, ws: str) -> str:
             'last week moved with the new pair (at the correlation set), so one Bitcoin move can\'t stop them all '
             'at once. The trend check skips a long while the '
             '4h or daily trend points down, and a short while it points up. Replay uses the minimum reward and the '
-            'split take-profit too, so you can test them there first.</p>')
+            'split take-profit too, so you can test them there first. Limit entries pay the maker fee (0.02% on '
+            'perps instead of 0.055% plus slippage) but miss the trade when the entry candle never comes back to '
+            'the signal price; Replay shows both effects.</p>')
 
 
 def _market_card(paths: Paths, paper: dict, csrf: str, ws: str = "spot") -> str:

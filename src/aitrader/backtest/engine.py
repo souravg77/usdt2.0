@@ -42,6 +42,7 @@ class BacktestConfig:
     max_cost_r: float = 0.25  # skip signals whose round-trip costs exceed this share of the risk (0: off)
     min_rr: float = 0.0  # skip signals whose fixed target is less than this many R away (0: off)
     split_tp: bool = False  # take half the position at halfway to the target, the rest at the target
+    maker_entry: bool = False  # enter with a post-only limit order (maker fee), or not at all (maker_fill)
 
 
 @dataclass
@@ -117,7 +118,11 @@ def simulate_signal(sig: Signal, df: pd.DataFrame, pos: int, cfg: BacktestConfig
         return _simulate_short(sig, df, pos, cfg, trail_cache)
     slip = cfg.slippage_bps / 10_000
     o, h, lo, c, ts = (df[k].to_numpy() for k in ("open", "high", "low", "close", "ts"))
-    entry = o[pos] * (1 + slip)
+    maker = maker_fill(sig, df, pos) if cfg.maker_entry else None
+    if cfg.maker_entry and maker is None:
+        return None  # the limit order was never filled
+    entry = maker if maker is not None else o[pos] * (1 + slip)
+    entry_fee = cfg.maker_fee if maker is not None else cfg.taker_fee
     risk = sig.entry - sig.stop  # per-unit risk as planned at the signal
     if risk <= 0 or entry <= sig.stop:
         return None  # gapped through the stop before we could enter
@@ -161,10 +166,10 @@ def simulate_signal(sig: Signal, df: pd.DataFrame, pos: int, cfg: BacktestConfig
     tf_hours = TIMEFRAME_MS[sig.timeframe] / 3_600_000
     funding = cfg.funding_rate_8h * bars * tf_hours / 8 * entry
     taken = 0.5 if half is not None else 0.0  # the share closed early at tp1 (as maker)
-    fees = entry * cfg.taker_fee + taken * _half_or(half) * cfg.maker_fee + (1 - taken) * exit_px * exit_fee
+    fees = entry * entry_fee + taken * _half_or(half) * cfg.maker_fee + (1 - taken) * exit_px * exit_fee
     # slipped exits were priced at (1 - slip) times the quoted price; targets and "end" were not
     slipped_exit = exit_reason in ("stop", "stop_gap", "trail", "time")
-    slippage = (entry - o[pos]) + (1 - taken) * (exit_px / (1 - slip) - exit_px if slipped_exit and slip < 1 else 0.0)
+    slippage = (0.0 if maker is not None else entry - o[pos]) + (1 - taken) * (exit_px / (1 - slip) - exit_px if slipped_exit and slip < 1 else 0.0)
     gross = taken * (_half_or(half) - entry) + (1 - taken) * (exit_px - entry)
     net = gross - fees - funding
     return Trade(
@@ -175,6 +180,21 @@ def simulate_signal(sig: Signal, df: pd.DataFrame, pos: int, cfg: BacktestConfig
         fee_r=fees / risk, slippage_r=slippage / risk, funding_r=funding / risk, tp1=half,
         features=dict(sig.features),
     )
+
+
+def maker_fill(sig: Signal, df: pd.DataFrame, pos: int) -> float | None:
+    """A post-only limit entry: a buy is placed at the signal price or the entry candle's open,
+    whichever is lower (a sell at the higher), and fills only if that candle trades through it
+    (its low goes below the price; for a sell, its high above). Returns the fill price, or None
+    when price ran away and the order is cancelled at the candle's close: the trade is missed."""
+    if pos >= len(df):
+        return None
+    o, h, lo = float(df["open"].iloc[pos]), float(df["high"].iloc[pos]), float(df["low"].iloc[pos])
+    if sig.side is Side.SELL:
+        price = max(sig.entry, o)
+        return price if h > price else None
+    price = min(sig.entry, o)
+    return price if lo < price else None
 
 
 def _tp1(sig: Signal, cfg: BacktestConfig) -> float | None:
@@ -194,7 +214,11 @@ def _simulate_short(sig: Signal, df: pd.DataFrame, pos: int, cfg: BacktestConfig
     (above), the target (below), a trailing rule or the time stop."""
     slip = cfg.slippage_bps / 10_000
     o, h, lo, c, ts = (df[k].to_numpy() for k in ("open", "high", "low", "close", "ts"))
-    entry = o[pos] * (1 - slip)
+    maker = maker_fill(sig, df, pos) if cfg.maker_entry else None
+    if cfg.maker_entry and maker is None:
+        return None  # the limit order was never filled
+    entry = maker if maker is not None else o[pos] * (1 - slip)
+    entry_fee = cfg.perp_maker_fee if maker is not None else cfg.perp_taker_fee
     risk = sig.stop - sig.entry
     if risk <= 0 or entry >= sig.stop:
         return None  # gapped through the stop before we could enter
@@ -237,9 +261,9 @@ def _simulate_short(sig: Signal, df: pd.DataFrame, pos: int, cfg: BacktestConfig
     tf_hours = TIMEFRAME_MS[sig.timeframe] / 3_600_000
     funding = cfg.perp_funding_8h * bars * tf_hours / 8 * entry
     taken = 0.5 if half is not None else 0.0
-    fees = entry * cfg.perp_taker_fee + taken * _half_or(half) * cfg.perp_maker_fee + (1 - taken) * exit_px * exit_fee
+    fees = entry * entry_fee + taken * _half_or(half) * cfg.perp_maker_fee + (1 - taken) * exit_px * exit_fee
     slipped_exit = exit_reason in ("stop", "stop_gap", "trail", "time")
-    slippage = (o[pos] - entry) + (1 - taken) * (exit_px - exit_px / (1 + slip) if slipped_exit else 0.0)
+    slippage = (0.0 if maker is not None else o[pos] - entry) + (1 - taken) * (exit_px - exit_px / (1 + slip) if slipped_exit else 0.0)
     gross = taken * (entry - _half_or(half)) + (1 - taken) * (entry - exit_px)
     net = gross - fees - funding
     return Trade(
