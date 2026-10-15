@@ -206,3 +206,47 @@ def test_the_paper_trader_skips_a_long_against_the_daily_trend(tmp_path, monkeyp
     why = [s for s in trader.state["signals"] if s["skipped"] == "against the higher-timeframe trend"]
     assert why and "4h trend points down" in why[0]["detail"]
     store.close()
+
+
+def test_a_limit_entry_pays_the_maker_fee_or_misses_the_trade():
+    from aitrader.backtest.engine import maker_fill
+
+    cfg = BacktestConfig(taker_fee=0.001, maker_fee=0.0002, slippage_bps=5, max_cost_r=0)
+    df = _bars([(100, 100, 100, 100), (100, 104.5, 99.5, 104)])  # dips below 100 first, then the target
+    taker = simulate_signal(_sig(), df, 1, cfg, {})
+    maker = simulate_signal(_sig(), df, 1, BacktestConfig(**{**cfg.__dict__, "maker_entry": True}), {})
+    assert maker_fill(_sig(), df, 1) == 100.0 and maker.entry == 100.0 and taker.entry > 100.0
+    assert maker.fee_r < taker.fee_r and maker.r > taker.r and maker.slippage_r == 0
+    ran = _bars([(100, 100, 100, 100), (100.2, 104.5, 100.2, 104)])  # never trades below the open
+    assert maker_fill(_sig(), ran, 1) is None
+    assert simulate_signal(_sig(), ran, 1, BacktestConfig(**{**cfg.__dict__, "maker_entry": True}), {}) is None
+    short = _sig(Side.SELL, entry=100, stop=102, target=96)
+    assert maker_fill(short, _bars([(0, 0, 0, 0), (100, 100.5, 96, 97)]), 1) == 100.0
+    assert maker_fill(short, _bars([(0, 0, 0, 0), (99.8, 99.8, 96, 97)]), 1) is None
+
+
+def test_the_paper_trader_says_when_a_limit_entry_was_not_filled(tmp_path, monkeypatch):
+    from aitrader.backtest import engine
+
+    from test_learn import EVERY_UP_BAR, fill_store, synthetic
+
+    from aitrader.data.store import CandleStore
+    from aitrader.learn import Entry, PaperTrader, Registry
+    from aitrader.learn.rules import validate_spec
+
+    monkeypatch.setattr(engine, "maker_fill", lambda sig, df, pos: None)  # price always runs away
+    store = CandleStore(str(tmp_path / "c.db"))
+    df = synthetic(n=700)
+    fill_store(store, df)
+    reg = Registry(str(tmp_path / "reg.json"))
+    reg.add(Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR), status="paper"))
+    reg.save()
+    state = str(tmp_path / "paper_state.json")
+    wallet.set_engine(wallet.engines_path(state), "futures", False)
+    guards.save(guards.path_for(state), "spot", {"maker_entry": True})
+    trader = PaperTrader(store, str(tmp_path / "reg.json"), ["bybit"], ["BTC/USDT"], state_path=state)
+    for i in range(600, 640):
+        trader.tick(now_ms=int(df.ts.iloc[i]) + H)
+    store.close()
+    assert not trader.state["trades"]
+    assert any(s["skipped"] == "limit order not filled" for s in trader.state["signals"])

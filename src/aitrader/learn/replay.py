@@ -34,7 +34,7 @@ def replay(entries: list[Entry], store: CandleStore, exchange: str, symbol: str,
            "candles": [[c.ts, c.open, c.high, c.low, c.close, c.volume] for c in shown],
            "trades": [], "strategies": [], "skipped": [], "fee_skipped": 0,
            "max_cost_r": (cfg or BacktestConfig()).max_cost_r, "min_rr": (cfg or BacktestConfig()).min_rr,
-           "split_tp": (cfg or BacktestConfig()).split_tp}
+           "split_tp": (cfg or BacktestConfig()).split_tp, "maker_entry": (cfg or BacktestConfig()).maker_entry}
     if not shown:
         return out
     if len(rows) < MIN_BARS:

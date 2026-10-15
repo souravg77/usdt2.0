@@ -94,6 +94,7 @@
           Math.round(d.max_cost_r * 100) + "% of the risk." : "") +
         (d.min_rr ? " Only trades whose target is at least " + d.min_rr + "R away (the engine's minimum reward)." : "") +
         (d.split_tp ? " Half of each trade is taken halfway to its target (split take-profit)." : "") +
+        (d.maker_entry ? " Entries are limit orders (maker fee); signals whose entry candle never came back to the price are missed." : "") +
         (d.strategies.length ? "" : d.picked ? " The " + d.timeframe + " pick kept none of these strategies." :
           " No strategy uses this timeframe: try 1h or 4h.") +
         (d.picked ? " Only the strategies kept by the " + d.timeframe + " pick trade this timeframe." : "") +

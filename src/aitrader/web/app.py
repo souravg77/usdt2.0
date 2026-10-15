@@ -662,7 +662,7 @@ paper trading. Nothing trades real money.</p>
     def trading_paper_guards(request: Request, csrf: str = Form(""), market: str = Form(""),
                              breaker: str = Form(""), day_pause_pct: str = Form(""), pause_hours: str = Form(""),
                              week_close_pct: str = Form(""), min_rr: str = Form(""), trend: str = Form(""),
-                             split_tp: str = Form("")):
+                             split_tp: str = Form(""), maker_entry: str = Form("")):
         """One engine's loss breakers, minimum reward, higher-timeframe trend check and split take-profit."""
         def act(user):
             from ..learn import guards
@@ -673,7 +673,7 @@ paper trading. Nothing trades real money.</p>
                 g = guards.save(guards.path_for(paths.paper_state), market, {
                     "breaker": breaker == "1", "day_pause_pct": day_pause_pct, "pause_hours": pause_hours,
                     "week_close_pct": week_close_pct, "min_rr": min_rr or 0, "trend": trend == "1",
-                    "split_tp": split_tp == "1"}, by=user)
+                    "split_tp": split_tp == "1", "maker_entry": maker_entry == "1"}, by=user)
             except ValueError:
                 return "Not changed: enter numbers for the loss limits, hours and minimum reward.", False
             name = "Futures AI" if market == "futures" else "Spot AI"
@@ -1662,7 +1662,8 @@ def _guards_text(g: dict) -> str:
              f"{g['week_close_pct']:g}% week loss" if g["breaker"] else "loss breakers off",
              f"minimum reward {g['min_rr']:g}R" if g["min_rr"] else "no minimum reward",
              "higher-timeframe trend check on" if g["trend"] else "no trend check",
-             "split take-profit on" if g["split_tp"] else "one take-profit"]
+             "split take-profit on" if g["split_tp"] else "one take-profit",
+             "limit (maker) entries" if g["maker_entry"] else "market entries"]
     return ", ".join(parts)
 
 
@@ -1686,14 +1687,17 @@ def _guards_form(paths: Paths, csrf: str, ws: str) -> str:
             f'{box("breaker", "Loss breakers")} {num("day_pause_pct", "Pause at day loss %")} '
             f'{num("pause_hours", "for hours")} {num("week_close_pct", "Close all at week loss %")} '
             f'{num("min_rr", "Min reward R (0 off)")} {box("trend", "Trade with the 4h/1d trend")} '
-            f'{box("split_tp", "Half at halfway, half at target")}'
+            f'{box("split_tp", "Half at halfway, half at target")} '
+            f'{box("maker_entry", "Enter with limit orders (maker fee)")}'
             '<button class="ghost">Set rules</button></form>'
             '<p class="small muted">Loss breakers count closed and open trades: past the day loss the engine opens '
             'nothing new for the hours set; past the week loss (from Monday midnight) it closes all its positions and '
             'opens nothing new until Monday. Min reward skips signals whose target is closer than that many times '
             'the risk (signals that exit on their own rule are not judged). The trend check skips a long while the '
             '4h or daily trend points down, and a short while it points up. Replay uses the minimum reward and the '
-            'split take-profit too, so you can test them there first.</p>')
+            'split take-profit too, so you can test them there first. Limit entries pay the maker fee (0.02% on '
+            'perps instead of 0.055% plus slippage) but miss the trade when the entry candle never comes back to '
+            'the signal price; Replay shows both effects.</p>')
 
 
 def _market_card(paths: Paths, paper: dict, csrf: str, ws: str = "spot") -> str:
