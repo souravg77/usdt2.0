@@ -1,5 +1,7 @@
 """Timeframe picks: keep only the steady winners on one timeframe; the rest stop trading it."""
 
+import json
+
 from fastapi.testclient import TestClient
 
 from aitrader.config import Settings
@@ -190,11 +192,22 @@ def test_trading_page_winners_only_button(tmp_path, monkeypatch):
     csrf = Auth("admin", "correct horse battery", "k").csrf(c.cookies.get(COOKIE))
     assert c.post("/trading/paper/winners-only", data={"csrf": "x", "on": "1"}).status_code == 403
     c.post("/trading/paper/winners-only", data={"csrf": csrf, "on": "1"})
-    assert picks.winners_only(reg_path)
+    assert picks.winners_only(reg_path) and not picks.winners_only(reg_path, "futures")  # Spot AI's switch only
     page = c.get("/trading").text
     assert "Trade the best strategies too" in page and '<span class="v good">1</span>' in page
     c.post("/trading/paper/winners-only", data={"csrf": csrf, "on": "0"})
     assert not picks.winners_only(reg_path)
+
+
+def test_winners_only_is_per_engine_and_reads_the_old_file(tmp_path):
+    reg_path = str(tmp_path / "registry.json")
+    with open(picks.winners_only_path(reg_path), "w") as fh:
+        json.dump({"on": True}, fh)  # the file before each engine had its own switch
+    assert picks.winners_only(reg_path, "spot") and picks.winners_only(reg_path, "futures")
+    picks.set_winners_only(reg_path, False, market="futures")
+    assert picks.winners_only(reg_path, "spot") and not picks.winners_only(reg_path, "futures")
+    picks.set_winners_only(reg_path, False)
+    assert not picks.winners_only(reg_path, "spot")
 
 
 def test_futures_mode_switches_the_whole_dashboard(tmp_path, monkeypatch):

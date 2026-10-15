@@ -107,6 +107,7 @@ class PaperTrader:
         self.market_path = wallet.market_path(state_path)  # the futures leverage chosen
         self.engines_path = wallet.engines_path(state_path)  # Spot AI / Futures AI on or off
         self.limits_path = wallet.limits_path(state_path)  # each engine's daily loss and open-position limits
+        self.filters_path = wallet.filters_path(state_path)  # whether each engine uses the AI filter / teacher
         self._now = 0
         self.perp_limits_path = perp_limits.DEFAULT_PATH  # each coin's maximum leverage on Bybit
         self.ai_filter = ai_filter  # Phase 4 trade filter (aitrader.ai.LiveFilter) or None
@@ -142,10 +143,15 @@ class PaperTrader:
         per_market = {m: set(symbols if self.market_symbols is None else self._symbols(m)) for m in wallet.MARKETS}
         tf_picks = picks.load(picks.picks_path(self.registry_path))  # timeframes kept for their winners
         engines = wallet.engines(self.engines_path)  # the Trading page's Spot AI / Futures AI switches
-        only_winners = picks.winners_only(self.registry_path)  # the Trading page's "WIN strategies only"
+        # each engine's "WIN strategies only" switch and its use of the AI filter and the teacher
+        only_winners = {m: picks.winners_only(self.registry_path, m) for m in wallet.MARKETS}
+        uses = wallet.filters(self.filters_path)
         built, broken, checks = 0, 0, 0  # what this pass looked at, for the dashboard
         for entry in reg.with_status("paper"):
-            if not picks.trades_now(entry, only_winners):
+            benched = self.state.get("benched") or {}
+            trades = {m: picks.trades_now(entry, only_winners[m]) and entry.id not in (benched.get(m) or {})
+                      for m in wallet.MARKETS}
+            if not any(trades.values()):
                 continue
             try:
                 strat = make_strategy(entry)
@@ -156,7 +162,7 @@ class PaperTrader:
             built += 1
             for ex in self.exchanges:
                 for sym in symbols:
-                    on = {m: engines[m] and sym in per_market[m] for m in wallet.MARKETS}
+                    on = {m: engines[m] and trades[m] and sym in per_market[m] for m in wallet.MARKETS}
                     for tf in picks.allowed(entry, strat.spec.timeframes, tf_picks):
                         key = f"{entry.id}|{ex}|{sym}|{tf}"
                         # a long takes the plain key on Spot and key|futures on Futures; a short
@@ -199,34 +205,43 @@ class PaperTrader:
                                 self._log_signal(k, sig, "market context or news filter")
                                 events["filtered"].append(k)
                             continue
-                        ai = self._ai_check(sig, entry.id, df)
+                        # each engine uses the AI filter and the teacher only if it is set to
+                        ai_legs = [lg for lg in legs if uses["futures" if lg[1] else "spot"]["ai"]]
+                        ai = self._ai_check(sig, entry.id, df) if ai_legs else _NO_AI
                         if not ai["take"]:
                             self._note_filtered(key, sig, ai)
-                            for k, _perp in legs:
+                            for k, _perp in ai_legs:
                                 self._log_signal(k, sig, "AI filter")
                                 events["filtered"].append(k)
-                            continue
-                        tch = self._teacher_check(sig, entry.id, df)
+                            legs = [lg for lg in legs if lg not in ai_legs]
+                        tch_legs = [lg for lg in legs if uses["futures" if lg[1] else "spot"]["teacher"]]
+                        tch = self._teacher_check(sig, entry.id, df) if tch_legs else _no_teacher(sig)
                         if not tch["take"]:
-                            for k, _perp in legs:
+                            for k, _perp in tch_legs:
                                 self._log_signal(k, sig, "backtest teacher")
                                 events["filtered"].append(k)
                             log.info("paper signal %s skipped: the backtest teacher %s says avoid %s",
                                      key, tch["version"], tch["situation"])
+                            legs = [lg for lg in legs if lg not in tch_legs]
+                        if not legs:
                             continue
-                        sig = tch["signal"]
                         if market not in regimes:
                             regimes[market] = _regime(df, tf)
                         for k, perp in legs:
-                            self.state["open"][k] = {"entry_id": entry.id, "signal": _sig_dict(sig),
-                                                     "situation": tch["situation"], "teacher": tch["version"],
-                                                     "size_mult": size_mult * ctx_mult * ai["size"], "filled": False,
-                                                     "ai_prob": ai["prob"], "ai_version": ai["version"],
+                            leg_ai = ai if (k, perp) in ai_legs else _NO_AI
+                            leg_tch = tch if (k, perp) in tch_legs else _no_teacher(sig)
+                            leg_sig = leg_tch["signal"]
+                            self.state["open"][k] = {"entry_id": entry.id, "signal": _sig_dict(leg_sig),
+                                                     "situation": leg_tch["situation"], "teacher": leg_tch["version"],
+                                                     "size_mult": size_mult * ctx_mult * leg_ai["size"],
+                                                     "filled": False,
+                                                     "ai_prob": leg_ai["prob"], "ai_version": leg_ai["version"],
                                                      "regime": regimes[market], "perp": perp}
                             events["opened"].append(k)
-                            self._log_signal(k, sig, "")
+                            self._log_signal(k, leg_sig, "")
                             log.info("paper signal %s entry~%.6g stop %.6g ai p=%s size x%.2f regime %s", k,
-                                     sig.entry, sig.stop, ai["prob"], ai["size"], (regimes[market] or {}).get("label"))
+                                     leg_sig.entry, leg_sig.stop, leg_ai["prob"], leg_ai["size"],
+                                     (regimes[market] or {}).get("label"))
         for market, (_df, close, _fresh) in frames.items():
             self._seen[market] = close
         newest = max((c for _d, c, _f in frames.values() if c), default=None)
@@ -393,7 +408,7 @@ class PaperTrader:
             return {"take": True, "size": 1.0, "prob": None, "version": None}
 
     def _teacher_check(self, sig: Signal, entry_id: str, df) -> dict:
-        passthrough = {"take": True, "signal": sig, "situation": None, "verdict": None, "version": None}
+        passthrough = _no_teacher(sig)
         if self.teacher is None:
             return passthrough
         try:
@@ -532,6 +547,7 @@ class PaperTrader:
 
     def _score(self, reg: Registry, events: dict) -> None:
         rule = self.cfg.retire
+        benched = {m: {} for m in wallet.MARKETS}  # engine -> {strategy: why it stopped trading there}
         for entry in reg.entries.values():
             rows = [r for r in self.state["trades"] if r["entry_id"] == entry.id]
             if not rows and entry.status != "paper":
@@ -547,15 +563,25 @@ class PaperTrader:
             }
             if entry.status != "paper":
                 continue
-            why = None
-            if m["max_drawdown_r"] > rule.max_drawdown:
-                why = f"paper drawdown {m['max_drawdown_r']:.1f}R passed {rule.max_drawdown:g}R"
-            elif m["trades"] >= rule.min_trades and m["expectancy_r"] < rule.min_expectancy:
-                why = f"paper expectancy {m['expectancy_r']:+.3f}R after {m['trades']} trades"
-            if why:
+            # each engine judges a strategy on its own trades: losing on one engine stops it there
+            # only; it retires when every engine that traded it lost
+            fails, traded = {}, []
+            for mkt in wallet.MARKETS:
+                mine = [r for r in rows if _row_market(r) == mkt]
+                if not mine:
+                    continue
+                traded.append(mkt)
+                why = _retire_why(metrics([_trade_from(r) for r in mine]), rule)
+                if why:
+                    fails[mkt] = why
+                    benched[mkt][entry.id] = why
+            if traded and len(fails) == len(traded):
+                name = {"spot": "Spot AI", "futures": "Futures AI"}
+                why = "; ".join(f"{name[k]}: {v}" for k, v in fails.items()) if len(traded) > 1 else fails[traded[0]]
                 entry.set_status("retired", why)
                 events["retired"].append(entry.id)
                 log.warning("retired %s: %s", entry.id, why)
+        self.state["benched"] = benched
 
     def _save_registry(self, reg: Registry, retired: list[str]) -> None:
         """Write back only what this tick changed (paper results, retirements) onto the file as
@@ -594,6 +620,28 @@ def _regime(df, timeframe: str) -> dict | None:
     except Exception:  # the label is for reports only: never let it stop a paper trade
         log.exception("regime classifier failed on %s", timeframe)
         return None
+
+
+def _row_market(row: dict) -> str:
+    """The engine a closed trade belongs to."""
+    return row.get("market") if row.get("market") in wallet.MARKETS else wallet.market_of(row)
+
+
+def _retire_why(m: dict, rule) -> str | None:
+    """Why paper results this bad stop a strategy, or None."""
+    if m["max_drawdown_r"] > rule.max_drawdown:
+        return f"paper drawdown {m['max_drawdown_r']:.1f}R passed {rule.max_drawdown:g}R"
+    if m["trades"] >= rule.min_trades and m["expectancy_r"] < rule.min_expectancy:
+        return f"paper expectancy {m['expectancy_r']:+.3f}R after {m['trades']} trades"
+    return None
+
+
+_NO_AI = {"take": True, "size": 1.0, "prob": None, "version": None}  # an engine that doesn't use the AI filter
+
+
+def _no_teacher(sig: Signal) -> dict:
+    """The teacher's answer for an engine that doesn't use it (or when no lessons are turned on)."""
+    return {"take": True, "signal": sig, "situation": None, "verdict": None, "version": None}
 
 
 def _sig_dict(sig: Signal) -> dict:

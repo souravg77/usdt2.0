@@ -73,6 +73,46 @@ def set_engine(path: str, market: str, on: bool, by: str = "") -> dict:
     return engines(path)
 
 
+FILTERS = ("ai", "teacher")
+
+
+def filters_path(state_path: str) -> str:
+    return os.path.join(os.path.dirname(os.path.abspath(state_path)), "paper_filters.json")
+
+
+def filters(path: str) -> dict:
+    """{"spot": {"ai": on, "teacher": on}, "futures": {...}}: whether each engine uses the AI filter
+    and the backtest teacher (when they are turned on at all). Both do unless a person said no."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        data = {}
+    data = data if isinstance(data, dict) else {}
+    out = {}
+    for m in MARKETS:
+        mine = data.get(m) if isinstance(data.get(m), dict) else {}
+        out[m] = {f: mine.get(f, True) is not False for f in FILTERS}
+    return out
+
+
+def set_filter(path: str, market: str, name: str, on: bool, by: str = "") -> dict:
+    """Let one engine use (or skip) the AI filter or the teacher; the other engine is not changed."""
+    if market not in MARKETS or name not in FILTERS:
+        raise ValueError(f"unknown engine or filter {market!r} {name!r}")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        data = data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        data = {}
+    mine = data.get(market) if isinstance(data.get(market), dict) else {}
+    mine.update({name: bool(on), "by": by, "at": int(time.time() * 1000)})
+    data[market] = mine
+    _save_market(path, data)
+    return filters(path)
+
+
 def clamp(amount: float) -> float:
     return max(MIN_START, min(MAX_START, float(amount)))
 

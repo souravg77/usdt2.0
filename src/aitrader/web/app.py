@@ -390,9 +390,11 @@ paper trading. Nothing trades real money.</p>
                     f'<button class="warn-btn">Close all {name} positions</button>')
         controls = (f'<div class="card"><h3>Controls</h3><p>Trading {state}<br>Mode <b>{_e(settings.mode.value)}</b>'
                     f' · live orders {live}</p><div class="row">'
-                    f'<form method="post" action="/trading/pause">{csrf}<button>Pause new entries</button></form>'
+                    f'<form method="post" action="/trading/pause">{csrf}<button>Pause everything</button></form>'
                     f'<form method="post" action="/trading/resume">{csrf}<button class="ghost">Resume</button></form>'
-                    '</div>'
+                    '</div><p class="small muted">Pause everything stops new entries on Spot AI, Futures AI and the '
+                    f'live trader together (an emergency stop). To stop only {name}, use Turn {name} off on its card; '
+                    'the other engine keeps trading.</p>'
                     + close_ws +
                     f'<span class="small muted">Closes every {name} paper position at the last closed candle\'s '
                     f'price (fees included) within a minute; the other engine\'s positions are not touched. '
@@ -407,8 +409,8 @@ paper trading. Nothing trades real money.</p>
         paper, execs = _workspace(paper, ws), {m: _workspace(st, ws) for m, st in execs.items()}
         body = [note, _workspace_note(ws), _trading_stats(c, settings, paths, paper, events, acct, ws),
                 '<div class="grid">', _market_card(paths, full, csrf, ws), _wallet_card(paths, paper, csrf, ws),
-                "" if fut_view else _account_card(acct, csrf), _paper_switch_card(c, paths, events, jobs.list(), csrf),
-                _ai_card(paths, jobs.list(), csrf), _live_card(settings, paths, events), "</div>",
+                "" if fut_view else _account_card(acct, csrf), _paper_switch_card(c, paths, events, jobs.list(), csrf, ws),
+                _ai_card(paths, jobs.list(), csrf, ws), _live_card(settings, paths, events), "</div>",
                 '<div class="grid">', controls, _gate_card(paths, csrf), "</div>",
                 "<h2>Equity</h2>", _equity_svg(paper, execs),
                 "<h2>Open positions</h2>",
@@ -468,9 +470,10 @@ paper trading. Nothing trades real money.</p>
     @app.post("/trading/pause")
     def trading_pause(request: Request, csrf: str = Form("")):
         def act(user):
-            _control().pause(f"paused from the dashboard by {user}", by=user)
-            _event("risk_pause", f"paused from the dashboard by {user}", "warning")
-            return "Paused: no new entries. Open positions are still managed."
+            _control().pause(f"everything paused from the dashboard by {user}", by=user)
+            _event("risk_pause", f"everything paused from the dashboard by {user}", "warning")
+            return ("Everything is paused: Spot AI, Futures AI and the live trader open no new trades. Open positions "
+                    "are still managed. Resume starts them all again.")
         return _control_post(request, csrf, act)
 
     @app.post("/trading/resume")
@@ -525,29 +528,56 @@ paper trading. Nothing trades real money.</p>
                     "minute. The others stay open.")
         return _control_post(request, csrf, act)
 
+    def _ws_market(market: str) -> str:
+        """The engine a form is for: its own field, else the workspace shown."""
+        if market in ("spot", "futures"):
+            return market
+        return "futures" if _futures_state(paths)[0] else "spot"
+
     @app.post("/trading/paper/on")
-    def trading_paper_on(request: Request, csrf: str = Form("")):
+    def trading_paper_on(request: Request, csrf: str = Form(""), market: str = Form("")):
+        """Turn one engine's paper trading on (Spot AI or Futures AI); the other is not changed."""
         def act(user):
+            from ..learn import wallet
+
+            mkt = _ws_market(market)
+            name, other = ("Futures AI", "Spot AI") if mkt == "futures" else ("Spot AI", "Futures AI")
             ctl = _control()
             if ctl.killed:
                 return "The kill switch is on: press Resume under Controls first, then turn paper trading on."
-            if ctl.paused:
+            epath = wallet.engines_path(paths.paper_state)
+            was_on = wallet.engines(epath)[mkt]
+            extra = ""
+            if ctl.stops_paper and not str(ctl.state().get("reason", "")).startswith("paper trading turned off"):
+                return ("Everything is paused under Controls: press Resume there first, then turn the engine on.",
+                        False)
+            if ctl.stops_paper:
+                # the older "Turn paper trading off" paused both engines: bring back only this one
                 ctl.resume(by=user)
-                _event("resume", f"paper trading turned on from the dashboard by {user}")
-            if any(j["status"] in ("queued", "running") and j.get("meta", {}).get("kind") == "paper-start"
-                   for j in jobs.list()):
-                return "Paper trading is already being switched on; see Recent jobs on the Overview page."
-            since = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 365 * 86400))
-            jobs.submit("Turn paper trading on: every strategy, then a year of price history",
-                        [["learn", "add-library"], ["learn", "add-builtin"], ["learn", "add-timeframe", "30m"],
-                         ["learn", "add-shorts"],
-                         ["learn", "paper-all"],
-                         ["download", "--since", since, "--exchange", EXCHANGE],
-                         ["learn", "test", "--paper"], ["learn", "keep-top"]], meta={"kind": "paper-start"})
-            _event("paper_on", f"paper trading turned on from the dashboard by {user}")
-            return ("Paper trading is on: every strategy is being loaded into paper trading, then a year of "
-                    "price history is downloaded, each one is backtested and only the best ones keep paper "
-                    "trading. Trades open when a strategy's signal appears on a closed candle.")
+                omkt = "spot" if mkt == "futures" else "futures"
+                if wallet.engines(epath)[omkt]:
+                    wallet.set_engine(epath, omkt, False, by=user)
+                    extra = f" {other} stays off as it was; turn it on in its own workspace."
+                _event("resume", f"pause lifted for {name} from the dashboard by {user}")
+            wallet.set_engine(epath, mkt, True, by=user)
+            _event("paper_on", f"{name} paper trading turned on from the dashboard by {user}")
+            busy = any(j["status"] in ("queued", "running") and j.get("meta", {}).get("kind") == "paper-start"
+                       for j in jobs.list())
+            if was_on or not _trading_count(paths, mkt):
+                if busy:
+                    return f"{name} is on. The strategies are already being loaded; see Recent jobs on the Overview page.{extra}"
+                since = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 365 * 86400))
+                jobs.submit("Load every strategy into paper trading, then a year of price history",
+                            [["learn", "add-library"], ["learn", "add-builtin"], ["learn", "add-timeframe", "30m"],
+                             ["learn", "add-shorts"],
+                             ["learn", "paper-all"],
+                             ["download", "--since", since, "--exchange", EXCHANGE],
+                             ["learn", "test", "--paper"], ["learn", "keep-top"]], meta={"kind": "paper-start"})
+                return (f"{name} paper trading is on, and every strategy is being loaded: a year of price history is "
+                        "downloaded, each one is backtested and only the best ones keep trading. Trades open when a "
+                        f"strategy's signal appears on a closed candle.{extra}")
+            return (f"{name} paper trading is on: it opens new paper trades from its own wallet. {other} is not "
+                    f"changed.{extra}")
         return _control_post(request, csrf, act)
 
     @app.post("/trading/paper/keep")
@@ -643,17 +673,41 @@ paper trading. Nothing trades real money.</p>
         return _control_post(request, csrf, act)
 
     @app.post("/trading/paper/winners-only")
-    def trading_paper_winners_only(request: Request, csrf: str = Form(""), on: str = Form("")):
+    def trading_paper_winners_only(request: Request, csrf: str = Form(""), on: str = Form(""),
+                                   market: str = Form("")):
         def act(user):
             from ..learn import picks
 
+            mkt = _ws_market(market)
+            name = "Futures AI" if mkt == "futures" else "Spot AI"
             turn_on = on == "1"
-            picks.set_winners_only(paths.registry, turn_on, by=user)
-            _event("winners_only", f"WIN strategies only turned {'on' if turn_on else 'off'} from the dashboard by {user}")
+            picks.set_winners_only(paths.registry, turn_on, by=user, market=mkt)
+            _event("winners_only", f"{name}: WIN strategies only turned {'on' if turn_on else 'off'} from the "
+                                   f"dashboard by {user}")
             if turn_on:
-                return ("WIN strategies only is on: from the next minute only the WIN strategies open paper trades. "
-                        "Trades the others already opened still close normally.")
-            return "WIN strategies only is off: the best strategies open paper trades again, with the WIN ones."
+                return (f"{name} trades only the WIN strategies from the next minute. Trades the others already "
+                        "opened still close normally. The other engine is not changed.")
+            return f"{name} trades the best strategies again, with the WIN ones. The other engine is not changed."
+        return _control_post(request, csrf, act)
+
+    @app.post("/trading/paper/filter")
+    def trading_paper_filter(request: Request, csrf: str = Form(""), market: str = Form(""), name: str = Form(""),
+                             on: str = Form("")):
+        """Whether one engine uses the AI filter or the backtest teacher; the other is not changed."""
+        def act(user):
+            from ..learn import wallet
+
+            mkt = _ws_market(market)
+            eng = "Futures AI" if mkt == "futures" else "Spot AI"
+            if name not in wallet.FILTERS:
+                return "Not changed: choose the AI filter or the teacher.", False
+            what = "the AI filter" if name == "ai" else "the backtest teacher"
+            turn_on = on == "1"
+            wallet.set_filter(wallet.filters_path(paths.paper_state), mkt, name, turn_on, by=user)
+            _event("paper_filter", f"{eng} {'uses' if turn_on else 'stopped using'} {what}, from the dashboard by {user}")
+            if turn_on:
+                return f"{eng} uses {what} again whenever it is turned on. The other engine is not changed."
+            return f"{eng} no longer uses {what}: it takes its signals without it. The other engine is not changed."
         return _control_post(request, csrf, act)
 
     @app.post("/trading/ai/train")
@@ -698,11 +752,17 @@ paper trading. Nothing trades real money.</p>
         return _control_post(request, csrf, act)
 
     @app.post("/trading/paper/off")
-    def trading_paper_off(request: Request, csrf: str = Form("")):
+    def trading_paper_off(request: Request, csrf: str = Form(""), market: str = Form("")):
+        """Turn one engine's paper trading off; the other engine keeps trading."""
         def act(user):
-            _control().pause(f"paper trading turned off from the dashboard by {user}", by=user)
-            _event("risk_pause", f"paper trading turned off from the dashboard by {user}", "warning")
-            return "Paper trading is off: no new entries. Open positions are still managed until they close."
+            from ..learn import wallet
+
+            mkt = _ws_market(market)
+            name, other = ("Futures AI", "Spot AI") if mkt == "futures" else ("Spot AI", "Futures AI")
+            wallet.set_engine(wallet.engines_path(paths.paper_state), mkt, False, by=user)
+            _event("paper_engine", f"{name} paper trading turned off from the dashboard by {user}", "warning")
+            return (f"{name} paper trading is off: no new {name} trades. Its open positions are still managed until "
+                    f"they close. {other} keeps trading.")
         return _control_post(request, csrf, act)
 
     @app.post("/trading/gate")
@@ -863,8 +923,9 @@ def _filter_card(paths: Paths) -> str:
     return f'<div class="card"><h3>AI trade filter</h3><p>{text}</p></div>'
 
 
-def _ai_card(paths: Paths, job_list: list[dict], csrf: str) -> str:
-    """The AI trade filter: train a new model, turn the best candidate on, or turn it off."""
+def _ai_card(paths: Paths, job_list: list[dict], csrf: str, ws: str = "spot") -> str:
+    """The AI trade filter: train a new model, turn the best candidate on, or turn it off; and
+    whether the workspace's engine uses it and the backtest teacher."""
     from ..ai import ModelRegistry
 
     reg = ModelRegistry(paths.models)
@@ -904,8 +965,31 @@ def _ai_card(paths: Paths, job_list: list[dict], csrf: str) -> str:
     if reg.active:
         buttons.append(f'<form method="post" action="/trading/ai/off">{csrf}<button class="ghost">'
                        'Turn the AI filter off</button></form>')
-    parts.append(f'<div class="row">{"".join(buttons)}</div></div>')
+    parts.append(f'<div class="row">{"".join(buttons)}</div>')
+    parts.append(_engine_filters(paths, csrf, ws))
+    parts.append('</div>')
     return "".join(parts)
+
+
+def _engine_filters(paths: Paths, csrf: str, ws: str) -> str:
+    """Whether the workspace's engine uses the AI filter and the backtest teacher (each engine
+    chooses for itself; turning a model or lessons on or off is shared research)."""
+    from ..learn import wallet
+
+    name = "Futures AI" if ws == "futures" else "Spot AI"
+    uses = wallet.filters(wallet.filters_path(paths.paper_state))[ws]
+    rows = []
+    for key, what in (("ai", "AI filter"), ("teacher", "backtest teacher")):
+        yes = uses[key]
+        rows.append(f'<form method="post" action="/trading/paper/filter" class="row">{csrf}'
+                    f'<input type="hidden" name="market" value="{ws}"><input type="hidden" name="name" value="{key}">'
+                    f'<input type="hidden" name="on" value="{"0" if yes else "1"}">'
+                    f'<span class="small">{name} uses the {what}: <b class="{"good" if yes else "muted"}">'
+                    f'{"YES" if yes else "NO"}</b></span>'
+                    f'<button class="ghost">{"Stop using it on " + name if yes else "Use it on " + name}</button></form>')
+    return ('<p class="small muted">Each engine chooses for itself whether it uses the AI filter and the backtest '
+            'teacher (when they are turned on); changing it here does not change the other engine.</p>'
+            + "".join(rows))
 
 
 def _wallet_card(paths: Paths, paper: dict, csrf: str, ws: str = "spot") -> str:
@@ -1340,7 +1424,11 @@ def _trading_stats(c: dict, settings, paths: Paths, paper: dict, events: list[di
         trading = ("Running", "good")
     trades = paper.get("trades", [])
     pnl = sum(t.get("pnl_usdt", 0) for t in trades)
-    in_paper = _trading_count(paths)
+    in_paper = _trading_count(paths, ws)
+    from ..learn import wallet
+
+    if not c["killed"] and not c["paused"] and not wallet.engines(wallet.engines_path(paths.paper_state))[ws]:
+        trading = (f"{'Futures' if ws == 'futures' else 'Spot'} AI off", "warn")
     tiles = [
         ("Trading", trading[0], trading[1], "new entries" if not c["paused"] and not c["killed"] else ""),
         ("Mode", settings.mode.value, "", "live orders locked" if live_gate_problems(settings) else "LIVE UNLOCKED"),
@@ -1409,28 +1497,33 @@ def _account_card(acct: dict, csrf: str = "", now: float | None = None) -> str:
             f'{again}</div>')
 
 
-def _trading_count(paths: Paths) -> int:
-    """How many strategies paper trading opens trades for (only the WIN ones when that switch is on)."""
+def _trading_count(paths: Paths, ws: str = "spot") -> int:
+    """How many strategies ``ws``'s engine opens paper trades for (only the WIN ones when its switch is on)."""
     from ..learn import Registry, picks
 
     try:
-        only = picks.winners_only(paths.registry)
+        only = picks.winners_only(paths.registry, ws)
         return sum(1 for e in Registry(paths.registry).entries.values()
                    if e.status == "paper" and picks.trades_now(e, only))
     except Exception:
         return 0
 
 
-def _paper_switch_card(c: dict, paths: Paths, events: list[dict], jobs: list[dict], csrf: str) -> str:
-    """The paper-trading switch: on loads every strategy into paper trading; off pauses entries."""
-    from ..learn import Registry, picks
+def _paper_switch_card(c: dict, paths: Paths, events: list[dict], jobs: list[dict], csrf: str,
+                       ws: str = "spot") -> str:
+    """The paper-trading switch of the workspace's engine: on, off and its strategy choices. The
+    other engine's switch is only on its own workspace."""
+    from ..learn import Registry, picks, wallet
 
-    in_paper = _trading_count(paths)
+    name = "Futures AI" if ws == "futures" else "Spot AI"
+    other = "Spot AI" if ws == "futures" else "Futures AI"
+    in_paper = _trading_count(paths, ws)
     try:
         wins = sum(1 for e in Registry(paths.registry).entries.values() if e.status == "paper" and picks.picked_for(e))
     except Exception:
         wins = 0
-    only = picks.winners_only(paths.registry)
+    only = picks.winners_only(paths.registry, ws)
+    engine_on = wallet.engines(wallet.engines_path(paths.paper_state))[ws]
     svc, svc_cls, svc_detail = _service_state(events, "paper", int(time.time() * 1000))
     starting = next((j for j in jobs if j.get("meta", {}).get("kind") == "paper-start"
                      and j["status"] in ("queued", "running")), None)
@@ -1439,7 +1532,9 @@ def _paper_switch_card(c: dict, paths: Paths, events: list[dict], jobs: list[dic
     if c["killed"]:
         state, cls, why = "OFF", "bad", "the kill switch is on"
     elif c["paused"] and Control._manual(c):
-        state, cls, why = "OFF", "bad", "new entries are paused"
+        state, cls, why = "OFF", "bad", "everything is paused under Controls"
+    elif not engine_on:
+        state, cls, why = "OFF", "bad", f"turned off here; {other} is not affected"
     elif starting:
         state, cls, why = "STARTING", "warn", f'loading strategies and price history (<a href="/jobs/{_e(starting["id"])}">progress</a>)'
     elif not in_paper and only:
@@ -1454,28 +1549,28 @@ def _paper_switch_card(c: dict, paths: Paths, events: list[dict], jobs: list[dic
                                          else f"{in_paper} strategies trading with fake money")
     if state == "ON" and c["paused"]:  # an automatic live pause: paper keeps going
         why += "; live trading is paused (see Controls), paper keeps collecting results"
-    on = "Turn paper trading on" if state != "ON" else "Reload every strategy"
+    on = f"Turn {name} paper trading on" if state != "ON" else "Reload every strategy"
+    hidden = f'<input type="hidden" name="market" value="{ws}">'
     from ..learn.keep import MAX_N, MIN_N, saved_n
 
     keep_n = saved_n(paths.registry)
-    return (f'<div class="card"><h3>Paper trading (fake money)</h3><p>Paper trading <b class="{cls}">{state}</b>: {why}</p>'
-            '<p class="small muted">On puts every strategy into paper trading, the untested and the '
-            'backtest-rejected ones too, and downloads a year of history for all pairs. Each one then trades '
-            'live prices with fake money; one that loses too much retires by itself. Each one is then backtested '
-            'too, and only the best keep paper trading: only strategies that pass both the backtest and paper '
-            'trading can ever be approved for live. '
-            'Off pauses new entries '
-            '(pause and resume apply to the live trader too).</p><div class="row">'
-            f'<form method="post" action="/trading/paper/on">{csrf}<button>{on}</button></form>'
-            f'<form method="post" action="/trading/paper/off">{csrf}<button class="ghost">Turn paper trading off</button></form>'
+    return (f'<div class="card"><h3>{name} paper trading (fake money)</h3><p>{name} paper trading '
+            f'<b class="{cls}">{state}</b>: {why}</p>'
+            f'<p class="small muted">Off stops new {name} paper trades only; its open positions still run to their '
+            f'exits and {other} keeps trading. On starts {name} again, and loads every strategy first when none is '
+            'paper trading yet. The strategies themselves are shared research: Reload every strategy puts every '
+            'strategy into paper trading, downloads a year of history and backtests them, for both engines.</p>'
+            f'<div class="row"><form method="post" action="/trading/paper/on">{csrf}{hidden}<button>{on}</button></form>'
+            f'<form method="post" action="/trading/paper/off">{csrf}{hidden}<button class="ghost">'
+            f'Turn {name} paper trading off</button></form>'
             '</div><p class="small muted">Keep only the best: strategies are ranked by their backtest and paper '
             'results (ones that passed the backtest first, then result per trade, with few trades counting '
             'for less). The best stay in paper trading and the rest stop opening trades; every reload ranks '
-            'them again, so one can come back.</p>'
+            'them again, so one can come back. This ranking is shared by both engines.</p>'
             f'<form method="post" action="/trading/paper/keep" class="row">{csrf}'
             f'<label class="small">Keep the best <input type="number" name="n" min="{MIN_N}" max="{MAX_N}" '
             f'value="{keep_n}" style="width:4.5em"> strategies</label><button class="ghost">Keep only the best</button></form>'
-            + _winners_only_form(only, wins, csrf) + '</div>')
+            + _winners_only_form(only, wins, csrf, ws) + '</div>')
 
 
 def _futures_state(paths: Paths) -> tuple[bool, float]:
@@ -1562,18 +1657,21 @@ def _market_card(paths: Paths, paper: dict, csrf: str, ws: str = "spot") -> str:
     return out
 
 
-def _winners_only_form(only: bool, wins: int, csrf: str) -> str:
-    """The "WIN strategies only" switch on the paper-trading card."""
+def _winners_only_form(only: bool, wins: int, csrf: str, ws: str = "spot") -> str:
+    """The workspace engine's "WIN strategies only" switch on the paper-trading card."""
+    name = "Futures AI" if ws == "futures" else "Spot AI"
+    hidden = f'<input type="hidden" name="market" value="{ws}">'
     if only:
-        head = f'<p><b>WIN strategies only: <span class="good">ON</span></b>. Only the {wins} WIN strategies open trades.'
-        btn = '<input type="hidden" name="on" value="0"><button class="ghost">Trade the best strategies too</button>'
+        head = (f'<p><b>{name} WIN strategies only: <span class="good">ON</span></b>. Only the {wins} WIN strategies '
+                f'open {name} trades.')
+        btn = hidden + '<input type="hidden" name="on" value="0"><button class="ghost">Trade the best strategies too</button>'
     else:
-        head = (f'<p><b>WIN strategies only: <span class="muted">OFF</span></b>. The best strategies and the {wins} WIN '
-                'strategies all open trades.')
-        btn = '<input type="hidden" name="on" value="1"><button>Trade only the WIN strategies</button>'
+        head = (f'<p><b>{name} WIN strategies only: <span class="muted">OFF</span></b>. The best strategies and the '
+                f'{wins} WIN strategies all open {name} trades.')
+        btn = hidden + '<input type="hidden" name="on" value="1"><button>Trade only the WIN strategies</button>'
     return (head + '</p><p class="small muted">WIN strategies are the ones kept by Keep only the winners on the Replay '
-            'page. When this is on, the best strategies above stop opening trades; their open trades still close '
-            'normally. Switch it off to bring them back.</p>'
+            f'page. When this is on, the best strategies above stop opening {name} trades; their open trades still '
+            'close normally. The other engine has its own switch on its workspace.</p>'
             f'<form method="post" action="/trading/paper/winners-only" class="row">{csrf}{btn}</form>')
 
 
