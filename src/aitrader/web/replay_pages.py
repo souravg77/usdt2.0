@@ -133,7 +133,15 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
     def cfg() -> BacktestConfig:
         base = BacktestConfig(taker_fee=settings.paper_taker_fee, maker_fee=settings.paper_maker_fee,
                               slippage_bps=settings.paper_slippage_bps, max_cost_r=settings.max_cost_r)
-        return as_perp(base) if futures_mode() else base  # Futures mode: longs costed as perpetuals too
+        base = as_perp(base) if futures_mode() else base  # Futures mode: longs costed as perpetuals too
+        if paper_state:  # the engine's minimum reward and split take-profit, as paper trading uses them
+            from dataclasses import replace
+
+            from ..learn import guards
+
+            g = guards.load(guards.path_for(paper_state))["futures" if futures_mode() else "spot"]
+            base = replace(base, min_rr=g["min_rr"], split_tp=g["split_tp"])
+        return base
 
     def report_rows() -> list[dict]:
         try:

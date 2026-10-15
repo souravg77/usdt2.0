@@ -658,6 +658,29 @@ paper trading. Nothing trades real money.</p>
                     f"and holds at most {lim['max_open']} open positions.")
         return _control_post(request, csrf, act)
 
+    @app.post("/trading/paper/guards")
+    def trading_paper_guards(request: Request, csrf: str = Form(""), market: str = Form(""),
+                             breaker: str = Form(""), day_pause_pct: str = Form(""), pause_hours: str = Form(""),
+                             week_close_pct: str = Form(""), min_rr: str = Form(""), trend: str = Form(""),
+                             split_tp: str = Form("")):
+        """One engine's loss breakers, minimum reward, higher-timeframe trend check and split take-profit."""
+        def act(user):
+            from ..learn import guards
+
+            if market not in ("spot", "futures"):
+                return "Not changed: choose Spot AI or Futures AI.", False
+            try:
+                g = guards.save(guards.path_for(paths.paper_state), market, {
+                    "breaker": breaker == "1", "day_pause_pct": day_pause_pct, "pause_hours": pause_hours,
+                    "week_close_pct": week_close_pct, "min_rr": min_rr or 0, "trend": trend == "1",
+                    "split_tp": split_tp == "1"}, by=user)
+            except ValueError:
+                return "Not changed: enter numbers for the loss limits, hours and minimum reward.", False
+            name = "Futures AI" if market == "futures" else "Spot AI"
+            _event("paper_guards", f"{name} trading rules set by {user}: {_guards_text(g)}")
+            return f"{name} now uses: {_guards_text(g)}. Open trades keep the take-profit they opened with."
+        return _control_post(request, csrf, act)
+
     @app.post("/trading/paper/leverage")
     def trading_paper_leverage(request: Request, csrf: str = Form(""), lev: str = Form("")):
         def act(user):
@@ -1634,6 +1657,45 @@ def _market_switch(paths: Paths, auth, token, title: str) -> str:
             f'<input type="hidden" name="back" value="{_e(back)}">{spot}{fut}</form>')
 
 
+def _guards_text(g: dict) -> str:
+    parts = [f"pause {g['pause_hours']:g}h after a {g['day_pause_pct']:g}% day loss, close all at a "
+             f"{g['week_close_pct']:g}% week loss" if g["breaker"] else "loss breakers off",
+             f"minimum reward {g['min_rr']:g}R" if g["min_rr"] else "no minimum reward",
+             "higher-timeframe trend check on" if g["trend"] else "no trend check",
+             "split take-profit on" if g["split_tp"] else "one take-profit"]
+    return ", ".join(parts)
+
+
+def _guards_form(paths: Paths, csrf: str, ws: str) -> str:
+    """The engine's extra rules: loss breakers, minimum reward, trend check, split take-profit."""
+    from ..learn import guards
+
+    g = guards.load(guards.path_for(paths.paper_state))[ws]
+
+    def box(name, label):
+        return (f'<label class="small"><input type="checkbox" name="{name}" value="1"'
+                f'{" checked" if g[name] else ""}> {label}</label>')
+
+    def num(name, label, step="any"):
+        lo, hi = guards.RANGES[name]
+        return (f'<label class="small">{label} <input name="{name}" type="number" inputmode="decimal" step="{step}" '
+                f'min="{lo:g}" max="{hi:g}" value="{g[name]:g}" style="width:4.5em"></label>')
+
+    return (f'<form method="post" action="/trading/paper/guards" class="row">{csrf}'
+            f'<input type="hidden" name="market" value="{ws}">'
+            f'{box("breaker", "Loss breakers")} {num("day_pause_pct", "Pause at day loss %")} '
+            f'{num("pause_hours", "for hours")} {num("week_close_pct", "Close all at week loss %")} '
+            f'{num("min_rr", "Min reward R (0 off)")} {box("trend", "Trade with the 4h/1d trend")} '
+            f'{box("split_tp", "Half at halfway, half at target")}'
+            '<button class="ghost">Set rules</button></form>'
+            '<p class="small muted">Loss breakers count closed and open trades: past the day loss the engine opens '
+            'nothing new for the hours set; past the week loss (from Monday midnight) it closes all its positions and '
+            'opens nothing new until Monday. Min reward skips signals whose target is closer than that many times '
+            'the risk (signals that exit on their own rule are not judged). The trend check skips a long while the '
+            '4h or daily trend points down, and a short while it points up. Replay uses the minimum reward and the '
+            'split take-profit too, so you can test them there first.</p>')
+
+
 def _market_card(paths: Paths, paper: dict, csrf: str, ws: str = "spot") -> str:
     """The engine of the workspace shown: Spot AI (on/off, limits) or Futures AI (on/off, limits,
     leverage). The other engine's controls are only on its own workspace."""
@@ -1648,7 +1710,10 @@ def _market_card(paths: Paths, paper: dict, csrf: str, ws: str = "spot") -> str:
     mine = [p for k, p in (st.get("open") or {}).items()
             if p.get("filled") and (wallet.market_of(p) == "futures" or k.endswith("|futures")) == (ws == "futures")]
     name = "Futures AI" if ws == "futures" else "Spot AI"
-    block = wallet.entry_block(st, wallet.load(wallet.wallet_path(paths.paper_state, ws)), ws, lim, now_ms)
+    from ..learn import guards
+
+    block = (wallet.entry_block(st, wallet.load(wallet.wallet_path(paths.paper_state, ws)), ws, lim, now_ms)
+             or guards.block(st, ws, now_ms))
     state = ('<b class="bad">OFF</b>' if not on else f'<b class="warn">PAUSED</b> ({_e(block)})' if block
              else '<b class="good">ON</b>')
     today = wallet.today_pnl(st, ws, now_ms)
@@ -1678,6 +1743,7 @@ def _market_card(paths: Paths, paper: dict, csrf: str, ws: str = "spot") -> str:
            f'<label class="small">Max open <input name="max_open" type="number" min="{wallet.MAX_OPEN_RANGE[0]}" '
            f'max="{wallet.MAX_OPEN_RANGE[1]}" value="{lim["max_open"]}" style="width:5em"></label>'
            '<button class="ghost">Set limits</button></form>')
+    out += _guards_form(paths, csrf, ws)
     if ws == "futures":
         choices = sorted(set(futures.PAPER_LEVERAGE_CHOICES) | {lev})
         opts = "".join(f'<option value="{x:g}"{" selected" if abs(x - lev) < 1e-9 else ""}>{x:g}x</option>'
