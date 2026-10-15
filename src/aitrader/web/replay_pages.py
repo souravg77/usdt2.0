@@ -112,13 +112,22 @@ def _add_months(d: datetime, n: int) -> datetime:
 def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: str,
                       report_path: str = "data/reports/backtest.json", exchange: str = EXCHANGE,
                       paper_state: str = "") -> None:
-    symbols = list(settings.symbols)
     cache: OrderedDict = OrderedDict()
 
     def futures_mode() -> bool:
         from ..learn import wallet
 
         return bool(paper_state) and wallet.futures_on(wallet.market_path(paper_state))
+
+    def pairs() -> list[str]:
+        """The workspace's pairs: Futures AI's (its top gainers while that list is on) in the Futures
+        view, Spot AI's in the Spot view."""
+        from ..market.pairs import configured_symbols
+
+        try:
+            return configured_symbols(settings.symbols, market="futures" if futures_mode() else "spot")
+        except Exception:
+            return list(settings.symbols)
 
     def cfg() -> BacktestConfig:
         base = BacktestConfig(taker_fee=settings.paper_taker_fee, maker_fee=settings.paper_maker_fee,
@@ -163,6 +172,8 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
             cache.move_to_end(key)
             return cache[key]
         entries = known_entries(Registry(registry_path).entries)
+        if not futures_mode():  # Spot AI never shorts: its replay leaves the short twins out
+            entries = [e for e in entries if e.kind != "short"]
         store = CandleStore(settings.db_path)
         try:
             start_ms = int(start.timestamp() * 1000)
@@ -205,7 +216,7 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
         if redirect:
             return JSONResponse({"error": "sign in"}, status_code=401)
         start = _month(month)
-        if symbol not in symbols or tf not in REPLAY_TIMEFRAMES or start is None:
+        if symbol not in pairs() or tf not in REPLAY_TIMEFRAMES or start is None:
             return JSONResponse({"error": "pick a pair, a timeframe and a month"}, status_code=400)
         if start > datetime.now(timezone.utc):
             return JSONResponse({"error": "that month hasn't happened yet"}, status_code=400)
@@ -227,7 +238,7 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
         if not auth.check_csrf(token, csrf):
             return PlainTextResponse("bad form token; reload the page", status_code=403)
         start = _month(month)
-        if symbol not in symbols or tf not in REPLAY_TIMEFRAMES or start is None:
+        if symbol not in pairs() or tf not in REPLAY_TIMEFRAMES or start is None:
             return RedirectResponse("/replay?error=" + _q("pick a pair, a timeframe and a month"), status_code=303)
         months = min(max(int(months or 1), 1), 3)
         since = (start - timedelta(milliseconds=WARMUP_BARS * TIMEFRAME_MS[tf])).strftime("%Y-%m-%d")
@@ -335,6 +346,7 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
         user, token, redirect = guard(request)
         if redirect:
             return redirect
+        symbols = pairs()
         symbol = symbol if symbol in symbols else (symbols[0] if symbols else "")
         tf = tf if tf in REPLAY_TIMEFRAMES else "1h"
         now = datetime.now(timezone.utc)
@@ -350,6 +362,10 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
         speeds = "".join(f'<button type="button" class="seg{" active" if s == 1 else ""}" data-speed="{s}">{s}x</button>'
                          for s in SPEEDS)
         body = (f'<p class="good">{_e(msg)}</p>' if msg else "") + (f'<p class="bad">{_e(error)}</p>' if error else "")
+        body += ('<p class="small muted">Futures AI workspace: only Futures AI\'s pairs, with long and short '
+                 'strategies costed as perpetual futures.</p>' if futures_mode() else
+                 '<p class="small muted">Spot AI workspace: only Spot AI\'s pairs and long strategies (Spot never '
+                 'shorts).</p>')
         body += (
             '<div id="replay">'
             '<form id="replay-form" class="card replay-form">'
