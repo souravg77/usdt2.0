@@ -212,3 +212,18 @@ def test_spot_replay_leaves_out_short_strategies(client, monkeypatch, tmp_path):
     wallet.set_market(wallet.market_path("data/learn/paper_state.json"), True)
     ids = {s["id"] for s in c.get("/api/replay?symbol=BTC/USDT&tf=1h&month=2025-03").json()["strategies"]}
     assert "short-up" in ids
+
+
+def test_replay_still_shows_the_strategies_when_a_pick_kept_none(client):
+    """Shawn: Futures 15m showed no strategies after a pick that kept none of them."""
+    from aitrader.learn import picks
+
+    c, _ = client
+    c.post("/login", data={"user": "admin", "password": PW})
+    path = picks.picks_path("data/learn/registry.json")
+    picks.save(path, {"1h": {"at": 1, "picked": [], "results": []}})
+    r = c.get("/api/replay?symbol=BTC/USDT&tf=1h&month=2025-03&months=1").json()
+    assert r["none_kept"] and not r["picked"] and r["strategies"][0]["name"] == "up_bar" and r["trades"]
+    picks.save(path, {"1h": {"at": 2, "picked": ["other"], "results": []}})
+    r = c.get("/api/replay?symbol=BTC/USDT&tf=1h&month=2025-03&months=1").json()
+    assert r["picked"] and not r["none_kept"] and r["strategies"] == []  # a pick that kept others: only those
