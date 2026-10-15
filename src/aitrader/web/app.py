@@ -210,7 +210,8 @@ data-tz-label="{_e(tz_label(now))}"{f' data-reload-ms="{int(refresh * 1000)}"' i
                       registry=paths.registry)
     add_report_routes(app, settings=settings, auth=auth, jobs=jobs, page=page, guard=guard,
                       report_path=paths.report)
-    add_news_routes(app, settings=settings, auth=auth, jobs=jobs, page=page, guard=guard, news_dir=paths.news)
+    add_news_routes(app, settings=settings, auth=auth, jobs=jobs, page=page, guard=guard, news_dir=paths.news,
+                    paper_state=paths.paper_state)
     add_research_routes(app, auth=auth, jobs=jobs, page=page, guard=guard, news_dir=paths.news)
     add_change_routes(app, auth=auth, jobs=jobs, page=page, guard=guard, changes_dir=paths.changes)
     add_pair_routes(app, settings=settings, auth=auth, jobs=jobs, page=page, guard=guard, ranking_path=paths.pairs,

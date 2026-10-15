@@ -331,3 +331,38 @@ def test_news_sites(client, tmp_path):
     update(SYMS, paths.news, fetch=fake_fetch, post=api, x=None)
     prompt = api.bodies[0]["messages"][0]["content"]
     assert "Check these news sites first" in prompt and "decrypt.co/news" in prompt and "coinmarketcap" not in prompt
+
+
+def test_news_page_shows_the_workspace_pairs(client, monkeypatch):
+    """Shawn: in the Futures view, news about the Futures pairs, plus world and economic news."""
+    import time
+
+    from aitrader.learn import wallet
+
+    c, _runner, paths = client
+    c.post("/login", data={"user": "admin", "password": PW})
+    api = FakeAPI([{"stop_reason": "tool_use", "content": [{"type": "tool_use", "id": "t",
+                                                            "name": "report_market_news", "input": REPORT}]}])
+    update(SYMS, paths.news, fetch=fake_fetch, post=api)
+    page = c.get("/news").text
+    assert "Spot AI workspace" in page and "<b>BTC/USDT</b>" in page and "<b>ETH/USDT</b>" in page
+    wallet.set_market(wallet.market_path("data/learn/paper_state.json"), True)
+    page = c.get("/news").text  # no Futures top gainers yet: no Futures pairs
+    assert "Futures AI workspace" in page and "<b>BTC/USDT</b>" not in page and "nothing on these pairs" in page
+    assert "World and economic events" in page and "Border clashes escalate" in page
+    fut = "gainers-test.json"
+    with open(fut, "w") as fh:
+        json.dump({"on": True, "generated": int(time.time() * 1000), "pairs": [{"symbol": "ETH/USDT"}]}, fh)
+    monkeypatch.setenv("AITRADER_GAINERS_FILE", fut)
+    page = c.get("/news").text
+    assert "Futures AI pairs" in page and "<b>ETH/USDT</b>" in page and "<b>BTC/USDT</b>" not in page
+    assert "ETH/USDT: new buys paused" in page
+    from aitrader.web.news_pages import _feeds
+
+    heads = {"crypto_headlines": [{"title": "Ethereum upgrade: ETH devs set date", "url": "https://a.example",
+                                   "source": "x"},
+                                  {"title": "Bitcoin ETF inflows jump", "url": "https://b.example", "source": "x"}],
+             "world_headlines": [{"title": "Fed holds rates", "url": "https://c.example", "source": "y"}]}
+    out = _feeds(heads, ["ETH/USDT"], "Futures AI")
+    assert "Headlines about the Futures AI pairs (1)" in out and "Other crypto headlines (1)" in out
+    assert "World and economic headlines (1)" in out
