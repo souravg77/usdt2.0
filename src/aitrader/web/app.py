@@ -1621,6 +1621,12 @@ def _market_card(paths: Paths, paper: dict, csrf: str, ws: str = "spot") -> str:
         longs = sum(1 for p in mine if (p.get("signal") or {}).get("side") != "sell")
         what = (f"USDT perpetual futures, long and short, at <b>{lev:g}x</b> isolated margin. {len(mine)} open "
                 f"({longs} long, {len(mine) - longs} short), margin in use {margin:,.2f} USDT.")
+        from ..market import gainers
+
+        hot = gainers.symbols(gainers.path_for("futures"))
+        what += (f" It trades only the Futures top gainers: {_e(', '.join(hot))}." if hot else
+                 ' <b class="warn">It opens nothing new now: there is no fresh Futures top gainers list. Turn it on '
+                 'under Futures top gainers on the Pairs page.</b>')
     else:
         what = f"buys coins, long only, no leverage, never short. {len(mine)} open."
     btn = (f'<input type="hidden" name="market" value="{ws}"><input type="hidden" name="on" value="{"0" if on else "1"}">'
