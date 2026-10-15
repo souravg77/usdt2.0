@@ -12,7 +12,7 @@ import logging
 import pandas as pd
 
 from ..strategies.base import Signal
-from .features import market_features, signal_features
+from .features import as_long, market_features, signal_features
 from .registry import ModelRegistry
 
 log = logging.getLogger(__name__)
@@ -41,10 +41,12 @@ class LiveFilter:
     def check(self, sig: Signal, strategy_id: str, df: pd.DataFrame,
               recent_r: list[float]) -> dict:
         """Decide on a signal produced on the last bar of ``df``. ``recent_r`` is the strategy's
-        closed trades (oldest first). Returns {take, size, prob, version}."""
+        closed trades (oldest first). A short is judged as the long on the flipped chart
+        (``features.as_long``). Returns {take, size, prob, version}."""
         self._refresh()
         if self.model is None:
             return {"take": True, "size": 1.0, "prob": None, "version": None}
+        sig, df = as_long(sig, df)
         row = signal_features(sig, strategy_id, market_features(df).iloc[-1].to_dict(), recent_r)
         p = float(self.model.predict(pd.DataFrame([row]))[0])
         take, size = self.model.decide(p)

@@ -139,7 +139,7 @@ def test_paper_trader_applies_news(tmp_path):
         def __init__(self, d):
             self.d = d
 
-        def decide(self, *a):
+        def decide(self, *a, **kw):
             return self.d
 
     t = PaperTrader(CandleStore(str(tmp_path / "c.db")), str(tmp_path / "r.json"), ["bybit"], SYMS,

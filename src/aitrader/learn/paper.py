@@ -23,7 +23,7 @@ and each can be turned off on the Trading page:
   the result, isolated margin at the chosen leverage (only the margin counts against the futures
   wallet), and a trade whose stop is too close to the liquidation price is skipped.
 
-The AI trade filter learned from long trades, so it doesn't judge shorts.
+The AI trade filter judges shorts as the long on the flipped chart (``ai.features.as_long``).
 """
 
 from __future__ import annotations
@@ -212,7 +212,7 @@ class PaperTrader:
                         legs = self._legs(key, sig, sym, on, events)
                         if not legs:
                             continue
-                        ctx_mult = self._context(ex, sym, now_ms)
+                        ctx_mult = self._context(ex, sym, now_ms, sig.side.value)
                         if ctx_mult <= 0:
                             for k, _perp in legs:
                                 self._log_signal(k, sig, "market context or news filter")
@@ -316,15 +316,16 @@ class PaperTrader:
         candles = [c for c in self.store.load(ex, sym, tf, start) if c.ts + step <= now_ms]
         return candles_to_frame(candles) if candles else None
 
-    def _context(self, exchange: str, symbol: str, now_ms: int) -> float:
-        """Size multiplier from the market-context and news filters (0 = no new entry)."""
+    def _context(self, exchange: str, symbol: str, now_ms: int, side: str = "buy") -> float:
+        """Size multiplier from the market-context and news filters (0 = no new entry). The
+        market-context filter reads funding and open interest the other way round for a short."""
         mult = 1.0
-        for name, f, args in (("market-context", self.context, (exchange, symbol, now_ms)),
-                              ("news", self.news, (symbol, now_ms))):
+        for name, f, args, kw in (("market-context", self.context, (exchange, symbol, now_ms), {"side": side}),
+                                  ("news", self.news, (symbol, now_ms), {})):
             if f is None:
                 continue
             try:
-                d = f.decide(*args)
+                d = f.decide(*args, **kw)
             except Exception:  # missing context data must never stop paper trading
                 log.exception("%s filter failed; ignoring it this tick", name)
                 continue
@@ -447,7 +448,7 @@ class PaperTrader:
         return futures.clamp_paper_leverage(chosen, perp_limits.max_leverage(symbol, self.perp_limits_path))
 
     def _ai_check(self, sig: Signal, entry_id: str, df) -> dict:
-        if self.ai_filter is None or sig.side is Side.SELL:
+        if self.ai_filter is None:
             return {"take": True, "size": 1.0, "prob": None, "version": None}
         recent = [t["r"] for t in self.state["trades"]
                   if t["entry_id"] == entry_id and t["exit_ts"] < sig.ts]

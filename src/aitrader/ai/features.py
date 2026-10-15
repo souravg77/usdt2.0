@@ -100,6 +100,21 @@ def history_features(recent_r: list[float]) -> dict:
             "recent_r": float(np.mean(last))}
 
 
+def as_long(sig: Signal, df: pd.DataFrame) -> tuple[Signal, pd.DataFrame]:
+    """A short signal as the filter sees it: the long signal on the flipped chart (1/price, highs and
+    lows swapped, funding sign changed; ``strategies.mirror``), so one model judges both sides.
+    A long signal is returned as it is."""
+    from dataclasses import replace
+
+    from ..models import Side
+    from ..strategies.mirror import flip
+
+    if sig.side is not Side.SELL:
+        return sig, df
+    target = 1.0 / sig.target if sig.target and sig.target > 0 else None
+    return replace(sig, side=Side.BUY, entry=1.0 / sig.entry, stop=1.0 / sig.stop, target=target), flip(df)
+
+
 def signal_features(sig: Signal, strategy_id: str, market_row: dict, recent_r: list[float]) -> dict:
     """The full feature row for one signal. ``market_row`` is the signal bar's row of
     ``market_features``."""
