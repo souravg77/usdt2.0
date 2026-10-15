@@ -1,4 +1,4 @@
-// Trading page: the Open positions "Now USDT", "Price now" and "Stop loss" columns follow the live
+// Trading page: the Open positions "Now USDT", "Price now", "Stop loss" and "Take profit" columns follow the live
 // price. Every 1.5 seconds it asks /api/positions (Bybit's public prices, cached ~1s on the server,
 // the same feed as the Markets page) and rewrites each cell and the total. Display only: it never trades.
 (function () {
@@ -21,11 +21,19 @@
     var td = document.querySelector('td[data-px="' + k + '"]');
     if (td) td.textContent = fmt(px);
     var st = document.querySelector('td[data-stop="' + k + '"]');
-    if (!st) return;
-    var stop = parseFloat(st.getAttribute("data-level"));
-    var gap = st.getAttribute("data-short") ? stop - px : px - stop;
-    var pct = 100 * gap / px;
-    st.innerHTML = fmt(stop) + ' <span class="small ' + (pct > 0 ? "muted" : "bad") + '">' + pct.toFixed(2) + "% away</span>";
+    if (st) {
+      var stop = parseFloat(st.getAttribute("data-level"));
+      var gap = st.getAttribute("data-short") ? stop - px : px - stop;
+      var pct = 100 * gap / px;
+      st.innerHTML = fmt(stop) + ' <span class="small ' + (pct > 0 ? "muted" : "bad") + '">' + pct.toFixed(2) + "% away</span>";
+    }
+    var tp = document.querySelector('td[data-tp="' + k + '"]');
+    if (tp) {
+      var target = parseFloat(tp.getAttribute("data-level"));
+      var left = tp.getAttribute("data-short") ? px - target : target - px;
+      var tpct = 100 * left / px;
+      tp.innerHTML = fmt(target) + ' <span class="small ' + (tpct > 0 ? "muted" : "good") + '">' + tpct.toFixed(2) + "% away</span>";
+    }
   }
 
   function poll() {

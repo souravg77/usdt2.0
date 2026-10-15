@@ -904,7 +904,7 @@ def _positions_table(paper: dict, execs: dict, csrf: str = "", asked: dict | Non
         pid = "paper|" + key
         rows.append(f"<tr><td>paper{_close_button(key, csrf, asked or {})}</td><td>{_e(sym)}{_short(sig.get('side'))} <span class=muted>{_e(ex)} {_e(tf)}</span></td>"
                     f"{_usdt_cell(usdt, pos_id=pid)}"
-                    f"{_price_cells(pid, p.get('mark') if p.get('filled') else None, sig.get('stop', 0), sig.get('side'))}"
+                    f"{_price_cells(pid, p.get('mark') if p.get('filled') else None, sig.get('stop', 0), sig.get('side'), _num(sig.get('target')), sig.get('trailing'))}"
                     f"<td>{'' if mark is None else f'{mark:+.2f}R'}</td>"
                     f"<td>{_e(entry_id)}</td><td>{p.get('entry', sig.get('entry', 0)):.6g}"
                     f"{'' if p.get('filled') else ' <span class=muted>(waiting)</span>'}</td>"
@@ -917,17 +917,24 @@ def _positions_table(paper: dict, execs: dict, csrf: str = "", asked: dict | Non
                 total, counted = total + usdt, counted + 1
             pid = mode + "|" + str(p.get("key", ""))
             rows.append(f"<tr><td>{_e(mode)}</td><td>{_e(p['symbol'])} <span class=muted>{_e(p.get('amount', 0))}</span></td>"
-                        f'{_usdt_cell(usdt, pos_id=pid)}{_price_cells(pid, p.get("mark"), p["stop"], p.get("side"))}'
+                        f'{_usdt_cell(usdt, pos_id=pid)}{_price_cells(pid, p.get("mark"), p["stop"], p.get("side"), _num(p.get("target")))}'
                         f'<td class="{cls}">{_e(p.get("status"))}</td>'
                         f"<td>{_e(p['entry_id'])}</td><td>{p.get('entry') or 0:.6g}</td>"
                         f'<td>{_prob(p.get("ai_prob"))}</td></tr>')
     if not rows:
         return "<p class=muted>No open positions.</p>"
     foot = (f'<tr><td colspan="2"><b>Total now</b> <span class="muted" id="pos-live">at the last closed candle</span></td>'
-            f'{_usdt_cell(total if counted else None, bold=True, pos_id="total")}<td colspan="6"></td></tr>')
-    return ("<table><tr><th>Where</th><th>Market</th><th>Now USDT</th><th>Price now</th><th>Stop loss</th>"
+            f'{_usdt_cell(total if counted else None, bold=True, pos_id="total")}<td colspan="7"></td></tr>')
+    return ("<table><tr><th>Where</th><th>Market</th><th>Now USDT</th><th>Price now</th><th>Stop loss</th><th>Take profit</th>"
             "<th>R (last candle)</th><th>Strategy</th><th>Entry</th>"
             f"<th>AI p</th></tr>{''.join(rows)}{foot}</table>")
+
+
+def _num(x) -> float | None:
+    try:
+        return float(x) if x is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def stop_distance(price: float | None, stop: float, side) -> float | None:
@@ -939,13 +946,32 @@ def stop_distance(price: float | None, stop: float, side) -> float | None:
     return 100 * gap / price
 
 
-def _price_cells(pos_id: str, price: float | None, stop: float, side) -> str:
-    """The "Price now" and "Stop loss" cells; static/positions.js keeps both live."""
+def target_distance(price: float | None, target: float | None, side) -> float | None:
+    """How far the price still has to go to the take-profit, in % of the price (above 0 until
+    it is reached: the target is above the price for a long, below it for a short)."""
+    if not price or not target:
+        return None
+    gap = (price - target) if side in ("sell", "short") else (target - price)
+    return 100 * gap / price
+
+
+def _price_cells(pos_id: str, price: float | None, stop: float, side, target: float | None = None,
+                 trailing: str | None = None) -> str:
+    """The "Price now", "Stop loss" and "Take profit" cells; static/positions.js keeps them live.
+    A strategy without a fixed target exits on its own rule (``trailing``) or its time stop."""
     d = stop_distance(price, stop, side)
     away = "" if d is None else f' <span class="small {"muted" if d > 0 else "bad"}">{d:.2f}% away</span>'
     short = "1" if side in ("sell", "short") else ""
+    if target:
+        t = target_distance(price, target, side)
+        t_away = "" if t is None else f' <span class="small {"muted" if t > 0 else "good"}">{t:.2f}% away</span>'
+        tp = (f'<td data-tp="{_e(pos_id)}" data-level="{target:.10g}" data-short="{short}">'
+              f'{target:.6g}{t_away}</td>')
+    else:
+        rule = f"exit rule: {trailing}" if trailing else "no fixed target"
+        tp = f'<td><span class="small muted">{_e(rule)}</span></td>'
     return (f'<td data-px="{_e(pos_id)}">{"-" if not price else f"{price:.6g}"}</td>'
-            f'<td data-stop="{_e(pos_id)}" data-level="{stop:.10g}" data-short="{short}">{stop:.6g}{away}</td>')
+            f'<td data-stop="{_e(pos_id)}" data-level="{stop:.10g}" data-short="{short}">{stop:.6g}{away}</td>{tp}')
 
 
 def _paper_usdt(p: dict) -> float | None:
