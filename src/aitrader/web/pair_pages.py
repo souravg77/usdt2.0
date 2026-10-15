@@ -18,7 +18,7 @@ from fastapi.responses import PlainTextResponse, RedirectResponse
 
 from ..config import EXCHANGE
 from ..data.store import CandleStore
-from ..market import gainers
+from ..market import gainers, squeeze
 from ..market.pairs import configured_symbols, load_ranking, open_paper_symbols, ranked_symbols
 from ..market.regime import current_regimes
 from .app import _csrf, _e, _ms, _q
@@ -69,6 +69,31 @@ def add_pair_routes(app, *, settings, auth, jobs, page, guard, ranking_path: str
                                                    "list arrives; the collector downloads their prices on its next pass."),
                                 status_code=303)
 
+    def squeeze_job() -> dict | None:
+        for j in jobs.list():
+            if j.get("meta", {}).get("kind") == "squeeze" and j["status"] in ("queued", "running"):
+                return j
+        return None
+
+    @app.post("/pairs/squeeze")
+    def squeeze_switch(request: Request, csrf: str = Form(""), on: str = Form(""), count: str = Form("")):
+        user, token, redirect = guard(request)
+        if redirect:
+            return redirect
+        if not auth.check_csrf(token, csrf):
+            return PlainTextResponse("bad form token; reload the page", status_code=403)
+        if on != "1":
+            squeeze.switch(False, path=squeeze.path_from_env(), by=user)
+            return RedirectResponse("/pairs?msg=" + _q("Squeeze scanner off. Open trades on its pairs still close "
+                                                       "normally."), status_code=303)
+        if squeeze_job():
+            return RedirectResponse("/pairs?error=" + _q("the squeeze scan is already running"), status_code=303)
+        n = squeeze.clamp_top(count or squeeze.DEFAULT_TOP)
+        jobs.submit(f"Scan Bybit perpetuals for squeezes (top {n})",
+                    [["pairs", "squeeze", "--count", str(n)]], meta={"kind": "squeeze", "by": user})
+        return RedirectResponse("/pairs?msg=" + _q("Scanning Bybit perpetuals for squeezes. Futures AI adds the pairs "
+                                                   "it finds as soon as the list arrives."), status_code=303)
+
     @app.get("/pairs")
     def pairs(request: Request, msg: str = "", error: str = ""):
         user, token, redirect = guard(request)
@@ -87,12 +112,14 @@ def add_pair_routes(app, *, settings, auth, jobs, page, guard, ranking_path: str
         ws = "futures" if wallet.futures_on(wallet.market_path(paper_state)) else "spot"
         body += _gainers_card(auth, token, now, gainer_job(), ws)
         if ws == "futures":
+            body += _squeeze_card(auth, token, now, squeeze_job())
             try:
                 held = open_paper_symbols(paper_state, "futures")
             except Exception:
                 held = []
             hot = configured_symbols(settings.symbols, now_ms=now, market="futures")
             symbols = list(dict.fromkeys([*hot, *held]))
+            squeezed = squeeze.symbols(squeeze.path_from_env(), now_ms=now)
             body += _futures_card(hot, held)
         else:
             body += _run_card(auth, token, rk, job, now, settings.symbols, ranking_path)
@@ -109,7 +136,7 @@ def add_pair_routes(app, *, settings, auth, jobs, page, guard, ranking_path: str
         for r in regimes:
             by_pair.setdefault(r["symbol"], {})[r["timeframe"]] = r
         if ws == "futures":
-            body += _futures_regimes(symbols, set(hot), by_pair)
+            body += _futures_regimes(symbols, set(hot), by_pair, set(squeezed))
         else:
             body += _ranking(rk, by_pair) if rk.get("pairs") else _regimes_only(symbols, by_pair)
         body += _by_regime(_load(paper_state), _load(report_path), ws)
@@ -163,18 +190,21 @@ def _run_card(auth, token, rk: dict, job, now: int, fixed: list[str], ranking_pa
 
 
 def _futures_card(hot: list[str], held: list[str]) -> str:
-    """What Futures AI trades: its top gainers, plus the pairs it still holds a position in."""
+    """What Futures AI trades: its top gainers and squeeze pairs, plus the pairs it still holds."""
     extra = [s for s in held if s not in hot]
-    trades = (f'Futures AI opens new trades on its top gainers only: {_e(", ".join(hot))}.' if hot else
-              '<span class="warn">Futures AI has no pairs to open new trades on</span>: turn on the Futures top '
-              'gainers above.')
+    trades = (f'Futures AI opens new trades on its top gainers and squeeze pairs only: {_e(", ".join(hot))}.' if hot
+              else '<span class="warn">Futures AI has no pairs to open new trades on</span>: turn on the Futures '
+              'top gainers or the squeeze scanner above.')
     holds = (f' It also follows the pairs it still holds until they close: {_e(", ".join(extra))}.' if extra else "")
     return (f'<div class="card"><h3>Futures AI pairs</h3><p class="small">{trades}{holds} The spot ranking and '
             'the fixed pair list are for Spot AI only; switch to Spot AI to see them.</p></div>')
 
 
-def _futures_regimes(symbols: list[str], hot: set[str], by_pair: dict) -> str:
-    rows = "".join(f'<tr><td><b>{_e(s)}</b></td><td>{"top gainer" if s in hot else "open position"}</td>'
+def _futures_regimes(symbols: list[str], hot: set[str], by_pair: dict, squeezed: set[str] = frozenset()) -> str:
+    def why(s: str) -> str:
+        return "squeeze" if s in squeezed else "top gainer" if s in hot else "open position"
+
+    rows = "".join(f'<tr><td><b>{_e(s)}</b></td><td>{why(s)}</td>'
                    f'<td>{_badges(by_pair.get(s, {}))}</td></tr>' for s in symbols)
     if not rows:
         return '<h2>Futures pairs</h2><p class="muted">No Futures AI pairs yet.</p>'
@@ -239,6 +269,52 @@ def _gainers_card(auth, token, now: int, job, market: str = "futures") -> str:
             f'{gainers.PUMP_1H_PCT:g}% in an hour or {gainers.PUMP_24H_PCT:g}% in a day is flagged as a pump and not '
             'traded. A high score is not a buy signal: the strategies still decide, with the usual risk limits. '
             'Refreshed every hour while on.</p>'
+            f'{form}{table}</div>')
+
+
+def _squeeze_card(auth, token, now: int, job) -> str:
+    """The squeeze scanner's switch and its latest list (Futures view only)."""
+    path = squeeze.path_from_env()
+    data = squeeze.load(path)
+    on, top = bool(data.get("on")), squeeze.clamp_top(data.get("top", squeeze.DEFAULT_TOP))
+    live = squeeze.symbols(path, now_ms=now)
+
+    def pct(x):
+        return "-" if x is None else f'<span class="{"good" if x >= 0 else "bad"}">{x:+.2f}%</span>'
+
+    rows = "".join(
+        f'<tr><td>{_e(p["symbol"])}</td><td><b>{p["vol_z"]:+.1f}</b></td><td>{p["width_pct"]:.0%}</td>'
+        f'<td>{pct(p.get("change_1h"))}</td><td>{pct(p.get("change"))}</td><td>{_usdt(p.get("turnover"))}</td>'
+        f'<td>{"trading" if p["symbol"] in live else "-"}</td></tr>' for p in data.get("pairs", [])[:top])
+    when = (f"List from {_ms(data['generated'])}, {data.get('scanned', 0)} perpetuals scanned, "
+            f"{len(data.get('pairs', []))} found." if data.get("generated") else "No list yet.")
+    if job:
+        state = f'<span class="warn">scanning</span> (<a href="/jobs/{_e(job["id"])}">job</a>)'
+    elif on and live:
+        state = f'<span class="good">ON</span>: {len(live)} trading in Futures AI paper'
+    elif on and data.get("generated") and now - int(data["generated"]) <= squeeze.MAX_AGE_HOURS * 3_600_000:
+        state = '<span class="good">ON</span>: no squeeze right now'
+    elif on:
+        state = '<span class="warn">ON</span>, but the list is missing or old (the collector scans every hour)'
+    else:
+        state = '<span class="muted">OFF</span>'
+    csrf = _csrf(auth, token)
+    form = (f'<form method="post" action="/pairs/squeeze" class="row">{csrf}<input type="hidden" name="on" value="1">'
+            f'<label class="small">Up to <input type="number" name="count" min="{squeeze.MIN_TOP}" '
+            f'max="{squeeze.MAX_TOP}" value="{top}" style="width:4.5em"></label>'
+            f'<button{" disabled" if job else ""}>{"Scan now" if on else "Trade squeezes"}</button></form>')
+    if on:
+        form += (f'<form method="post" action="/pairs/squeeze" class="row">{csrf}<input type="hidden" name="on" value="0">'
+                 '<button class="ghost">Stop trading squeezes</button></form>')
+    table = ('<table><tr><th>Pair</th><th>Volume z</th><th>Width rank</th><th>1h</th><th>24h</th><th>Turnover</th>'
+             f'<th>Paper</th></tr>{rows}</table>' if rows else "")
+    return (f'<div class="card"><h3>Squeeze scanner</h3><p>{state}. {_e(when)}</p>'
+            '<p class="small muted">Finds coins waking up after a quiet spell, before they show up as top gainers. '
+            f'Of the {squeeze.CANDIDATES} most traded Bybit USDT perpetuals (same turnover and spread limits as above), '
+            f'it keeps those whose 1h Bollinger Bands were squeezed (narrowest of the last {squeeze.RECENT} hours in the '
+            f'lowest {squeeze.WIDTH_PCT:.0%} of the week) and whose last closed hour traded unusual volume (z-score over '
+            f'{squeeze.MIN_Z:g} against the {squeeze.VOL_BARS} hours before). Ranked by that volume jump. The strategies '
+            'still decide whether to go long or short, with the usual risk limits. Scanned every hour while on.</p>'
             f'{form}{table}</div>')
 
 

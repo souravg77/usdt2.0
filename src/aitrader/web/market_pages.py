@@ -107,7 +107,7 @@ def add_market_routes(app, *, settings, page, guard, exchange: str = EXCHANGE, c
         bad = api_guard(request)
         if bad:
             return bad
-        hot = set(gainers.symbols(gainers.path_for("futures" if futures_mode() else "spot")))
+        hot = _hot(futures_mode())
         mine = set(held())
         res = await feed().tickers(current())
         def mark(t: dict) -> dict:
@@ -137,7 +137,7 @@ def add_market_routes(app, *, settings, page, guard, exchange: str = EXCHANGE, c
         try:
             db = CandleStore(settings.db_path)
             try:
-                hot = set(gainers.symbols(gainers.path_for("futures" if futures_mode() else "spot")))
+                hot = _hot(futures_mode())
                 mine = set(held())
                 rows = [{**_ticker(db, exchange, s, now), "gainer": s in hot, "held": s in mine} for s in current()]
                 if symbol:
@@ -315,3 +315,12 @@ def candles_svg(bars: list, w: int = 600, h: int = 340, pad: int = 6, axis: int 
 
 def _utc(ms: int) -> str:
     return local(ms / 1000, "%m-%d %H:%M", suffix=False)
+
+
+def _hot(futures: bool) -> set[str]:
+    """The scanner pairs the workspace shown trades: Spot top gainers, or Futures top gainers and squeezes."""
+    if not futures:
+        return set(gainers.symbols(gainers.path_for("spot")))
+    from ..market import squeeze
+
+    return set(gainers.symbols(gainers.path_for("futures"))) | set(squeeze.symbols(squeeze.path_from_env()))

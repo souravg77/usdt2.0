@@ -111,6 +111,17 @@ async def cmd_collect(s: Settings, args) -> int:
                     log.warning("%s top gainers refresh failed: %s", gm, exc)
                 finally:
                     await client.close()
+            from .market import squeeze
+
+            if squeeze.due(squeeze.path_from_env()):  # the squeeze scanner on: its list, about once an hour
+                client = gainers.perp_client()
+                try:
+                    await squeeze.refresh(client, squeeze.path_from_env())
+                    log.info("squeeze pairs: %s", ", ".join(squeeze.symbols(squeeze.path_from_env())) or "none")
+                except Exception as exc:
+                    log.warning("squeeze scan failed: %s", exc)
+                finally:
+                    await client.close()
             from .learn import wallet
             from .market import perp_limits
 
@@ -1447,6 +1458,32 @@ def cmd_pairs(s: Settings, args) -> int:
                   f"turnover {p['turnover'] / 1e6:,.0f}M" + (f"  NOT TRADED: {p['pump']}" if p.get("pump") else ""))
         print(f"trading them in paper now ({len(hot)}); the collector downloads their prices on its next pass")
         return 0
+    if args.pairs_cmd == "squeeze":
+        from .market import gainers, squeeze
+
+        spath = squeeze.path_from_env()
+        if args.off:
+            squeeze.switch(False, path=spath)
+            print("squeeze scanner off: Futures AI is back to its top gainers (open positions still close normally)")
+            return 0
+
+        async def scan():
+            client = gainers.perp_client(args.exchange)
+            try:
+                return await squeeze.refresh(client, spath, top=args.count)
+            finally:
+                await client.close()
+
+        squeeze.switch(True, args.count, path=spath)
+        data = asyncio.run(scan())
+        print(f"squeeze pairs ({data['scanned']} perpetuals scanned; Bollinger width in the lowest "
+              f"{squeeze.WIDTH_PCT:.0%} of the week and last hour's volume z-score over {squeeze.MIN_Z:g}):")
+        for p in data["pairs"][:data["top"]]:
+            print(f"  {p['symbol']:<14} volume z {p['vol_z']:+6.2f}  1h {p['change_1h']:+6.2f}%  "
+                  f"turnover {p['turnover'] / 1e6:,.0f}M")
+        if not data["pairs"]:
+            print("  none right now (the collector scans again every hour while it is on)")
+        return 0
     if args.pairs_cmd == "show":
         rk = pairs.load_ranking(args.out)
         if not rk.get("pairs"):
@@ -1750,11 +1787,11 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("--quiet", action="store_true", help="don't send it to the event log / Telegram")
 
     pa = sub.add_parser("pairs", help="rank Bybit spot USDT pairs; show the ranking and market regimes")
-    pa.add_argument("pairs_cmd", choices=["rank", "show", "regimes", "gainers"])
-    pa.add_argument("--off", action="store_true", help="gainers: stop trading the top gainers")
+    pa.add_argument("pairs_cmd", choices=["rank", "show", "regimes", "gainers", "squeeze"])
+    pa.add_argument("--off", action="store_true", help="gainers/squeeze: stop trading that list")
     pa.add_argument("--out", default="data/pairs/ranking.json", help="ranking file")
     pa.add_argument("--top", type=int, default=30, help="rows to print")
-    pa.add_argument("--count", type=int, help="gainers: how many to trade (3-30, default 10 or the last choice)")
+    pa.add_argument("--count", type=int, help="gainers: how many to trade (3-30, default 10); squeeze: 1-15, default 5")
     pa.add_argument("--market", choices=["spot", "futures"], default="futures",
                     help="gainers: the Spot scanner (Spot AI) or the Futures scanner (Futures AI)")
     pa.add_argument("--window", choices=["1h", "4h", "24h"], help="gainers: rank by the rise over this window")
