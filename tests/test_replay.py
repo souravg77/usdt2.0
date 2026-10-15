@@ -191,7 +191,10 @@ def test_replay_shows_only_the_workspace_pairs(client, monkeypatch, tmp_path):
     assert c.get("/api/replay?symbol=BTC/USDT&tf=1h&month=2025-03").status_code == 400  # a Spot pair here
 
 
-def test_spot_replay_leaves_out_short_strategies(client, monkeypatch):
+def test_spot_replay_leaves_out_short_strategies(client, monkeypatch, tmp_path):
+    import json
+    import time
+
     import aitrader.web.replay_pages as rp
     from aitrader.learn import wallet
     from aitrader.learn.registry import short_twin
@@ -202,6 +205,10 @@ def test_spot_replay_leaves_out_short_strategies(client, monkeypatch):
     c.post("/login", data={"user": "admin", "password": PW})
     ids = {s["id"] for s in c.get("/api/replay?symbol=BTC/USDT&tf=1h&month=2025-03").json()["strategies"]}
     assert "up" in ids and "short-up" not in ids
+    fut = str(tmp_path / "gainers.json")  # Futures AI trades its top gainers: BTC is one today
+    with open(fut, "w") as fh:
+        json.dump({"on": True, "generated": int(time.time() * 1000), "pairs": [{"symbol": "BTC/USDT"}]}, fh)
+    monkeypatch.setenv("AITRADER_GAINERS_FILE", fut)
     wallet.set_market(wallet.market_path("data/learn/paper_state.json"), True)
     ids = {s["id"] for s in c.get("/api/replay?symbol=BTC/USDT&tf=1h&month=2025-03").json()["strategies"]}
     assert "short-up" in ids

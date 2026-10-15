@@ -184,5 +184,9 @@ def test_spot_scanner_scores_and_flags_pumps(tmp_path):
         ["PEPE/USDT", "WIF/USDT", "BTC/USDT"]
     assert pairs.configured_symbols(fixed, env=env, now_ms=NOW + 1, market="futures", keep=["SOL/USDT"]) == \
         ["PEPE/USDT", "WIF/USDT", "BTC/USDT", "SOL/USDT"]
-    gainers.switch(False, path=fut)  # off: the usual pairs again
-    assert pairs.configured_symbols(fixed, env=env, now_ms=NOW + 1, market="futures") == ["ETH/USDT"]
+    # stale or off: Futures AI never falls back to the usual pairs (only what it still holds)
+    assert pairs.configured_symbols(fixed, env=env, now_ms=NOW + 7 * 3_600_000, market="futures") == []
+    gainers.switch(False, path=fut)
+    assert pairs.configured_symbols(fixed, env=env, now_ms=NOW + 1, market="futures") == []
+    assert pairs.configured_symbols(fixed, env=env, now_ms=NOW + 1, market="futures", keep=["SOL/USDT"]) == \
+        ["SOL/USDT"]
