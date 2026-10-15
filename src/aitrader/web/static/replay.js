@@ -92,8 +92,11 @@
         " · " + d.candles.length + " candles · " + d.trades.length + " trades in this period." +
         (d.fee_skipped ? " " + d.fee_skipped + " more signals were skipped because fees and slippage would cost over " +
           Math.round(d.max_cost_r * 100) + "% of the risk." : "") +
-        (d.strategies.length ? "" : " No strategy uses this timeframe: try 1h or 4h.") +
-        (d.picked ? " Only the strategies kept by the " + d.timeframe + " pick trade this timeframe." : "");
+        (d.strategies.length ? "" : d.picked ? " The " + d.timeframe + " pick kept none of these strategies." :
+          " No strategy uses this timeframe: try 1h or 4h.") +
+        (d.picked ? " Only the strategies kept by the " + d.timeframe + " pick trade this timeframe." : "") +
+        (d.none_kept ? " The " + d.timeframe + " pick kept none of them, so none trades " + d.timeframe +
+          " on this engine: they are shown here to look at, not traded. Undo the pick to let them trade." : "");
       titleEl.textContent = d.symbol + " · " + d.timeframe + " · from " + when(d.start).slice(0, 7);
       seek.max = String(d.candles.length);
       S.pos = Math.min(60, d.candles.length);

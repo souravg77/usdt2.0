@@ -189,9 +189,14 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
                 only, on_tf = best_ids(entries, tf)
             else:
                 only = "" if strategy.startswith("top:") else strategy
+            # a pick that kept nothing: replay every strategy anyway so they can be looked at, and say
+            # that none of them trades this timeframe on this engine
+            none_kept = tf in tf_picks and not (tf_picks[tf] or {}).get("picked")
+            shown = {t: v for t, v in tf_picks.items() if t != tf} if none_kept else tf_picks
             res = replay(entries, store, exchange, symbol, tf, start_ms, end_ms, only=only, cfg=cfg(), top=n,
-                         tf_picks=tf_picks)
-            res["picked"] = tf in tf_picks
+                         tf_picks=shown)
+            res["picked"] = tf in tf_picks and not none_kept
+            res["none_kept"] = none_kept
             res["top"] = n
             ranked = set(only[:on_tf]) if n else set()
             res["ranked_on_tf"] = sum(1 for s in res["strategies"] if s["id"] in ranked)
