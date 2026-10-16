@@ -405,15 +405,14 @@ class PaperTrader:
                 self._log_signal(k, sig, "exposure cap", why)
                 events["filtered"].append(k)
                 continue
-            if perp:
-                lev = self._lev(sym)
-                ok = futures.short_stop_ok if short else futures.long_stop_ok
-                if not ok(sig.entry, sig.stop, lev):
-                    self._log_signal(k, sig, "stop too close to liquidation")
-                    events["filtered"].append(k)
-                    log.info("paper %s %s skipped: stop %.6g too close to liquidation at %gx",
-                             "short" if short else "perp long", k, sig.stop, lev)
-                    continue
+            if perp and not futures.safe_leverage(sig.entry, sig.stop, short, self._lev(sym)):
+                # a stop too wide for the setting trades at lower leverage (at the fill); only one
+                # that even 1x can't hold before liquidation is skipped
+                self._log_signal(k, sig, "stop too close to liquidation", "even at 1x")
+                events["filtered"].append(k)
+                log.info("paper %s %s skipped: stop %.6g too close to liquidation even at 1x",
+                         "short" if short else "perp long", k, sig.stop)
+                continue
             bcfg = self._bcfg(perp, min_rr=g["min_rr"])
             if too_costly(sig, bcfg):  # fees would eat too much of the risk
                 self._log_signal(k, sig, "fees too high for the stop",
@@ -612,17 +611,21 @@ class PaperTrader:
             if not pos["filled"]:
                 # sized from its workspace's paper wallet (learn.wallet): Spot or Futures
                 bal = wallet.balance(self.state, self._wallet(mkt), mkt)
-                lev = self._lev(sym) if short or pos.get("perp") else 1.0
-                ok = futures.short_stop_ok if short else futures.long_stop_ok
-                if mkt == "futures" and not ok(t.entry, sig.stop, lev):
-                    # checked at the signal price too; the fill (a gap, or a new leverage) can move
-                    # the liquidation price past the stop
-                    del self.state["open"][key]
-                    self._mark_signal(key, sig.ts, "stop too close to liquidation",
-                                      f"filled at {t.entry:.6g}: at {lev:g}x the liquidation price is past the stop")
-                    log.info("paper %s skipped: filled at %.6g, stop too close to liquidation at %gx",
-                             key, t.entry, lev)
-                    continue
+                lev = 1.0
+                if mkt == "futures":
+                    # the chosen leverage, or less when the stop (from the fill price) is too wide for
+                    # it: the stop must close the trade well before liquidation
+                    chosen = self._lev(sym)
+                    lev = futures.safe_leverage(t.entry, sig.stop, short, chosen)
+                    if not lev:
+                        del self.state["open"][key]
+                        self._mark_signal(key, sig.ts, "stop too close to liquidation",
+                                          f"filled at {t.entry:.6g}: the stop is past liquidation even at 1x")
+                        log.info("paper %s skipped: filled at %.6g, stop too close to liquidation", key, t.entry)
+                        continue
+                    if lev < chosen:
+                        log.info("paper %s: %gx instead of %gx so the stop comes well before liquidation",
+                                 key, lev, chosen)
                 risk_usdt = bal * sig.risk_pct * pos.get("size_mult", 1.0)
                 units = risk_usdt / abs(sig.entry - sig.stop)
                 units = min(units, bal * self.cfg.max_position_frac / t.entry)

@@ -9,6 +9,7 @@ from aitrader.learn import PaperConfig, PaperTrader, Registry, wallet
 from aitrader.learn.paper import _sig_dict
 from aitrader.models import Side
 from aitrader.strategies.base import Signal
+from aitrader.trade import futures
 from test_learn import fill_store
 
 H = 3_600_000
@@ -56,9 +57,22 @@ def test_at_1x_the_same_gap_is_a_normal_stop(tmp_path):
     assert t["exit_reason"] == "stop_gap" and t["pnl_usdt"] < 0
 
 
-def test_a_fill_that_puts_liquidation_past_the_stop_is_skipped(tmp_path):
+def test_a_stop_too_wide_for_the_leverage_trades_at_less(tmp_path):
     tr = _run(tmp_path, [(103, 103.5, 102.8, 103.2), (103, 104, 102, 103)])  # opens 3% above the signal
-    assert not tr.state["trades"] and not tr.state["open"]  # without the check it would be open
+    [pos] = tr.state["open"].values()  # opened, not skipped
+    assert 1 <= pos["leverage"] < 20
+    assert futures.long_stop_ok(pos["entry"], 98.0, pos["leverage"])
+    assert futures.long_liquidation_price(pos["entry"], pos["leverage"]) < 98.0
+
+
+def test_safe_leverage():
+    # a 5% stop on a short (the APT/USDT 4h signal): 20x would put liquidation inside it
+    assert not futures.short_stop_ok(0.8566, 0.899665, 20)
+    lev = futures.safe_leverage(0.8566, 0.899665, True, 20)
+    assert 9 <= lev < 10 and futures.short_stop_ok(0.8566, 0.899665, lev)
+    assert futures.safe_leverage(100, 99.5, False, 20) == 20  # a tight stop keeps the setting
+    assert futures.safe_leverage(100, 40, False, 20) == 0  # past liquidation even at 1x
+    assert futures.safe_leverage(100, 101, False, 20) == 0  # stop on the wrong side
 
 
 def test_a_short_twins_exit_works_before_the_twin_registered_it():

@@ -1785,7 +1785,9 @@ def _market_card(paths: Paths, paper: dict, csrf: str, ws: str = "spot") -> str:
                 '<p class="small muted">Futures AI opens a perpetual long on a long signal and a perpetual short on '
                 'a short signal. Leverage choices are Bybit\'s (1x to 100x), cut to each coin\'s own Bybit maximum. '
                 'Higher leverage does not change the risk per trade (the stop sets that) but brings liquidation much '
-                'closer, so a trade whose stop is too near it is skipped. Paper only: the live trader keeps its '
+                'closer. A trade whose stop is too wide for the leverage chosen uses less (the most at which the '
+                'stop comes at most halfway to liquidation), so it still opens with the same risk. Paper only: the '
+                'live trader keeps its '
                 f'{futures.MAX_LEVERAGE:g}x safety limit and stays locked.</p>')
     else:
         out += ('<p class="small muted">Spot AI buys the coin on a long signal and sells it at the exit. It ignores '
