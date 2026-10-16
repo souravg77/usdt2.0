@@ -965,8 +965,12 @@ def test_engine_limits_and_stale_candles_stop_new_entries(tmp_path):
     # a candle that arrives late (the collector was down) gives no trade
     store.close()
     late = CandleStore(str(tmp_path / "late.db"))
-    fill_store(late, df.iloc[:651])  # nothing newer than bar 650 has arrived
+    fill_store(late, df.iloc[:650])
     trader2 = PaperTrader(late, reg_path, ["bybit"], ["BTC/USDT"], state_path=str(tmp_path / "s2.json"))
+    # just started, and the newest candle closed hours ago: history, not a missed trade
+    trader2.tick(now_ms=int(df.ts.iloc[649]) + H + 3 * H)
+    assert not trader2.state["open"] and not trader2.state.get("signals")
+    fill_store(late, df.iloc[650:651])  # the next candle arrives two hours after it closed
     trader2.tick(now_ms=int(df.ts.iloc[650]) + H + 2 * H)
     assert not trader2.state["open"] and trader2.state.get("signals")
     assert all(s["skipped"] == "stale prices" for s in trader2.state["signals"])

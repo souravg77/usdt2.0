@@ -349,3 +349,35 @@ def test_nan_and_inf_are_not_saved_as_limits(tmp_path):
             guards.save(path, "spot", {"min_rr": bad})
     assert guards._clean({"min_rr": float("nan"), "day_pause_pct": float("inf")})["day_pause_pct"] == \
         guards.DEFAULTS["day_pause_pct"]
+
+
+def test_the_amount_per_trade_has_its_own_save_button(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from test_web import PW, login
+
+    from aitrader.config import Settings
+    from aitrader.web import Auth, JobRunner, Paths, create_app
+
+    monkeypatch.chdir(tmp_path)
+    paths = Paths()
+    os.makedirs("data/learn")
+    json.dump({"open": {}, "trades": []}, open(paths.paper_state, "w"))
+    client = TestClient(create_app(Settings(), Auth("admin", PW, "k"), JobRunner(str(tmp_path / "jobs"), env_file="none"),
+                                   paths))
+    login(client)
+    page = client.get("/trading").text
+    assert 'action="/trading/paper/amount"' in page and "Save amount" in page
+    csrf = page.split('name="csrf" value="')[1].split('"')[0]
+    r = client.post("/trading/paper/amount", data={"csrf": csrf, "market": "futures", "trade_usdt": "10"},
+                    follow_redirects=False)
+    assert "bad=1" not in r.headers["location"]
+    path = guards.path_for(paths.paper_state)
+    assert guards.load(path)["futures"]["trade_usdt"] == 10
+    # the other rules' Set rules button keeps the saved amount
+    client.post("/trading/paper/guards", data={"csrf": csrf, "market": "futures", "breaker": "1", "min_rr": "2"},
+                follow_redirects=False)
+    assert guards.load(path)["futures"]["trade_usdt"] == 10 and guards.load(path)["futures"]["min_rr"] == 2
+    assert "10.00 USDT per trade" in client.get("/trading").text
+    r = client.post("/trading/paper/amount", data={"csrf": csrf, "market": "futures", "trade_usdt": "ten"},
+                    follow_redirects=False)
+    assert "bad=1" in r.headers["location"]
