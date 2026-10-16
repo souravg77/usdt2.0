@@ -13,6 +13,7 @@ liquidation price closer. So:
 
 from __future__ import annotations
 
+import math
 import os
 
 MAX_LEVERAGE = 3.0
@@ -77,6 +78,22 @@ def long_stop_ok(entry: float, stop: float, lev: float) -> bool:
         return False
     room = entry - long_liquidation_price(entry, lev)
     return entry - stop <= room * STOP_BUFFER
+
+
+def safe_leverage(entry: float, stop: float, short: bool, lev: float) -> float:
+    """The highest leverage, up to ``lev``, at which the stop sits at most ``STOP_BUFFER`` of the
+    way to the liquidation price (rounded down to 0.1x); 0 when even 1x is too much. A wide stop
+    then trades at lower leverage instead of not at all; the risk in USDT doesn't change, only
+    the margin set aside."""
+    dist = (stop - entry if short else entry - stop) / entry if entry > 0 else 0
+    if dist <= 0:
+        return 0.0
+    most = 1.0 / (dist / STOP_BUFFER + MAINTENANCE_MARGIN)
+    fit = min(lev, math.floor(most * 10 + 1e-9) / 10)
+    ok = short_stop_ok if short else long_stop_ok
+    while fit >= 1.0 and not ok(entry, stop, fit):  # rounding at the edge
+        fit = round(fit - 0.1, 1)
+    return fit if fit >= 1.0 else 0.0
 
 
 def margin(notional: float, lev: float) -> float:
