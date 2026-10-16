@@ -680,12 +680,34 @@ paper trading. Nothing trades real money.</p>
                     "week_close_pct": week_close_pct, "min_rr": min_rr or 0, "trend": trend == "1",
                     "split_tp": split_tp == "1", "maker_entry": maker_entry == "1", "max_long": max_long,
                     "max_short": max_short, "max_correlated": max_correlated, "corr_min": corr_min,
-                    "trade_usdt": trade_usdt or 0}, by=user)
+                    "trade_usdt": trade_usdt}, by=user)
             except ValueError:
                 return "Not changed: enter numbers for the amount per trade, loss limits, hours and minimum reward.", False
             name = "Futures AI" if market == "futures" else "Spot AI"
             _event("paper_guards", f"{name} trading rules set by {user}: {_guards_text(g)}")
             return f"{name} now uses: {_guards_text(g)}. Open trades keep the take-profit they opened with."
+        return _control_post(request, csrf, act)
+
+    @app.post("/trading/paper/amount")
+    def trading_paper_amount(request: Request, csrf: str = Form(""), market: str = Form(""),
+                             trade_usdt: str = Form("")):
+        """The amount each new paper trade of one engine uses (0 = sized from the strategy's risk)."""
+        def act(user):
+            from ..learn import guards
+
+            if market not in ("spot", "futures"):
+                return "Not changed: choose Spot AI or Futures AI.", False
+            try:
+                g = guards.save(guards.path_for(paths.paper_state), market,
+                                {"trade_usdt": trade_usdt.strip() or 0}, by=user)
+            except ValueError:
+                return "Not changed: enter the amount per trade as a number (0 for automatic).", False
+            name = "Futures AI" if market == "futures" else "Spot AI"
+            amt = g["trade_usdt"]
+            what = (f"{amt:,.2f} USDT per trade" + (" as margin, times the leverage" if market == "futures" else "")
+                    if amt else "automatic trade size (from the strategy's risk)")
+            _event("paper_guards", f"{name} amount per trade set by {user}: {what}")
+            return f"Saved: {name} now uses {what}. Open trades keep their size."
         return _control_post(request, csrf, act)
 
     @app.post("/trading/paper/leverage")
@@ -1689,6 +1711,20 @@ def _guards_text(g: dict) -> str:
     return ", ".join(parts)
 
 
+def _amount_form(paths: Paths, csrf: str, ws: str) -> str:
+    """The amount each new trade uses, with its own Save button."""
+    from ..learn import guards
+
+    amt = guards.load(guards.path_for(paths.paper_state))[ws]["trade_usdt"]
+    lo, hi = guards.RANGES["trade_usdt"]
+    now = f"now {amt:,.2f} USDT per trade" if amt else "now automatic"
+    return (f'<form method="post" action="/trading/paper/amount" class="row">{csrf}'
+            f'<input type="hidden" name="market" value="{ws}">'
+            f'<label class="small">Amount per trade USDT (0 auto) <input name="trade_usdt" type="number" '
+            f'inputmode="decimal" step="any" min="0" max="{hi:g}" value="{amt:g}" style="width:6em"></label>'
+            f'<button>Save amount</button> <span class="small muted">{now}</span></form>')
+
+
 def _guards_form(paths: Paths, csrf: str, ws: str) -> str:
     """The engine's extra rules: loss breakers, minimum reward, trend check, split take-profit."""
     from ..learn import guards
@@ -1707,7 +1743,6 @@ def _guards_form(paths: Paths, csrf: str, ws: str) -> str:
 
     return (f'<form method="post" action="/trading/paper/guards" class="row">{csrf}'
             f'<input type="hidden" name="market" value="{ws}">'
-            f'{num("trade_usdt", "Amount per trade USDT (0 auto)")} '
             f'{box("breaker", "Loss breakers")} {num("day_pause_pct", "Pause at day loss %")} '
             f'{num("pause_hours", "for hours")} {num("week_close_pct", "Close all at week loss %")} '
             f'{num("min_rr", "Min reward R (0 off)")} {box("trend", "Trade with the 4h/1d trend")} '
@@ -1783,6 +1818,7 @@ def _market_card(paths: Paths, paper: dict, csrf: str, ws: str = "spot") -> str:
            f'<label class="small">Max open <input name="max_open" type="number" min="{wallet.MAX_OPEN_RANGE[0]}" '
            f'max="{wallet.MAX_OPEN_RANGE[1]}" value="{lim["max_open"]}" style="width:5em"></label>'
            '<button class="ghost">Set limits</button></form>')
+    out += _amount_form(paths, csrf, ws)
     out += _guards_form(paths, csrf, ws)
     if ws == "futures":
         choices = sorted(set(futures.PAPER_LEVERAGE_CHOICES) | {lev})

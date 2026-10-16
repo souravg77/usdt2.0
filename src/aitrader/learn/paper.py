@@ -206,6 +206,11 @@ class PaperTrader:
                         self.state["last_signal"][key] = sig.ts
                         late = now_ms - newest_close
                         if late > max_data_age(tf):  # the candle arrived late: its prices are old now
+                            if market not in self._seen:
+                                # the first look at this market since the trader started (a restart or
+                                # update) or since the pair joined the list: a candle that closed hours
+                                # ago is history, not a missed trade, so it isn't listed as one
+                                continue
                             self._log_signal(key, sig, "stale prices",
                                              f"the candle closed {late / 60_000:.0f} min ago")
                             events["filtered"].append(key)
