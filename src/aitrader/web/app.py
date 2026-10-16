@@ -1744,7 +1744,7 @@ def _market_card(paths: Paths, paper: dict, csrf: str, ws: str = "spot") -> str:
              or guards.block(st, ws, now_ms))
     state = ('<b class="bad">OFF</b>' if not on else f'<b class="warn">PAUSED</b> ({_e(block)})' if block
              else '<b class="good">ON</b>')
-    today = wallet.today_pnl(st, ws, now_ms)
+    today = wallet.today_pnl(st, ws, now_ms, wallet.load(wallet.wallet_path(paths.paper_state, ws))["since"])
     if ws == "futures":
         margin = sum(p.get("units", 0) * p.get("entry", 0) / p.get("leverage", 1.0) for p in mine)
         longs = sum(1 for p in mine if (p.get("signal") or {}).get("side") != "sell")
