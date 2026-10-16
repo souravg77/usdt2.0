@@ -699,21 +699,32 @@ def cmd_learn(s: Settings, args) -> int:
               f"({len(reg.with_status('retired'))} retired after poor paper results stay retired)")
         return 0
     if cmd == "keep-top":
-        from .learn.keep import indicators_used, keep_top, save_n, saved_n
+        from .learn.keep import indicators_used, keep_top, kept_ids, save_kept, save_n, saved_n
 
-        n = save_n(args.registry, args.n) if args.n else saved_n(args.registry)
-        out = keep_top(reg, n)
-        reg.save()
-        print(f"the best {len(out['kept'])} strategies keep paper trading (at most {n}):")
-        for i, k in enumerate(out["kept"], 1):
-            tfs = f"  [{', '.join(k['timeframes'])}]" if k["timeframes"] else ""
-            print(f"  {i:2d}. {k['id']:44} {k['score']:+.3f}R per trade{tfs}  {k['why']}"
-                  f"{'' if k['passed'] else '  (did not pass the backtest)'}")
-        untested = f", {out['untested']} had no backtest result yet" if out["untested"] else ""
-        print(f"{len(out['benched'])} taken out of paper trading, {len(out['returned'])} brought back{untested}")
-        used = indicators_used(reg)
-        if used:
-            print("indicators they use: " + ", ".join(f"{k} ({c})" for k, c in used.items()))
+        # each engine ranks on its own: Spot AI the longs, Futures AI the longs and the short twins,
+        # each by the backtest and its own paper trades; a strategy leaves paper trading only when
+        # neither engine kept it
+        markets = ["spot", "futures"] if args.market == "both" else [args.market]
+        if len(markets) == 1 and kept_ids(args.registry, "futures" if markets[0] == "spot" else "spot") is None:
+            # the other engine has never ranked: rank it too, or it would trade what this one kept
+            markets.append("futures" if markets[0] == "spot" else "spot")
+        name = {"spot": "Spot AI", "futures": "Futures AI"}
+        for mkt in markets:
+            other = "futures" if mkt == "spot" else "spot"
+            n = save_n(args.registry, args.n, mkt) if args.n else saved_n(args.registry, mkt)
+            out = keep_top(reg, n, market=mkt, others=kept_ids(args.registry, other) or set())
+            reg.save()
+            save_kept(args.registry, mkt, [k["id"] for k in out["kept"]])
+            print(f"{name[mkt]}: the best {len(out['kept'])} strategies keep paper trading (at most {n}):")
+            for i, k in enumerate(out["kept"], 1):
+                tfs = f"  [{', '.join(k['timeframes'])}]" if k["timeframes"] else ""
+                print(f"  {i:2d}. {k['id']:44} {k['score']:+.3f}R per trade{tfs}  {k['why']}"
+                      f"{'' if k['passed'] else '  (did not pass the backtest)'}")
+            untested = f", {out['untested']} had no backtest result yet" if out["untested"] else ""
+            print(f"{len(out['benched'])} taken out of paper trading, {len(out['returned'])} brought back{untested}")
+            used = indicators_used(reg, mkt, kept=kept_ids(args.registry, mkt))
+            if used:
+                print("indicators they use: " + ", ".join(f"{k} ({c})" for k, c in used.items()))
         return 0
     if cmd == "test":
         if args.ids:
@@ -1661,6 +1672,8 @@ def build_parser() -> argparse.ArgumentParser:
                                             "backtest and paper results, with a few places for the best "
                                             "on each timeframe); the rest leave paper trading")
     lk.add_argument("--n", type=int, help="how many to keep, 10-20 (default: the last number used, else 15)")
+    lk.add_argument("--market", choices=["spot", "futures", "both"], default="both",
+                    help="whose ranking: Spot AI's, Futures AI's, or each engine's own (default)")
     lt = le_sub.add_parser("test", help="backtest candidates; passes go to paper trading")
     lt.add_argument("ids", nargs="*")
     lt.add_argument("--retest", action="store_true", help="also re-test rejected strategies")

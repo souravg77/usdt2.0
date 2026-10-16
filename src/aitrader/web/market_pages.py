@@ -217,10 +217,11 @@ def _strategy_indicators(registry_path: str, market: str | None = None) -> dict[
         return {}
     try:
         from ..learn import Registry, picks
-        from ..learn.keep import indicators_used
+        from ..learn.keep import indicators_used, kept_ids
 
         only = bool(market) and picks.winners_only(registry_path, market)
-        return indicators_used(Registry(registry_path), market, only)
+        kept = kept_ids(registry_path, market) if market else None
+        return indicators_used(Registry(registry_path), market, only, kept)
     except Exception:
         return {}
 

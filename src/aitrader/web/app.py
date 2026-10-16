@@ -577,7 +577,8 @@ paper trading. Nothing trades real money.</p>
                              ["learn", "add-shorts"],
                              ["learn", "paper-all"],
                              ["download", "--since", since, "--exchange", EXCHANGE],
-                             ["learn", "test", "--paper"], ["learn", "keep-top"]], meta={"kind": "paper-start"})
+                             ["learn", "test", "--paper"], ["learn", "keep-top", "--market", mkt]],
+                            meta={"kind": "paper-start"})
                 return (f"{name} paper trading is on, and every strategy is being loaded: a year of price history is "
                         "downloaded, each one is backtested and only the best ones keep trading. Trades open when a "
                         f"strategy's signal appears on a closed candle.{extra}")
@@ -586,9 +587,12 @@ paper trading. Nothing trades real money.</p>
         return _control_post(request, csrf, act)
 
     @app.post("/trading/paper/keep")
-    def trading_paper_keep(request: Request, csrf: str = Form(""), n: str = Form("")):
+    def trading_paper_keep(request: Request, csrf: str = Form(""), n: str = Form(""), market: str = Form("")):
         def act(user):
             from ..learn.keep import DEFAULT_N, MAX_N, MIN_N, clamp
+
+            mkt = _ws_market(market)
+            name = "Futures AI" if mkt == "futures" else "Spot AI"
 
             try:
                 count = clamp(int(n or DEFAULT_N))
@@ -597,12 +601,12 @@ paper trading. Nothing trades real money.</p>
             busy = {j.get("meta", {}).get("kind") for j in jobs.list() if j["status"] in ("queued", "running")}
             if busy & {"paper-start", "keep-top"}:
                 return "Strategies are already being loaded or ranked; see Recent jobs on the Overview page."
-            jobs.submit(f"Keep only the best {count} strategies paper trading",
-                        [["learn", "keep-top", "--n", str(count)]], meta={"kind": "keep-top"})
-            _event("keep_top", f"keep only the best {count} strategies, from the dashboard by {user}")
-            return (f"Ranking the strategies: the best {count} keep paper trading, the rest stop opening "
-                    "trades (their open trades still close normally). The Markets chart now starts with "
-                    "the indicators they use.")
+            jobs.submit(f"{name}: keep only the best {count} strategies paper trading",
+                        [["learn", "keep-top", "--n", str(count), "--market", mkt]], meta={"kind": "keep-top"})
+            _event("keep_top", f"{name}: keep only the best {count} strategies, from the dashboard by {user}")
+            return (f"Ranking {name}'s strategies on its own results: its best {count} keep trading on {name}, "
+                    "the rest stop opening trades there (their open trades still close normally). The other "
+                    "engine's strategies are not changed.")
         return _control_post(request, csrf, act)
 
     @app.post("/market-mode")
@@ -1601,9 +1605,12 @@ def _trading_count(paths: Paths, ws: str = "spot") -> int:
     from ..learn import Registry, picks
 
     try:
-        only = picks.winners_only(paths.registry, ws)
+        from ..learn.keep import kept_ids
+
+        only, kept = picks.winners_only(paths.registry, ws), kept_ids(paths.registry, ws)
         return sum(1 for e in Registry(paths.registry).entries.values()
-                   if e.status == "paper" and picks.trades_now(e, only, ws))
+                   if e.status == "paper" and not (ws == "spot" and e.kind == "short")
+                   and picks.trades_now(e, only, ws, kept))
     except Exception:
         return 0
 
@@ -1653,21 +1660,23 @@ def _paper_switch_card(c: dict, paths: Paths, events: list[dict], jobs: list[dic
     hidden = f'<input type="hidden" name="market" value="{ws}">'
     from ..learn.keep import MAX_N, MIN_N, saved_n
 
-    keep_n = saved_n(paths.registry)
+    keep_n = saved_n(paths.registry, ws)
     return (f'<div class="card"><h3>{name} paper trading (fake money)</h3><p>{name} paper trading '
             f'<b class="{cls}">{state}</b>: {why}</p>'
             f'<p class="small muted">Off stops new {name} paper trades only; its open positions still run to their '
             f'exits and {other} keeps trading. On starts {name} again, and loads every strategy first when none is '
-            'paper trading yet. The strategies themselves are shared research: Reload every strategy puts every '
-            'strategy into paper trading, downloads a year of history and backtests them, for both engines.</p>'
+            f'paper trading yet. Reload every strategy loads the strategy library, downloads a year of history, '
+            f'backtests every strategy and ranks them for {name} only.</p>'
             f'<div class="row"><form method="post" action="/trading/paper/on">{csrf}{hidden}<button>{on}</button></form>'
             f'<form method="post" action="/trading/paper/off">{csrf}{hidden}<button class="ghost">'
             f'Turn {name} paper trading off</button></form>'
-            '</div><p class="small muted">Keep only the best: strategies are ranked by their backtest and paper '
-            'results (ones that passed the backtest first, then result per trade, with few trades counting '
-            'for less). The best stay in paper trading and the rest stop opening trades; every reload ranks '
-            'them again, so one can come back. This ranking is shared by both engines.</p>'
-            f'<form method="post" action="/trading/paper/keep" class="row">{csrf}'
+            f'</div><p class="small muted">Keep only the best: {name} ranks the strategies by their backtest and '
+            f'its own paper results only (ones that passed the backtest first, then result per trade, with few '
+            f'trades counting for less{"; shorts included" if ws == "futures" else "; longs only"}). Its best '
+            f'trade on {name} and the rest stop opening trades there; every reload ranks them again, so one can '
+            f'come back. {other} has its own ranking: a strategy kept by one engine never trades on the other '
+            'because of it.</p>'
+            f'<form method="post" action="/trading/paper/keep" class="row">{csrf}{hidden}'
             f'<label class="small">Keep the best <input type="number" name="n" min="{MIN_N}" max="{MAX_N}" '
             f'value="{keep_n}" style="width:4.5em"> strategies</label><button class="ghost">Keep only the best</button></form>'
             + _winners_only_form(only, wins, csrf, ws) + '</div>')

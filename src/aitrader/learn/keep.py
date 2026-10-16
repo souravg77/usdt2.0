@@ -17,6 +17,12 @@ The top ``n`` are kept even when some score below 0 (paper money, and their resu
 the paper trader still retires one that loses too much. The rest leave paper trading with the reason
 ``BENCHED``; a later run can bring one back if it climbs into the top ``n``. Strategies retired
 for poor paper results stay retired. Open paper positions are still managed until they close.
+
+Each engine has its own ranking (``market``): Spot AI ranks the long strategies by their backtest
+and its own paper trades, Futures AI the longs and the short twins by their backtest and its own
+paper trades. An engine trades only the strategies its own ranking kept (``kept_ids``), so a
+strategy that earned its place on Futures never trades on Spot because of it, and the other way
+round. A strategy leaves paper trading only when neither engine kept it.
 """
 
 from __future__ import annotations
@@ -37,14 +43,17 @@ def _passed(entry: Entry) -> bool:
     return not bt.get("failed") and (bt.get("out_of_sample") or {}).get("trades", 0) > 0
 
 
-def score(entry: Entry) -> float | None:
+def score(entry: Entry, market: str | None = None) -> float | None:
     """Result per trade, out of sample and paper together, shrunk toward 0 for few trades. None
-    when the strategy has no backtest result yet."""
+    when the strategy has no backtest result yet. With ``market`` only that engine's paper trades."""
     oos = (entry.backtest or {}).get("out_of_sample") or {}
     if not entry.backtest or "trades" not in oos:
         return None
     n_bt, e_bt = oos.get("trades", 0), oos.get("expectancy_r", 0.0)
-    n_p, e_p = (entry.paper or {}).get("trades", 0), (entry.paper or {}).get("expectancy_r", 0.0)
+    paper = entry.paper or {}
+    if market:
+        paper = (paper.get("markets") or {}).get(market) or {}
+    n_p, e_p = paper.get("trades", 0), paper.get("expectancy_r", 0.0)
     return (n_bt * e_bt + n_p * e_p) / (n_bt + n_p + PRIOR)
 
 
@@ -54,11 +63,13 @@ def benched(entry: Entry) -> bool:
         str(entry.history[-1].get("why", "")).startswith(BENCHED)
 
 
-def rank(reg: Registry) -> list[tuple[Entry, float]]:
-    """Strategies that may paper trade (in paper now, or benched earlier), best first."""
+def rank(reg: Registry, market: str | None = None) -> list[tuple[Entry, float]]:
+    """Strategies that may paper trade (in paper now, or benched earlier), best first. With
+    ``market`` the ones that engine may trade (no shorts on Spot), scored on its own paper trades."""
     pool = [e for e in reg.entries.values() if (e.status == "paper" or benched(e))
-            and not (e.spec or {}).get("pick")]  # timeframe picks (learn.picks) are kept apart
-    scored = [(e, s) for e in pool if (s := score(e)) is not None]
+            and not (e.spec or {}).get("pick")  # timeframe picks (learn.picks) are kept apart
+            and not (market == "spot" and e.kind == "short")]
+    scored = [(e, s) for e in pool if (s := score(e, market)) is not None]
     return sorted(scored, key=lambda es: (_passed(es[0]), es[1]), reverse=True)
 
 
@@ -105,14 +116,16 @@ def choose(ranked: list[tuple[Entry, float]], n: int,
     return [(e, s, why[e.id]) for e, s in ranked if e.id in why]
 
 
-def keep_top(reg: Registry, n: int, per_tf: int = PER_TIMEFRAME) -> dict:
-    """Keep the best ``n`` in paper trading; bench the rest. Returns what changed."""
-    ranked = rank(reg)
+def keep_top(reg: Registry, n: int, per_tf: int = PER_TIMEFRAME, market: str | None = None,
+             others: set | frozenset = frozenset()) -> dict:
+    """Keep the best ``n`` in paper trading; bench the rest. Returns what changed. With ``market``
+    only that engine's ranking: ``others`` (the other engine's kept ids) stay in paper trading."""
+    ranked = rank(reg, market)
     if not ranked:
         return {"kept": [], "benched": [], "returned": [], "untested": 0}
     chosen = choose(ranked, n, per_tf)
-    keep_ids = {e.id for e, _s, _w in chosen}
-    out = {"kept": [{"id": e.id, "score": round(sc, 4), "passed": _passed(e), "why": w,
+    keep_ids = {e.id for e, _s, _w in chosen} | set(others)
+    out = {"market": market, "kept": [{"id": e.id, "score": round(sc, 4), "passed": _passed(e), "why": w,
                      "timeframes": sorted(timeframe_scores(e), key=_tf_order)} for e, sc, w in chosen],
            "benched": [], "returned": [],
            "untested": sum(1 for e in reg.entries.values() if e.status == "paper" and score(e) is None)}
@@ -190,15 +203,16 @@ def indicators(entry: Entry) -> set[str]:
     return {k for k, pat in INDICATOR_WORDS.items() if re.search(pat, text)}
 
 
-def indicators_used(reg: Registry, market: str | None = None, only_winners: bool = False) -> dict[str, int]:
+def indicators_used(reg: Registry, market: str | None = None, only_winners: bool = False,
+                    kept: set | None = None) -> dict[str, int]:
     """How many paper-trading strategies use each chart indicator, most used first. With ``market``
     ("spot" or "futures") only the strategies that engine trades: its own WIN strategies (all of them
-    with ``only_winners``, its WIN-only switch), and no shorts on Spot."""
+    with ``only_winners``, its WIN-only switch), the ones its ranking kept, and no shorts on Spot."""
     from .picks import trades_now
 
     counts: dict[str, int] = {}
     for e in reg.with_status("paper"):
-        if market and ((market == "spot" and e.kind == "short") or not trades_now(e, only_winners, market)):
+        if market and ((market == "spot" and e.kind == "short") or not trades_now(e, only_winners, market, kept)):
             continue
         try:
             used = indicators(e)
@@ -214,24 +228,58 @@ def indicators_used(reg: Registry, market: str | None = None, only_winners: bool
 DEFAULT_N, MIN_N, MAX_N = 15, 10, 20
 
 
-def _n_path(registry_path: str) -> str:
-    return os.path.join(os.path.dirname(os.path.abspath(registry_path)), "keep.json")
+def _n_path(registry_path: str, market: str | None = None) -> str:
+    name = f"keep_{market}.json" if market else "keep.json"
+    return os.path.join(os.path.dirname(os.path.abspath(registry_path)), name)
 
 
-def saved_n(registry_path: str) -> int:
+def _read(path: str) -> dict:
     try:
-        with open(_n_path(registry_path), encoding="utf-8") as fh:
-            return clamp(int(json.load(fh)["n"]))
-    except (OSError, ValueError, KeyError, TypeError):
-        return DEFAULT_N
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
 
 
-def save_n(registry_path: str, n: int) -> int:
+def saved_n(registry_path: str, market: str | None = None) -> int:
+    """How many ``market``'s engine keeps (the number used before the engines had their own, else 15)."""
+    for path in ([_n_path(registry_path, market)] if market else []) + [_n_path(registry_path)]:
+        try:
+            return clamp(int(_read(path)["n"]))
+        except (ValueError, KeyError, TypeError):
+            continue
+    return DEFAULT_N
+
+
+def save_n(registry_path: str, n: int, market: str | None = None) -> int:
     n = clamp(n)
-    os.makedirs(os.path.dirname(_n_path(registry_path)), exist_ok=True)
-    with open(_n_path(registry_path), "w", encoding="utf-8") as fh:
-        json.dump({"n": n}, fh)
+    path = _n_path(registry_path, market)
+    data = _read(path)
+    data["n"] = n
+    _write(path, data)
     return n
+
+
+def kept_ids(registry_path: str, market: str) -> set | None:
+    """The strategies ``market``'s engine kept at its last ranking; None before its first one."""
+    kept = _read(_n_path(registry_path, market)).get("kept")
+    return set(kept) if isinstance(kept, list) else None
+
+
+def save_kept(registry_path: str, market: str, ids) -> None:
+    path = _n_path(registry_path, market)
+    data = _read(path)
+    data["kept"] = sorted(ids)
+    _write(path, data)
+
+
+def _write(path: str, data: dict) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh)
+    os.replace(tmp, path)
 
 
 def clamp(n: int) -> int:
