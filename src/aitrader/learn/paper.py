@@ -246,6 +246,14 @@ class PaperTrader:
                             leg_ai = ai if (k, perp) in ai_legs else _NO_AI
                             leg_tch = tch if (k, perp) in tch_legs else _no_teacher(sig)
                             leg_sig = leg_tch["signal"]
+                            min_rr = self._guards[leg_mkt]["min_rr"]
+                            if leg_sig is not sig and too_little_reward(leg_sig, self._bcfg(perp, min_rr=min_rr)):
+                                # the teacher's shorter target must clear the minimum reward too
+                                self._log_signal(k, leg_sig, "reward too small",
+                                                 f"the teacher's target is {leg_sig.r_multiple_target:.2f}R away, "
+                                                 f"minimum {min_rr:g}R")
+                                events["filtered"].append(k)
+                                continue
                             self.state["open"][k] = {"entry_id": entry.id, "signal": _sig_dict(leg_sig),
                                                      "situation": leg_tch["situation"], "teacher": leg_tch["version"],
                                                      "size_mult": size_mult * ctx_mult * leg_ai["size"],
@@ -605,6 +613,16 @@ class PaperTrader:
                 # sized from its workspace's paper wallet (learn.wallet): Spot or Futures
                 bal = wallet.balance(self.state, self._wallet(mkt), mkt)
                 lev = self._lev(sym) if short or pos.get("perp") else 1.0
+                ok = futures.short_stop_ok if short else futures.long_stop_ok
+                if mkt == "futures" and not ok(t.entry, sig.stop, lev):
+                    # checked at the signal price too; the fill (a gap, or a new leverage) can move
+                    # the liquidation price past the stop
+                    del self.state["open"][key]
+                    self._mark_signal(key, sig.ts, "stop too close to liquidation",
+                                      f"filled at {t.entry:.6g}: at {lev:g}x the liquidation price is past the stop")
+                    log.info("paper %s skipped: filled at %.6g, stop too close to liquidation at %gx",
+                             key, t.entry, lev)
+                    continue
                 risk_usdt = bal * sig.risk_pct * pos.get("size_mult", 1.0)
                 units = risk_usdt / abs(sig.entry - sig.stop)
                 units = min(units, bal * self.cfg.max_position_frac / t.entry)
@@ -623,6 +641,16 @@ class PaperTrader:
                 pos.update(filled=True, entry=t.entry, units=units, entry_ts=t.entry_ts)
                 if short or pos.get("perp"):
                     pos["leverage"] = lev
+            if mkt == "futures":  # isolated margin: a position can't lose more than its margin
+                lev = pos.get("leverage", 1.0)
+                margin = pos["units"] * pos["entry"] / lev
+                per_r = abs(sig.entry - sig.stop) * pos["units"]
+                if per_r > 0 and t.r * per_r < -margin:
+                    liq = (futures.short_liquidation_price if short else futures.long_liquidation_price)(
+                        pos["entry"], lev)
+                    t.r, t.exit, t.exit_reason = -margin / per_r, float(liq), "liquidated"
+                    log.warning("paper %s liquidated at %.6g (%gx): lost its margin of %.2f USDT",
+                                key, liq, lev, margin)
             if t.exit_reason == "end" and t.exit_ts == int(df["ts"].iloc[-1]):
                 if not closing:
                     pos["mark_r"] = round(t.r, 3)  # still open

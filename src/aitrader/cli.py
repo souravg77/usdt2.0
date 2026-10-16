@@ -655,6 +655,8 @@ def cmd_learn(s: Settings, args) -> int:
             return 0
         since = int(_time.time() * 1000) - int(args.years * 365.25 * 86_400_000)
         entries = known_entries(reg.entries)
+        if mkt == "spot":  # Spot AI never sells short: its picks don't test the short twins
+            entries = [e for e in entries if e.kind != "short"]
         store = CandleStore(s.db_path)
         try:
             if mkt == "futures":  # Futures AI's pick: longs costed as perpetuals too

@@ -96,6 +96,10 @@ def _one_trailing_exit(rule: str, df: pd.DataFrame):
         return rsi(df["close"]) > float(rule[4:])
     if rule == "close<psar":
         return df["close"] < parabolic_sar(df)["sar"]
+    if rule.startswith("flipped:"):  # a short twin's exit, also before the twin registered it (a restart)
+        from ..strategies.mirror import flip
+
+        return _one_trailing_exit(rule[len("flipped:"):], flip(df))
     if rule.startswith("when:"):  # a strategy's own exit rule that was never registered
         raise KeyError(f"exit rule {rule} is not registered (build the strategy first)")
     return None
