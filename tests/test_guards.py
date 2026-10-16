@@ -179,6 +179,21 @@ def test_trading_page_sets_the_rules(tmp_path, monkeypatch):
     r = client.post("/trading/paper/guards", data={"csrf": csrf, "market": "futures", "min_rr": "x"},
                     follow_redirects=False)
     assert "bad=1" in r.headers["location"]
+    assert "Amount per trade USDT" in client.get("/trading").text
+    r = client.post("/trading/paper/guards", data={"csrf": csrf, "market": "spot", "trade_usdt": "25"},
+                    follow_redirects=False)
+    assert "bad=1" not in r.headers["location"]
+    g = guards.load(guards.path_for(paths.paper_state))
+    assert g["spot"]["trade_usdt"] == 25 and g["futures"]["trade_usdt"] == 0
+
+
+def test_the_amount_per_trade_is_0_for_automatic_or_at_least_5(tmp_path):
+    path = str(tmp_path / "g.json")
+    assert guards.load(path)["spot"]["trade_usdt"] == 0
+    assert guards.save(path, "spot", {"trade_usdt": "0"})["trade_usdt"] == 0
+    assert guards.save(path, "spot", {"trade_usdt": "2"})["trade_usdt"] == 5
+    assert guards.save(path, "spot", {"trade_usdt": "-3"})["trade_usdt"] == 5
+    assert guards.save(path, "futures", {"trade_usdt": "120.5"})["trade_usdt"] == 120.5
 
 
 def test_the_paper_trader_skips_a_long_against_the_daily_trend(tmp_path, monkeypatch):

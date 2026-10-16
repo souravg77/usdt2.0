@@ -18,6 +18,9 @@
 - **Limit entries** (``maker_entry``): enter with a post-only limit order at the signal price or
   the open, paying the maker fee instead of taker fee and slippage; when the entry candle never
   trades through that price the order is cancelled and the trade is missed (``engine.maker_fill``).
+- **Amount per trade** (``trade_usdt``, 0 = automatic): each new position uses this many USDT, the
+  purchase amount on Spot and the margin on Futures (so the position is that times the leverage),
+  instead of being sized from the strategy's risk. Still never more than the wallet has free.
 
 Settings live in ``paper_guards.json`` next to the paper state; the engines' breaker state lives in
 the paper state itself. Paper only: the live trader keeps its own limits.
@@ -35,10 +38,12 @@ from . import wallet
 
 DEFAULTS = {"breaker": True, "day_pause_pct": 3.0, "pause_hours": 24.0, "week_close_pct": 6.0,
             "min_rr": 0.0, "trend": False, "split_tp": False, "maker_entry": False,
-            "max_long": 8.0, "max_short": 8.0, "max_correlated": 3.0, "corr_min": 0.8}
+            "max_long": 8.0, "max_short": 8.0, "max_correlated": 3.0, "corr_min": 0.8, "trade_usdt": 0.0}
 RANGES = {"day_pause_pct": (0.5, 50.0), "pause_hours": (1.0, 168.0), "week_close_pct": (1.0, 90.0),
           "min_rr": (0.0, 10.0), "max_long": (1.0, 200.0), "max_short": (1.0, 200.0),
-          "max_correlated": (1.0, 50.0), "corr_min": (0.5, 0.99)}
+          "max_correlated": (1.0, 50.0), "corr_min": (0.5, 0.99),
+          "trade_usdt": (5.0, 1_000_000.0)}
+OFF_AT_ZERO = ("min_rr", "trade_usdt")  # 0 means off / automatic, not the range's minimum
 WHOLE = ("max_long", "max_short", "max_correlated")
 CORR_BARS = 168  # hourly returns of the last week
 SWITCHES = ("breaker", "trend", "split_tp", "maker_entry")
@@ -65,7 +70,7 @@ def _clean(d: dict) -> dict:
         if not math.isfinite(num):  # "nan" or "inf" typed in the form: the default, not the limit
             num = v
         lo, hi = RANGES[k]
-        out[k] = num if k == "min_rr" and num == 0 else max(lo, min(hi, num))
+        out[k] = num if k in OFF_AT_ZERO and num == 0 else max(lo, min(hi, num))
         if k in WHOLE:
             out[k] = float(int(out[k]))
     return out

@@ -666,7 +666,8 @@ paper trading. Nothing trades real money.</p>
                              breaker: str = Form(""), day_pause_pct: str = Form(""), pause_hours: str = Form(""),
                              week_close_pct: str = Form(""), min_rr: str = Form(""), trend: str = Form(""),
                              split_tp: str = Form(""), maker_entry: str = Form(""), max_long: str = Form(""),
-                             max_short: str = Form(""), max_correlated: str = Form(""), corr_min: str = Form("")):
+                             max_short: str = Form(""), max_correlated: str = Form(""), corr_min: str = Form(""),
+                             trade_usdt: str = Form("")):
         """One engine's loss breakers, minimum reward, higher-timeframe trend check and split take-profit."""
         def act(user):
             from ..learn import guards
@@ -678,9 +679,10 @@ paper trading. Nothing trades real money.</p>
                     "breaker": breaker == "1", "day_pause_pct": day_pause_pct, "pause_hours": pause_hours,
                     "week_close_pct": week_close_pct, "min_rr": min_rr or 0, "trend": trend == "1",
                     "split_tp": split_tp == "1", "maker_entry": maker_entry == "1", "max_long": max_long,
-                    "max_short": max_short, "max_correlated": max_correlated, "corr_min": corr_min}, by=user)
+                    "max_short": max_short, "max_correlated": max_correlated, "corr_min": corr_min,
+                    "trade_usdt": trade_usdt or 0}, by=user)
             except ValueError:
-                return "Not changed: enter numbers for the loss limits, hours and minimum reward.", False
+                return "Not changed: enter numbers for the amount per trade, loss limits, hours and minimum reward.", False
             name = "Futures AI" if market == "futures" else "Spot AI"
             _event("paper_guards", f"{name} trading rules set by {user}: {_guards_text(g)}")
             return f"{name} now uses: {_guards_text(g)}. Open trades keep the take-profit they opened with."
@@ -1675,7 +1677,8 @@ def _market_switch(paths: Paths, auth, token, title: str) -> str:
 
 
 def _guards_text(g: dict) -> str:
-    parts = [f"pause {g['pause_hours']:g}h after a {g['day_pause_pct']:g}% day loss, close all at a "
+    parts = [f"{g['trade_usdt']:,.2f} USDT per trade" if g["trade_usdt"] else "trade size from the strategy's risk",
+             f"pause {g['pause_hours']:g}h after a {g['day_pause_pct']:g}% day loss, close all at a "
              f"{g['week_close_pct']:g}% week loss" if g["breaker"] else "loss breakers off",
              f"minimum reward {g['min_rr']:g}R" if g["min_rr"] else "no minimum reward",
              "higher-timeframe trend check on" if g["trend"] else "no trend check",
@@ -1698,11 +1701,13 @@ def _guards_form(paths: Paths, csrf: str, ws: str) -> str:
 
     def num(name, label, step="any"):
         lo, hi = guards.RANGES[name]
+        lo = 0 if name in guards.OFF_AT_ZERO else lo
         return (f'<label class="small">{label} <input name="{name}" type="number" inputmode="decimal" step="{step}" '
                 f'min="{lo:g}" max="{hi:g}" value="{g[name]:g}" style="width:4.5em"></label>')
 
     return (f'<form method="post" action="/trading/paper/guards" class="row">{csrf}'
             f'<input type="hidden" name="market" value="{ws}">'
+            f'{num("trade_usdt", "Amount per trade USDT (0 auto)")} '
             f'{box("breaker", "Loss breakers")} {num("day_pause_pct", "Pause at day loss %")} '
             f'{num("pause_hours", "for hours")} {num("week_close_pct", "Close all at week loss %")} '
             f'{num("min_rr", "Min reward R (0 off)")} {box("trend", "Trade with the 4h/1d trend")} '
@@ -1711,7 +1716,11 @@ def _guards_form(paths: Paths, csrf: str, ws: str) -> str:
             f'{num("max_long", "Max longs", "1")} {num("max_short", "Max shorts", "1")} '
             f'{num("max_correlated", "Max moving together", "1")} {num("corr_min", "at correlation", "0.05")}'
             '<button class="ghost">Set rules</button></form>'
-            '<p class="small muted">Loss breakers count closed and open trades: past the day loss the engine opens '
+            '<p class="small muted">Amount per trade: 0 sizes each trade from the strategy\'s risk (at most half '
+            'the wallet). Any other amount (5 USDT or more) is what each new trade uses: the purchase amount on Spot, '
+            'the margin on Futures, so on Futures the position is that amount times the leverage and so is the loss '
+            'at the stop. A trade never uses more than the wallet has free. Open trades keep their size. '
+            'Loss breakers count closed and open trades: past the day loss the engine opens '
             'nothing new for the hours set; past the week loss (from Monday midnight) it closes all its positions and '
             'opens nothing new until Monday. Min reward skips signals whose target is closer than that many times '
             'the risk (signals that exit on their own rule are not judged). Max longs and shorts count open positions '
