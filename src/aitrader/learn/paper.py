@@ -626,9 +626,13 @@ class PaperTrader:
                     if lev < chosen:
                         log.info("paper %s: %gx instead of %gx so the stop comes well before liquidation",
                                  key, lev, chosen)
-                risk_usdt = bal * sig.risk_pct * pos.get("size_mult", 1.0)
-                units = risk_usdt / abs(sig.entry - sig.stop)
-                units = min(units, bal * self.cfg.max_position_frac / t.entry)
+                amount = self._guards[mkt]["trade_usdt"]
+                if amount > 0:  # a fixed amount per trade: the cost on Spot, the margin on Futures
+                    units = amount * pos.get("size_mult", 1.0) * lev / t.entry
+                else:  # sized from the strategy's risk, at most half the wallet
+                    risk_usdt = bal * sig.risk_pct * pos.get("size_mult", 1.0)
+                    units = risk_usdt / abs(sig.entry - sig.stop)
+                    units = min(units, bal * self.cfg.max_position_frac / t.entry)
                 # all open positions together may not tie up more than the wallet
                 # (a spot position ties up what it cost; a perp position only its margin)
                 units = min(units, max(0.0, bal - wallet.in_use(self.state, skip=key, market=mkt)) * lev / t.entry)

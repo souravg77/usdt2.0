@@ -5,7 +5,7 @@ import pandas as pd
 
 from aitrader.backtest import engine
 from aitrader.data.store import CandleStore
-from aitrader.learn import PaperConfig, PaperTrader, Registry, wallet
+from aitrader.learn import PaperConfig, PaperTrader, Registry, guards, wallet
 from aitrader.learn.paper import _sig_dict
 from aitrader.models import Side
 from aitrader.strategies.base import Signal
@@ -16,7 +16,7 @@ H = 3_600_000
 T0 = 1_700_000_000_000 // H * H
 
 
-def _run(tmp_path, bars, entry=100.0, stop=98.0, target=110.0, lev=20.0, side="buy"):
+def _run(tmp_path, bars, entry=100.0, stop=98.0, target=110.0, lev=20.0, side="buy", amount=0.0):
     rows = [(T0 + i * H, 100, 100.2, 99.8, 100, 1000) for i in range(300)]
     rows += [(T0 + (300 + j) * H, o, h, lo, c, 1000) for j, (o, h, lo, c) in enumerate(bars)]
     store = CandleStore(str(tmp_path / "c.db"))
@@ -25,6 +25,8 @@ def _run(tmp_path, bars, entry=100.0, stop=98.0, target=110.0, lev=20.0, side="b
     st = str(tmp_path / "state.json")
     wallet.save(wallet.wallet_path(st, "futures"), 1000, now_ms=0)
     wallet.set_leverage(wallet.market_path(st), lev)
+    if amount:
+        guards.save(guards.path_for(st), "futures", {"trade_usdt": amount})
     tr = PaperTrader(store, str(tmp_path / "reg.json"), ["bybit"], ["BTC/USDT"], PaperConfig(), state_path=st)
     sig = Signal(ts=T0 + 300 * H, strategy="x", exchange="bybit", symbol="BTC/USDT", timeframe="1h",
                  side=Side.SELL if side == "sell" else Side.BUY, entry=entry, stop=stop, target=target,
@@ -63,6 +65,20 @@ def test_a_stop_too_wide_for_the_leverage_trades_at_less(tmp_path):
     assert 1 <= pos["leverage"] < 20
     assert futures.long_stop_ok(pos["entry"], 98.0, pos["leverage"])
     assert futures.long_liquidation_price(pos["entry"], pos["leverage"]) < 98.0
+
+
+def test_a_fixed_amount_per_trade_is_the_margin(tmp_path):
+    bars = [(100, 100.5, 99.9, 100.2), (100.2, 100.6, 100, 100.4)]
+    auto = _run(tmp_path / "a", bars, lev=5.0)
+    [a] = auto.state["open"].values()
+    assert abs(a["units"] - 1000 * 0.01 / 2) < 0.01  # about 1% risk of 1000 over a 2 USDT stop
+    fixed = _run(tmp_path / "f", bars, lev=5.0, amount=50)
+    [f] = fixed.state["open"].values()
+    assert abs(f["units"] * f["entry"] / f["leverage"] - 50) < 1e-6  # 50 USDT margin
+    assert abs(f["units"] * f["entry"] - 250) < 1e-6  # a 250 USDT position at 5x
+    big = _run(tmp_path / "b", bars, lev=1.0, amount=5000)  # more than the wallet: what is free
+    [b] = big.state["open"].values()
+    assert abs(b["units"] * b["entry"] - 1000) < 1e-6
 
 
 def test_safe_leverage():
