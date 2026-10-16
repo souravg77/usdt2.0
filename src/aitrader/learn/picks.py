@@ -101,10 +101,13 @@ def set_winners_only(registry_path: str, on: bool, by: str = "", market: str | N
     os.replace(tmp, path)
 
 
-def trades_now(entry: Entry, only_winners: bool, market: str | None = None) -> bool:
+def trades_now(entry: Entry, only_winners: bool, market: str | None = None, kept: set | None = None) -> bool:
     """Whether ``market``'s engine opens paper trades for ``entry`` (status aside). A pick copy
-    trades only on the engine whose pick made it."""
+    trades only on the engine whose pick made it; any other strategy only on an engine whose own
+    "Keep only the best" ranking (``kept``, its ids; None before its first ranking) kept it."""
     if market and picked_for(entry) and pick_market(entry) != market:
+        return False
+    if market and not picked_for(entry) and kept is not None and entry.id not in kept:
         return False
     return not only_winners or bool(picked_for(entry))
 

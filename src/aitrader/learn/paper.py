@@ -44,7 +44,7 @@ from ..market.regime import breakdown, classify
 from ..models import TIMEFRAME_MS, Side
 from ..strategies.base import Signal
 from ..trade import futures
-from . import guards, picks, wallet
+from . import guards, keep, picks, wallet
 from .lab import with_context
 from .registry import Registry, make_strategy
 
@@ -157,11 +157,13 @@ class PaperTrader:
         engines = wallet.engines(self.engines_path)  # the Trading page's Spot AI / Futures AI switches
         # each engine's "WIN strategies only" switch and its use of the AI filter and the teacher
         only_winners = {m: picks.winners_only(self.registry_path, m) for m in wallet.MARKETS}
+        # each engine's own "Keep only the best" ranking: a strategy kept by one never trades the other
+        kept = {m: keep.kept_ids(self.registry_path, m) for m in wallet.MARKETS}
         uses = wallet.filters(self.filters_path)
         built, broken, checks = 0, 0, 0  # what this pass looked at, for the dashboard
         for entry in reg.with_status("paper"):
             benched = self.state.get("benched") or {}
-            trades = {m: picks.trades_now(entry, only_winners[m], m) and entry.id not in (benched.get(m) or {})
+            trades = {m: picks.trades_now(entry, only_winners[m], m, kept[m]) and entry.id not in (benched.get(m) or {})
                       for m in wallet.MARKETS}
             if not any(trades.values()):
                 continue
@@ -710,6 +712,14 @@ class PaperTrader:
                 "open": sum(1 for p in self.state["open"].values() if p["entry_id"] == entry.id),
                 "by_regime": breakdown((r.get("regime"), _trade_from(r)) for r in rows),
             }
+            per = {}  # each engine's own results, for its own ranking (learn.keep)
+            for mkt in wallet.MARKETS:
+                mine = [r for r in rows if _row_market(r) == mkt]
+                if mine:
+                    mm = metrics([_trade_from(r) for r in mine])
+                    per[mkt] = {"trades": mm["trades"], "expectancy_r": round(mm["expectancy_r"], 4),
+                                "total_r": round(mm["total_r"], 3)}
+            entry.paper["markets"] = per
             if entry.status != "paper":
                 continue
             # each engine judges a strategy on its own trades: losing on one engine stops it there

@@ -126,7 +126,41 @@ def test_cli_keep_top(tmp_path, monkeypatch, capsys):
     text = capsys.readouterr().out
     assert "the best 12 strategies" in text and "2 taken out" in text and "indicators they use: adx (12)" in text
     assert len(Registry(reg.path).with_status("paper")) == 12
-    assert main(args) == 0 and saved_n(reg.path) == 12  # the last number is remembered
+    assert main(args) == 0 and saved_n(reg.path, "spot") == saved_n(reg.path, "futures") == 12  # remembered
+
+
+def test_each_engine_keeps_its_own_best(tmp_path, monkeypatch, capsys):
+    """Futures AI's ranking uses its own paper trades and the short twins; Spot AI's never sees them,
+    and a strategy only one engine kept trades only on that engine."""
+    from aitrader.cli import main
+    from aitrader.learn import picks
+    from aitrader.learn.keep import kept_ids
+
+    monkeypatch.chdir(tmp_path)
+    longs = [entry(f"l{i}", trades=100, exp=0.1 + i / 100) for i in range(10)]
+    spot_star = entry("spot_star", trades=100, exp=0.05)
+    spot_star.paper = {"trades": 60, "expectancy_r": 0.3, "markets": {"spot": {"trades": 60, "expectancy_r": 0.9}}}
+    fut_star = entry("fut_star", trades=100, exp=0.05)
+    fut_star.paper = {"trades": 60, "expectancy_r": 0.3, "markets": {"futures": {"trades": 60, "expectancy_r": 0.9}}}
+    short = entry("short_one", trades=100, exp=0.8)
+    short.kind = "short"
+    reg = make(tmp_path, *longs, spot_star, fut_star, short)
+    reg.save()
+    args = ["--env-file", "none", "learn", "--registry", reg.path, "keep-top", "--n", "10"]
+    assert main(args) == 0
+    spot, fut = kept_ids(reg.path, "spot"), kept_ids(reg.path, "futures")
+    assert "spot_star" in spot and "fut_star" not in spot and "short_one" not in spot
+    assert "fut_star" in fut and "spot_star" not in fut and "short_one" in fut
+    now = Registry(reg.path)
+    assert now.get("spot_star").status == now.get("fut_star").status == "paper"  # each kept by its engine
+    assert picks.trades_now(now.get("spot_star"), False, "spot", spot)
+    assert not picks.trades_now(now.get("spot_star"), False, "futures", fut)
+    assert not picks.trades_now(now.get("fut_star"), False, "spot", spot)
+    # ranking one engine again leaves the other's choice alone
+    assert main(args[:-2] + ["--n", "10", "--market", "futures"]) == 0
+    assert kept_ids(reg.path, "spot") == spot and Registry(reg.path).get("spot_star").status == "paper"
+    # before an engine's first ranking it trades every paper strategy (as before)
+    assert picks.trades_now(now.get("fut_star"), False, "spot", None)
 
 
 def on_tfs(e, **by_tf):
