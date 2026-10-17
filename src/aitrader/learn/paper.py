@@ -5,7 +5,9 @@ position when a strategy signals on the newest bar, and manages open positions w
 fill rules as the backtest (``simulate_signal``): entry at the next bar's open plus slippage,
 stop first, gaps fill at the open, fees on both sides. Results are kept per strategy and checked
 against ``RetireRule``; a strategy whose paper results fall below the bar is retired and takes
-no new trades. No exchange order is ever sent from here.
+no new trades. When a person has promoted a Phase 4 trade-filter model, each new signal is
+checked by it first: skipped below its threshold, sized by its confidence above. No exchange
+order is ever sent from here.
 """
 
 from __future__ import annotations
@@ -50,11 +52,12 @@ class PaperConfig:
 class PaperTrader:
     def __init__(self, store: CandleStore, registry_path: str, exchanges: list[str],
                  symbols: list[str], cfg: PaperConfig | None = None,
-                 state_path: str = DEFAULT_STATE, calendar=None):
+                 state_path: str = DEFAULT_STATE, calendar=None, ai_filter=None):
         self.store, self.registry_path = store, registry_path
         self.exchanges, self.symbols = exchanges, symbols
         self.cfg = cfg or PaperConfig()
         self.state_path, self.calendar = state_path, calendar
+        self.ai_filter = ai_filter  # Phase 4 trade filter (aitrader.ai.LiveFilter) or None
         self.state = {"open": {}, "trades": [], "equity": {}, "last_signal": {}}
         if os.path.exists(state_path):
             with open(state_path, encoding="utf-8") as fh:
@@ -65,7 +68,7 @@ class PaperTrader:
     def tick(self, now_ms: int | None = None) -> dict:
         now_ms = now_ms or int(time.time() * 1000)
         reg = Registry(self.registry_path)  # re-read: `learn` commands may have changed it
-        events = {"opened": [], "closed": [], "retired": []}
+        events = {"opened": [], "closed": [], "retired": [], "filtered": []}
         self._manage_open(reg, now_ms, events)
         allow, size_mult = self._calendar(now_ms)
         for entry in reg.with_status("paper"):
@@ -85,10 +88,17 @@ class PaperTrader:
                             continue
                         sig = sigs[-1]
                         self.state["last_signal"][key] = sig.ts
+                        ai = self._ai_check(sig, entry.id, df)
+                        if not ai["take"]:
+                            self._note_filtered(key, sig, ai)
+                            events["filtered"].append(key)
+                            continue
                         self.state["open"][key] = {"entry_id": entry.id, "signal": _sig_dict(sig),
-                                                   "size_mult": size_mult, "filled": False}
+                                                   "size_mult": size_mult * ai["size"], "filled": False,
+                                                   "ai_prob": ai["prob"], "ai_version": ai["version"]}
                         events["opened"].append(key)
-                        log.info("paper signal %s entry~%.6g stop %.6g", key, sig.entry, sig.stop)
+                        log.info("paper signal %s entry~%.6g stop %.6g ai p=%s size x%.2f", key,
+                                 sig.entry, sig.stop, ai["prob"], ai["size"])
         self._score(reg, events)
         reg.save()
         self.save()
@@ -114,9 +124,28 @@ class PaperTrader:
         candles = [c for c in self.store.load(ex, sym, tf, start) if c.ts + step <= now_ms]
         return candles_to_frame(candles) if candles else None
 
+    def _ai_check(self, sig: Signal, entry_id: str, df) -> dict:
+        if self.ai_filter is None:
+            return {"take": True, "size": 1.0, "prob": None, "version": None}
+        recent = [t["r"] for t in self.state["trades"]
+                  if t["entry_id"] == entry_id and t["exit_ts"] < sig.ts]
+        try:
+            return self.ai_filter.check(sig, entry_id, df, recent)
+        except Exception:  # a broken model must not stop paper trading; trade unfiltered
+            log.exception("trade filter failed on %s; taking the signal unfiltered", entry_id)
+            return {"take": True, "size": 1.0, "prob": None, "version": None}
+
+    def _note_filtered(self, key: str, sig: Signal, ai: dict) -> None:
+        skipped = self.state.setdefault("filtered", [])
+        skipped.append({"key": key, "signal_ts": sig.ts, "prob": ai["prob"], "version": ai["version"]})
+        del skipped[:-1000]
+        log.info("paper signal %s skipped by trade filter %s (p=%.3f)", key, ai["version"], ai["prob"])
+
     def _manage_open(self, reg: Registry, now_ms: int, events: dict) -> None:
         for key, pos in list(self.state["open"].items()):
             entry_id, ex, sym, tf = key.split("|")
+            if entry_id in reg.entries:
+                make_strategy(reg.entries[entry_id])  # registers its custom exit rules
             sig = _sig_from(pos["signal"])
             step = TIMEFRAME_MS[tf]
             df = self._frame(ex, sym, tf, sig.ts - WINDOW_BARS * step, now_ms)
@@ -142,7 +171,8 @@ class PaperTrader:
             pnl = t.r * (sig.entry - sig.stop) * pos["units"]
             self.state["equity"][entry_id] = equity + pnl
             row = {**_trade_dict(t), "key": key, "entry_id": entry_id, "units": pos["units"],
-                   "pnl_usdt": pnl, "equity_after": equity + pnl}
+                   "pnl_usdt": pnl, "equity_after": equity + pnl,
+                   "ai_prob": pos.get("ai_prob"), "ai_version": pos.get("ai_version")}
             self.state["trades"].append(row)
             del self.state["open"][key]
             events["closed"].append(key)

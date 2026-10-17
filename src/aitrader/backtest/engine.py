@@ -48,6 +48,11 @@ class Trade:
     features: dict = field(default_factory=dict)
 
 
+# Exit rules registered by strategies (e.g. rule-language "exit.when" conditions), looked up by
+# the key that appears in Signal.trailing.
+CUSTOM_EXITS: dict = {}
+
+
 def _trailing_exit(rule: str | None, df: pd.DataFrame):
     """Return a boolean Series: True on bars whose close triggers the trailing exit. Several
     rules can be joined with "|" (any of them exits); "time_stop=N" parts are handled separately."""
@@ -62,6 +67,8 @@ def _trailing_exit(rule: str | None, df: pd.DataFrame):
 
 
 def _one_trailing_exit(rule: str, df: pd.DataFrame):
+    if rule in CUSTOM_EXITS:
+        return CUSTOM_EXITS[rule](df).astype(bool)
     if rule.startswith("close<ema"):
         n = int(rule.split("ema")[1])
         return df["close"] < ema(df["close"], n)

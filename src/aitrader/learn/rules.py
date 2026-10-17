@@ -18,7 +18,8 @@ Example::
       ],
       "stop": {"type": "atr", "mult": 2},
       "target": {"r": 2},
-      "exit": {"trailing": "rsi>70", "time_stop_bars": 48},
+      "exit": {"trailing": "rsi>70", "time_stop_bars": 48,
+               "when": [{"left": "close", "op": "crosses_below", "right": "sma(50)"}]},
       "decisions": ["'Oversold' = RSI(14) below 30, as the book says"],
       "uncodable": []
     }
@@ -39,6 +40,14 @@ import pandas as pd
 
 from ..indicators import (
     adx,
+    bullish_divergence,
+    candle_patterns,
+    cci,
+    directional_index,
+    force_index,
+    heikin_ashi,
+    stochastic,
+    streak,
     atr,
     atr_percentile,
     bollinger,
@@ -53,6 +62,7 @@ from ..indicators import (
     stoch_rsi,
     vwap,
 )
+from ..backtest.engine import CUSTOM_EXITS
 from ..models import TIMEFRAME_MS, Side
 from ..strategies.base import Signal, Strategy, StrategySpec
 
@@ -91,12 +101,36 @@ FEATURES: dict[str, tuple[tuple[float, ...], str]] = {
     "cloud_bottom": ((), "bottom of the Ichimoku cloud"),
     "trend_structure": ((), "+1 higher highs and lows, -1 lower, 0 mixed"),
     "ema_stack": ((20, 50, 200), "+1 EMAs stacked up, -1 down, 0 mixed"),
+    "plus_di": ((14,), "+DI, 0-100"),
+    "minus_di": ((14,), "-DI, 0-100"),
+    "cci": ((20,), "Commodity Channel Index (typical price, 0.015)"),
+    "stoch_k": ((14, 3), "slow stochastic %K, 0-100"),
+    "stoch_d": ((14, 3, 3), "slow stochastic %D, 0-100"),
+    "force_index": ((13,), "Elder Force Index: EMA of price change x volume"),
+    "ha_green": ((), "1 if the Heikin-Ashi candle is green (HA close > HA open), else 0"),
+    "bar_range": ((), "high - low"),
+    "nr": ((7,), "1 if this bar's range is the smallest of the last N bars (NR7 = nr(7))"),
+    "range_atr": ((10,), "(highest high - lowest low of the last N bars incl. this one) / ATR(14)"),
+    "bullish_engulfing": ((), "1 if a down bar is followed by an up bar whose body covers it"),
+    "hammer": ((), "1 for a hammer: lower wick >= 2x body, small upper wick, body in top third"),
+    "doji": ((), "1 if the body is at most 10% of the bar's range"),
+    "inside_bar": ((), "1 if high < previous high and low > previous low"),
+    "lower_shadow_ratio": ((), "lower wick / body (body floored at 1% of range)"),
+    "green_streak": ((), "up bars in a row ending at this bar"),
+    "red_streak": ((), "down bars in a row ending at this bar"),
+    "closes_above_sma": ((5,), "closes in a row above SMA(N), ending at this bar"),
+    "closes_below_sma": ((5,), "closes in a row below SMA(N), ending at this bar"),
+    "rsi_bull_div": ((14, 30), "1 when a bullish RSI(N) divergence (lower price low, higher RSI low, within lookback bars) is confirmed"),
+    "cci_bull_div": ((20, 30), "1 when a bullish CCI(N) divergence is confirmed"),
+    "macd_bull_div": ((30,), "1 when a bullish MACD(12,26,9) line divergence is confirmed"),
 }
 OPS = (">", "<", ">=", "<=", "crosses_above", "crosses_below")
 TRAILING = re.compile(r"^(close<ema\d{1,3}|close<psar|rsi>\d{2}(\.\d+)?)$")
 STOP_TYPES = ("atr", "percent", "lowest_low", "indicator")
 ALLOWED_TIMEFRAMES = ("5m", "15m", "30m", "1h", "4h", "1d")
 MAX_RISK_PCT = 0.01
+MAX_CONDITIONS = 12
+MIN_STOP_PCT = 0.002  # stops closer than 0.2% are skipped: fees alone would cost most of 1R
 _EXPR = re.compile(r"^\s*(?:(\d+(?:\.\d+)?)\s*\*\s*)?([a-z_]+)\s*(?:\(([^)]*)\))?\s*(?:\[(\d+)\])?\s*$")
 
 
@@ -155,6 +189,28 @@ def parse_expr(text) -> Expr | float:
     return Expr(name, tuple(args), shift_n, m_val)
 
 
+def _check_conditions(conds: list, where: str, errors: list[str]) -> list[dict]:
+    clean = []
+    for i, c in enumerate(conds):
+        w = f"{where}[{i}]"
+        try:
+            if not isinstance(c, dict):
+                raise RuleError(f"{w} must be an object with left, op, right")
+            if c.get("op") not in OPS:
+                raise RuleError(f"{w}.op must be one of {OPS}, got {c.get('op')!r}")
+            left, _right = parse_expr(c.get("left")), parse_expr(c.get("right"))
+            if not isinstance(left, Expr):
+                raise RuleError(f"{w}.left must be a feature, not a number")
+            within = c.get("within", 1) or 1
+            if isinstance(within, bool) or not isinstance(within, int) or not 1 <= within <= 20:
+                raise RuleError(f"{w}.within must be a whole number of bars from 1 to 20")
+            clean.append({"left": c["left"], "op": c["op"], "right": c["right"], "within": within})
+        except RuleError as exc:
+            msg = str(exc)
+            errors.append(msg if msg.startswith(w) else f"{w}: {msg}")
+    return clean
+
+
 def _num(d: dict, key: str, lo: float, hi: float, where: str, default=None) -> float:
     v = d.get(key, default)
     if isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= v <= hi:
@@ -198,28 +254,9 @@ def validate_spec(spec: dict) -> dict:
     if not isinstance(conds, list) or not conds:
         errors.append("entry must be a non-empty list of conditions")
         conds = []
-    if len(conds) > 8:
-        errors.append("entry has more than 8 conditions")
-    clean_conds = []
-    for i, c in enumerate(conds[:8]):
-        where = f"entry[{i}]"
-        try:
-            if not isinstance(c, dict):
-                raise RuleError(f"{where} must be an object with left, op, right")
-            if c.get("op") not in OPS:
-                raise RuleError(f"{where}.op must be one of {OPS}, got {c.get('op')!r}")
-            left, right = parse_expr(c.get("left")), parse_expr(c.get("right"))
-            if not isinstance(left, Expr):
-                raise RuleError(f"{where}.left must be a feature, not a number")
-            within = int(c.get("within", 1) or 1)
-            if not 1 <= within <= 20:
-                raise RuleError(f"{where}.within must be 1-20 bars")
-            clean_conds.append({"left": c["left"], "op": c["op"], "right": c["right"],
-                                "within": within})
-        except RuleError as exc:
-            errors.append(str(exc))
-        except (TypeError, ValueError) as exc:
-            errors.append(f"{where}: {exc}")
+    if len(conds) > MAX_CONDITIONS:
+        errors.append(f"entry has more than {MAX_CONDITIONS} conditions")
+    clean_conds = _check_conditions(conds[:MAX_CONDITIONS], "entry", errors)
     out["entry"] = clean_conds
 
     stop = spec.get("stop") or {}
@@ -233,7 +270,7 @@ def validate_spec(spec: dict) -> dict:
         elif t == "percent":
             out["stop"] = {"type": t, "pct": _num(stop, "pct", 0.002, 0.25, "stop")}
         elif t == "lowest_low":
-            out["stop"] = {"type": t, "n": int(_num(stop, "n", 2, 200, "stop", 10))}
+            out["stop"] = {"type": t, "n": int(_num(stop, "n", 1, 200, "stop", 10))}
         else:
             e = parse_expr(stop.get("expr"))
             if not isinstance(e, Expr):
@@ -257,13 +294,22 @@ def validate_spec(spec: dict) -> dict:
     if trailing is not None and not (isinstance(trailing, str) and TRAILING.match(trailing)):
         errors.append("exit.trailing must be close<emaN, close<psar or rsi>X")
         trailing = None
+    when = ex.get("when") if isinstance(ex, dict) else None
+    clean_when = []
+    if when is not None:
+        if not isinstance(when, list) or len(when) > 4:
+            errors.append("exit.when must be a list of up to 4 conditions")
+        else:
+            clean_when = _check_conditions(when, "exit.when", errors)
     if time_stop is not None:
         if isinstance(time_stop, bool) or not isinstance(time_stop, int) or not 1 <= time_stop <= 1000:
             errors.append("exit.time_stop_bars must be a whole number from 1 to 1000")
             time_stop = None
-    if out.get("target") is None and not trailing and not time_stop:
-        errors.append("give a target, a trailing exit or a time stop so trades can end")
+    if out.get("target") is None and not trailing and not time_stop and not clean_when:
+        errors.append("give a target, a trailing exit, an exit condition or a time stop so trades can end")
     out["exit"] = {"trailing": trailing, "time_stop_bars": time_stop}
+    if clean_when:
+        out["exit"]["when"] = clean_when
 
     risk = spec.get("risk_pct", 0.005)
     if isinstance(risk, bool) or not isinstance(risk, (int, float)) or risk <= 0:
@@ -302,7 +348,7 @@ def _feature(df: pd.DataFrame, e: Expr, cache: dict) -> pd.Series:
             s = rsi(close, a[0])
         elif n == "stoch_rsi":
             s = stoch_rsi(close, a[0])["stoch_rsi"]
-        elif n.startswith("macd"):
+        elif n in ("macd", "macd_signal", "macd_hist"):
             m = macd(close, a[0], a[1], a[2])
             s = m[{"macd": "macd", "macd_signal": "signal", "macd_hist": "hist"}[n]]
         elif n == "atr":
@@ -341,6 +387,47 @@ def _feature(df: pd.DataFrame, e: Expr, cache: dict) -> pd.Series:
             s = market_structure(df).astype(float)
         elif n == "ema_stack":
             s = ema_stack(close, tuple(a)).astype(float)
+        elif n in ("plus_di", "minus_di"):
+            s = directional_index(df, a[0])[n]
+        elif n == "cci":
+            s = cci(df, a[0])
+        elif n == "stoch_k":
+            s = stochastic(df, a[0], a[1])["k"]
+        elif n == "stoch_d":
+            s = stochastic(df, a[0], a[1], a[2])["d"]
+        elif n == "force_index":
+            s = force_index(df, a[0])
+        elif n == "ha_green":
+            ha = heikin_ashi(df)
+            s = (ha["close"] > ha["open"]).astype(float)
+        elif n == "bar_range":
+            s = df["high"] - df["low"]
+        elif n == "nr":
+            rng = df["high"] - df["low"]
+            s = (rng <= rng.rolling(a[0], min_periods=a[0]).min()).astype(float)
+        elif n == "range_atr":
+            span = df["high"].rolling(a[0], min_periods=a[0]).max() - df["low"].rolling(a[0], min_periods=a[0]).min()
+            s = span / atr(df)
+        elif n in ("bullish_engulfing", "hammer", "doji", "inside_bar"):
+            s = candle_patterns(df)[n]
+        elif n == "lower_shadow_ratio":
+            body = (df["close"] - df["open"]).abs().clip(lower=0.01 * (df["high"] - df["low"]))
+            lower = pd.concat([df["open"], close], axis=1).min(axis=1) - df["low"]
+            s = lower / body.replace(0, np.nan)
+        elif n == "green_streak":
+            s = streak(close > df["open"])
+        elif n == "red_streak":
+            s = streak(close < df["open"])
+        elif n == "closes_above_sma":
+            s = streak(close > sma(close, a[0]))
+        elif n == "closes_below_sma":
+            s = streak(close < sma(close, a[0]))
+        elif n == "rsi_bull_div":
+            s = bullish_divergence(df, rsi(close, a[0]), a[1])
+        elif n == "cci_bull_div":
+            s = bullish_divergence(df, cci(df, a[0]), a[1])
+        elif n == "macd_bull_div":
+            s = bullish_divergence(df, macd(close)["macd"], a[0])
         else:  # pragma: no cover - parse_expr already rejects unknown names
             raise RuleError(f"unknown feature {n}")
         cache[k] = s.astype(float)
@@ -409,6 +496,7 @@ class RuleStrategy(Strategy):
         stop_s = self._stop_series(df, cache)
         trailing = "|".join(x for x in (
             r["exit"]["trailing"],
+            self._exit_rule_key(),
             f"time_stop={r['exit']['time_stop_bars']}" if r["exit"]["time_stop_bars"] else None,
         ) if x) or None
         step = TIMEFRAME_MS[timeframe]
@@ -416,7 +504,7 @@ class RuleStrategy(Strategy):
         out = []
         for i in np.flatnonzero(cond.to_numpy()):
             entry, stop = close[i], float(stop_s.iloc[i])
-            if not np.isfinite(stop) or stop >= entry or stop <= 0:
+            if not np.isfinite(stop) or stop <= 0 or (entry - stop) / entry < MIN_STOP_PCT:
                 continue
             target = entry + r["target"]["r"] * (entry - stop) if r["target"] else None
             out.append(Signal(
@@ -426,6 +514,24 @@ class RuleStrategy(Strategy):
                 reason=self.spec.entry[:200],
             ))
         return out
+
+    def _exit_rule_key(self) -> str | None:
+        """Exit conditions are registered with the backtest engine under a key derived from
+        the rules, so the backtest and the paper trader evaluate them the same way."""
+        when = self.rule["exit"].get("when")
+        if not when:
+            return None
+        key = "when:" + hashlib.sha256(json.dumps(when, sort_keys=True).encode()).hexdigest()[:10]
+
+        def exit_series(df: pd.DataFrame) -> pd.Series:
+            cache: dict = {}
+            hit = pd.Series(False, index=df.index)
+            for c in when:
+                hit |= condition_series(df, c, cache)
+            return hit
+
+        CUSTOM_EXITS[key] = exit_series
+        return key
 
     def _stop_series(self, df, cache) -> pd.Series:
         st = self.rule["stop"]
@@ -466,6 +572,7 @@ conditions must hold on the same bar (AND).
 Stop types: {{"type":"atr","mult":2,"n":14}}, {{"type":"percent","pct":0.03}},
 {{"type":"lowest_low","n":10}}, {{"type":"indicator","expr":"bb_mid(20,2)"}}.
 Target: {{"r": 2}} (reward as a multiple of risk, 0.5-10) or null.
-Exit: {{"trailing": "close<ema50" | "close<psar" | "rsi>70" | null, "time_stop_bars": N | null}}.
+Exit: {{"trailing": "close<ema50" | "close<psar" | "rsi>70" | null, "time_stop_bars": N | null,
+"when": [up to 4 conditions; the trade exits at the next open when any is true] }}.
 Timeframes: {', '.join(ALLOWED_TIMEFRAMES)} (up to 3). Long spot entries only; no leverage, no
 shorting. risk_pct at most {MAX_RISK_PCT}."""

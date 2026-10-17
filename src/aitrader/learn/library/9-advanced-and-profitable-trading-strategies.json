@@ -1,0 +1,621 @@
+{
+ "book": "9 Advanced and Profitable Trading Strategies",
+ "author": "Roman Sadowski",
+ "strategies": [
+  {
+   "name": "ma_cross_20_60_trend100",
+   "description": "Buy when the 20-period MA crosses above the 60-period MA, with price above the 100-period trend MA; exit when the MAs cross back.",
+   "source": {
+    "book": "9 Advanced and Profitable Trading Strategies",
+    "pages": "p. 8-11",
+    "quote": "generates a BUY signal when the fast moving average ( or MA) crosses up over the slower moving average."
+   },
+   "timeframes": [
+    "4h",
+    "1d"
+   ],
+   "entry": [
+    {
+     "left": "sma(20)",
+     "op": "crosses_above",
+     "right": "sma(60)"
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "sma(100)"
+    }
+   ],
+   "stop": {
+    "type": "atr",
+    "mult": 3,
+    "n": 14
+   },
+   "target": null,
+   "exit": {
+    "trailing": "close<ema50",
+    "time_stop_bars": null,
+    "when": [
+     {
+      "left": "sma(20)",
+      "op": "crosses_below",
+      "right": "sma(60)"
+     }
+    ]
+   },
+   "risk_pct": 0.01,
+   "decisions": [
+    "MA type not stated; simple MAs used.",
+    "Book uses the 100 MA to judge trend strength, not as an entry gate; requiring close > sma(100) is our filter to cut ranging-market false signals the book warns about (p. 9).",
+    "Book has no stop; exit is the reverse cross. A 3x ATR(14) catastrophe stop added.",
+    "Reverse-cross exit (sma20 < sma60) is not available; close<ema50 trailing used as the nearest approximation (EMA50 sits near SMA60).",
+    "Book's 3% max risk capped to 1%."
+   ],
+   "uncodable": [
+    "Short side: sell when fast MA crosses below slow MA."
+   ]
+  },
+  {
+   "name": "heikin_ashi_two_green_stoch_reversal",
+   "description": "Daily Heikin-Ashi reversal: two completed green HA candles after a run of red ones, Stochastic(14,7,3) coming out of oversold, enter on a break of the second green candle's high.",
+   "source": {
+    "book": "9 Advanced and Profitable Trading Strategies",
+    "pages": "p. 13-18",
+    "quote": "If the price prints two consecutive green candles, after a series of red candles, the downtrend is exhausted and the reversal is likely."
+   },
+   "timeframes": [
+    "1d"
+   ],
+   "entry": [
+    {
+     "left": "ha_green[1]",
+     "op": ">=",
+     "right": 1
+    },
+    {
+     "left": "ha_green[2]",
+     "op": ">=",
+     "right": 1
+    },
+    {
+     "left": "ha_green[3]",
+     "op": "<",
+     "right": 1
+    },
+    {
+     "left": "ha_green[4]",
+     "op": "<",
+     "right": 1
+    },
+    {
+     "left": "stoch_k(14,7)",
+     "op": "<",
+     "right": 30,
+     "within": 5
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "high[1]"
+    }
+   ],
+   "stop": {
+    "type": "lowest_low",
+    "n": 5
+   },
+   "target": null,
+   "exit": {
+    "trailing": "close<psar",
+    "time_stop_bars": null
+   },
+   "risk_pct": 0.01,
+   "decisions": [
+    "Heikin-Ashi candles not available; regular candle colours used as a rough approximation (bars 1-2 green, bars 3-4 red). Real HA colour runs are smoother and longer.",
+    "p. 15 says long after two RED candles with Stochastic above 70, contradicting p. 14; treated as a typo. Long = two green candles after reds with Stochastic having been oversold (<30).",
+    "Stochastic(14,7,3) not available; 'oversold within the last 5 bars' approximated with rsi(14) < 35 within 5 bars.",
+    "Buy-stop a few pips above the second green candle's high approximated by close > high[1].",
+    "Book stop is 100 pips flat or local technical level; local level = lowest_low(5) (covers the red run).",
+    "Book says let winners run and trail to local lows; PSAR trailing used. Break-even after 50 pips not expressible.",
+    "Book's 3% max risk capped to 1%.",
+    "Oversold = Stochastic(14,7,3) %K below 30 within the last 5 bars (the book shows the oscillator on charts without a level)."
+   ],
+   "uncodable": [
+    "Short side: two red HA candles after greens with Stochastic overbought.",
+    "Avoid bank holidays, NFP, FOMC and central-bank speech days (news calendar).",
+    "Don't enter right after a volatile one-way swing (discretionary).",
+    "Exit on opposite HA signal.",
+    "Not coded yet: accelerator_oscillator (optional AC > 0 green-bar filter)",
+    "Not coded yet: move stop to break-even after +X% (book: +50 pips)",
+    "Not coded yet: buy-stop order entry at high of signal bar"
+   ]
+  },
+  {
+   "name": "swing_correction_range_breakout",
+   "description": "In an uptrend, wait for a tight overlapping correction (contracting volatility), then buy when two candles close above the correction's range top; stop at the correction low.",
+   "source": {
+    "book": "9 Advanced and Profitable Trading Strategies",
+    "pages": "p. 22-25",
+    "quote": "A trader would buy the open of the following candle and place a stop at the lowest point of the correction."
+   },
+   "timeframes": [
+    "4h",
+    "1h"
+   ],
+   "entry": [
+    {
+     "left": "close",
+     "op": ">",
+     "right": "ema(200)"
+    },
+    {
+     "left": "bb_width_rank(20,2,120)",
+     "op": "<",
+     "right": 0.2,
+     "within": 10
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "highest_high(12)"
+    },
+    {
+     "left": "close[1]",
+     "op": ">",
+     "right": "highest_high(12)[1]"
+    }
+   ],
+   "stop": {
+    "type": "lowest_low",
+    "n": 20
+   },
+   "target": {
+    "r": 3
+   },
+   "exit": {
+    "trailing": "close<ema50",
+    "time_stop_bars": null
+   },
+   "risk_pct": 0.01,
+   "decisions": [
+    "Prior trend = close above ema(200) (book only says 'the trend that had started the previous week').",
+    "'Contracting range, lots of overlap' approximated by band-width percentile < 0.2 within the last 10 bars.",
+    "'Two separate candles moved above the upper blue line' = two consecutive closes above the prior 12-bar high (range of the correction).",
+    "Stop at the lowest point of the correction = lowest_low(20) (book example had 26 candles in the range).",
+    "Book example had ~30 pt risk vs ~600 pt gain but gives no target; 3R target plus EMA50 trail chosen.",
+    "Book chart was EURUSD 4h."
+   ],
+   "uncodable": [
+    "Short side: sell when the first candle breaks below the contracting range in a downtrend, stop at the minor swing high.",
+    "Not coded yet: range_overlap / range contraction of last N bars (e.g. (highest_high(n)-lowest_low(n))/atr)"
+   ]
+  },
+  {
+   "name": "bullish_engulfing_next_candle",
+   "description": "Buy after a bullish engulfing candle; stop at the engulfing candle's low; trail with the trend.",
+   "source": {
+    "book": "9 Advanced and Profitable Trading Strategies",
+    "pages": "p. 25-26",
+    "quote": "Your stop should be placed at the low of the engulfing candle."
+   },
+   "timeframes": [
+    "1h",
+    "4h",
+    "1d"
+   ],
+   "entry": [
+    {
+     "left": "bullish_engulfing",
+     "op": ">=",
+     "right": 1
+    }
+   ],
+   "stop": {
+    "type": "indicator",
+    "expr": "low"
+   },
+   "target": {
+    "r": 2
+   },
+   "exit": {
+    "trailing": "close<ema50",
+    "time_stop_bars": null
+   },
+   "risk_pct": 0.01,
+   "decisions": [
+    "Engulfing approximated with OHLC comparisons: prior bar red, current bar green, current body covers prior body.",
+    "Book says wait for the following candle then enter; signal evaluated on the engulfing bar close, entry assumed at next bar open.",
+    "Stop = low of the engulfing (signal) bar.",
+    "No target in book; 2R target plus EMA50 trail chosen.",
+    "Book notes engulfing more candles is stronger; only a 1-candle engulf is required here."
+   ],
+   "uncodable": [
+    "Bearish engulfing short with stop at engulfing high."
+   ]
+  },
+  {
+   "name": "long_lower_shadow_reversal",
+   "description": "Buy the open after a candle whose lower shadow is at least twice its real body at a turning point; stop at the shadow low, trailed.",
+   "source": {
+    "book": "9 Advanced and Profitable Trading Strategies",
+    "pages": "p. 27-28",
+    "quote": "The \u2018shadow\u2019 should be at least twice the length of the real body of the candle."
+   },
+   "timeframes": [
+    "1h",
+    "4h",
+    "1d"
+   ],
+   "entry": [
+    {
+     "left": "lower_shadow_ratio",
+     "op": ">=",
+     "right": 2
+    },
+    {
+     "left": "low",
+     "op": "<",
+     "right": "lowest_low(10)"
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "low[1]"
+    },
+    {
+     "left": "rsi(14)",
+     "op": "<",
+     "right": 45
+    }
+   ],
+   "stop": {
+    "type": "indicator",
+    "expr": "low"
+   },
+   "target": null,
+   "exit": {
+    "trailing": "close<psar",
+    "time_stop_bars": 30
+   },
+   "risk_pct": 0.01,
+   "decisions": [
+    "Shadow/body ratio cannot be computed with the grammar; best-effort approximation only (NOT faithful): bar makes a 10-bar low but closes back above the prior bar's low, with RSI(14) < 45 as the 'turning point' context.",
+    "Stop at the shadow extreme = signal bar low; trailing per book via PSAR.",
+    "30-bar time stop added because the book gives no target."
+   ],
+   "uncodable": [
+    "Long upper shadow short setup."
+   ]
+  },
+  {
+   "name": "hammer_reversal",
+   "description": "Buy the open after a hammer (small body at the top of the candle, long lower handle); stop at the hammer low, trailed.",
+   "source": {
+    "book": "9 Advanced and Profitable Trading Strategies",
+    "pages": "p. 28-29",
+    "quote": "We wait for the long hammer candle to close and we place our trade at the open of the next candle."
+   },
+   "timeframes": [
+    "1h",
+    "4h",
+    "1d"
+   ],
+   "entry": [
+    {
+     "left": "change(5)",
+     "op": "<",
+     "right": -0.03
+    },
+    {
+     "left": "low",
+     "op": "<",
+     "right": "lowest_low(10)"
+    },
+    {
+     "left": "hammer",
+     "op": ">=",
+     "right": 1
+    }
+   ],
+   "stop": {
+    "type": "indicator",
+    "expr": "low"
+   },
+   "target": null,
+   "exit": {
+    "trailing": "close<psar",
+    "time_stop_bars": 30
+   },
+   "risk_pct": 0.01,
+   "decisions": [
+    "Hammer shape not expressible; best-effort: after a >3% 5-bar decline, bar makes a new 10-bar low but closes green and above prior close. Not a true hammer test.",
+    "Stop = hammer low; PSAR trail per 'trailed to follow the trend'. 30-bar time stop added."
+   ],
+   "uncodable": [
+    "Inverted/shooting-star short version."
+   ]
+  },
+  {
+   "name": "role_reversal_pullback_20ma",
+   "description": "In an uptrend (higher highs/lows) after a breakout to a new high, buy the pullback to the 20 MA / broken-resistance zone.",
+   "source": {
+    "book": "9 Advanced and Profitable Trading Strategies",
+    "pages": "p. 29-34",
+    "quote": "1/3 at 20MA, 1/3 at role reversal, 1/3 at 50% Fib retracement."
+   },
+   "timeframes": [
+    "1h",
+    "4h",
+    "1d"
+   ],
+   "entry": [
+    {
+     "left": "trend_structure",
+     "op": ">=",
+     "right": 1
+    },
+    {
+     "left": "high",
+     "op": ">",
+     "right": "highest_high(20)",
+     "within": 10
+    },
+    {
+     "left": "low",
+     "op": "<=",
+     "right": "sma(20)"
+    },
+    {
+     "left": "close",
+     "op": ">=",
+     "right": "sma(20)"
+    }
+   ],
+   "stop": {
+    "type": "lowest_low",
+    "n": 20
+   },
+   "target": {
+    "r": 2
+   },
+   "exit": {
+    "trailing": null,
+    "time_stop_bars": 40
+   },
+   "risk_pct": 0.01,
+   "decisions": [
+    "Only the first of the three scaled limit entries (the 20 MA tranche) is coded; the role-reversal and 50% Fib tranches need missing features.",
+    "'Price punched through resistance' = a new 20-bar high within the last 10 bars; the pullback must then touch the 20 SMA and hold it on the close.",
+    "Stop below the swing low (lowest_low(20)); book only says 'risk management must be applied'.",
+    "2R target and 40-bar time stop chosen; book targets a new higher high."
+   ],
+   "uncodable": [
+    "Short side: broken support becomes resistance in downtrends.",
+    "Not coded yet: horizontal_sr_zone / broken_resistance_level",
+    "Not coded yet: fib_retracement(swing, 0.382 / 0.5)",
+    "Not coded yet: pivot_points",
+    "Not coded yet: scaled limit-order entries (3 tranches)"
+   ]
+  },
+  {
+   "name": "bb_squeeze_mid_break",
+   "description": "After a Bollinger(20,2) squeeze, buy when a full candle closes above the middle band; stop at the prior candle's low.",
+   "source": {
+    "book": "9 Advanced and Profitable Trading Strategies",
+    "pages": "p. 35-36",
+    "quote": "A BUY signal is generated when a full candle completes above the simple moving average line."
+   },
+   "timeframes": [
+    "4h",
+    "1h"
+   ],
+   "entry": [
+    {
+     "left": "bb_width_rank(20,2,120)",
+     "op": "<",
+     "right": 0.15,
+     "within": 5
+    },
+    {
+     "left": "low",
+     "op": ">",
+     "right": "bb_mid(20,2)"
+    },
+    {
+     "left": "low[1]",
+     "op": "<=",
+     "right": "bb_mid(20,2)[1]"
+    }
+   ],
+   "stop": {
+    "type": "lowest_low",
+    "n": 1
+   },
+   "target": {
+    "r": 2
+   },
+   "exit": {
+    "trailing": null,
+    "time_stop_bars": 30
+   },
+   "risk_pct": 0.01,
+   "decisions": [
+    "Book's squeeze threshold is absolute EURUSD band width ~0.0100; replaced with a relative test: width percentile < 0.15 over 120 bars within the last 5 bars.",
+    "'Full candle completes above the SMA' = whole bar (its low) above the middle band, with the previous bar not fully above (first such bar).",
+    "Stop at low of preceding candle = lowest_low(1). Book's alternative 3%-of-capital cap is handled by risk_pct (capped to 1%).",
+    "No target in book; 2R and 30-bar time stop chosen."
+   ],
+   "uncodable": [
+    "Short side: full candle completes below the middle band, stop at preceding high."
+   ]
+  },
+  {
+   "name": "narrow_range_nr7_breakout",
+   "description": "Buy when price breaks above the high of the narrowest-range candle of the last 7 (or 4) bars; stop at that candle's low.",
+   "source": {
+    "book": "9 Advanced and Profitable Trading Strategies",
+    "pages": "p. 36-38",
+    "quote": "A BUY signal is generated when the price moves above the high of the narrow candle."
+   },
+   "timeframes": [
+    "1d",
+    "4h"
+   ],
+   "entry": [
+    {
+     "left": "nr(7)[1]",
+     "op": ">=",
+     "right": 1
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "high[1]"
+    }
+   ],
+   "stop": {
+    "type": "indicator",
+    "expr": "low[1]"
+   },
+   "target": {
+    "r": 2
+   },
+   "exit": {
+    "trailing": "close<psar",
+    "time_stop_bars": 10
+   },
+   "risk_pct": 0.01,
+   "decisions": [
+    "Book: narrowest range of the past 4 or 7 days, daily charts; NR7 chosen (NR4 = same with 4).",
+    "Bar range not directly available; approximated by previous bar's ATR(1) (true range) being under 0.6x the 7-bar ATR ending the bar before. Not an exact NR7 test.",
+    "Buy-stop above the narrow candle high approximated by a close above high[1].",
+    "Stop at narrow candle low (low[1]), trailed (PSAR) per book; 2R target and 10-bar time stop added because it is 'very short term'."
+   ],
+   "uncodable": [
+    "Short side: break below narrow candle low.",
+    "Not coded yet: buy-stop entry at prior bar high"
+   ]
+  },
+  {
+   "name": "rsi2_momentum_above_90",
+   "description": "Momentum use of RSI(2): buy when RSI(2) moves above 90 in an uptrend; exit on the opposing signal (RSI(2) below 10).",
+   "source": {
+    "book": "9 Advanced and Profitable Trading Strategies",
+    "pages": "p. 39-40",
+    "quote": "A BUY signal is generated when the 2 period RSI moves above 90."
+   },
+   "timeframes": [
+    "1h",
+    "4h",
+    "1d"
+   ],
+   "entry": [
+    {
+     "left": "rsi(2)",
+     "op": "crosses_above",
+     "right": 90
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "ema(200)"
+    }
+   ],
+   "stop": {
+    "type": "atr",
+    "mult": 1.5,
+    "n": 14
+   },
+   "target": null,
+   "exit": {
+    "trailing": "close<ema50",
+    "time_stop_bars": 50,
+    "when": [
+     {
+      "left": "rsi(2)",
+      "op": "crosses_below",
+      "right": 10
+     }
+    ]
+   },
+   "risk_pct": 0.01,
+   "decisions": [
+    "Book exit is RSI(2) moving below 10; not an allowed trailing rule. close<ema50 trail used as a proxy, recorded in needs.",
+    "Book warns of whipsaw in ranges and says the merit shows in trends; close > ema(200) trend filter added (our choice).",
+    "'Rigorous stop loss regime' with no number: 1.5x ATR(14) chosen.",
+    "50-bar time stop added."
+   ],
+   "uncodable": [
+    "Short side: sell when RSI(2) moves below 10.",
+    "Adding to positions on repeated signals.",
+    "Not coded yet: pyramiding: add a position on each further RSI(2) > 90 trigger"
+   ]
+  },
+  {
+   "name": "momentum_reversal_stoch_support",
+   "description": "Daily setup: after a clear decline, with daily (and weekly) stochastic oversold at a major support zone, buy on an intraday bullish reversal.",
+   "source": {
+    "book": "9 Advanced and Profitable Trading Strategies",
+    "pages": "p. 5-7",
+    "quote": "The price declined and reached a support at 117 area. The momentum is now oversold."
+   },
+   "timeframes": [
+    "1d",
+    "4h"
+   ],
+   "entry": [
+    {
+     "left": "change(10)",
+     "op": "<",
+     "right": -0.08
+    },
+    {
+     "left": "stoch_k(14,3)",
+     "op": "<",
+     "right": 20,
+     "within": 5
+    },
+    {
+     "left": "low",
+     "op": "<=",
+     "right": "1.02*lowest_low(60)",
+     "within": 5
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "high[1]"
+    }
+   ],
+   "stop": {
+    "type": "lowest_low",
+    "n": 10
+   },
+   "target": {
+    "r": 3
+   },
+   "exit": {
+    "trailing": null,
+    "time_stop_bars": 60
+   },
+   "risk_pct": 0.005,
+   "decisions": [
+    "Long side is counter to a down-move, so the book's 'lower lot size for counter-trend' is reflected with risk_pct 0.005 unless a fundamental uptrend bias exists.",
+    "'Clearly falling recently' = 10-bar change below -8% (crypto-scaled).",
+    "Stochastic oversold (<30) approximated with RSI(14) < 30 within 5 bars; weekly stochastic not available.",
+    "Major support approximated as price within 2% of the 60-bar low.",
+    "Intraday 'bullish reversal price pattern' unspecified; approximated by close above prior bar high.",
+    "Book holds up to several weeks with no target; 3R and 60-bar time stop chosen."
+   ],
+   "uncodable": [
+    "Fundamental/COT trend bias.",
+    "Pending limit orders in London session.",
+    "Short setups at overbought resistance (setups #1-#3 in the book's example).",
+    "Not coded yet: 1w timeframe / multi-timeframe features",
+    "Not coded yet: horizontal support zone detection",
+    "Not coded yet: fib_retracement",
+    "Not coded yet: Commitments of Traders positioning (no crypto equivalent)",
+    "Not coded yet: intraday reversal pattern on lower timeframe"
+   ]
+  }
+ ]
+}

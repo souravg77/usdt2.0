@@ -94,7 +94,29 @@ docker compose up -d        # starts the paper service next to the collector
 docker compose logs -f paper
 ```
 
-## 7. Updating
+## 7. Train the AI trade filter (Phase 4)
+
+Once strategies have passed `learn test` and there is at least a year of history, one command
+builds the training set and trains and tests a model. It never switches the model on by itself:
+
+```bash
+docker compose run --rm collector ai retrain       # prints the side-by-side report
+docker compose run --rm collector ai list
+docker compose run --rm -it collector ai promote m20261101-030000   # you type the version to approve
+docker compose restart paper                        # optional: it also picks the model up on its own
+docker compose run --rm collector ai rollback      # back to the previous model at once
+```
+
+Retrain monthly with cron (`crontab -e` as your user). Each run adds a new version that waits for
+your approval; the active model is never replaced automatically:
+
+```
+0 3 1 * * cd ~/AI_crypto_trader && docker compose run --rm collector ai retrain >> data/ai/retrain.log 2>&1
+```
+
+See [ai-filter.md](ai-filter.md) for what the model learns and how it is tested.
+
+## 8. Updating
 
 ```bash
 git pull
@@ -107,5 +129,7 @@ docker compose build && docker compose up -d
 |---|---|
 | Status / live-gate check | `docker compose run --rm collector status` |
 | Search the knowledge base | `docker compose run --rm collector kb search "stop-market vs stop-limit"` |
+| Trade filter models and the active one | `docker compose run --rm collector ai list` |
+| Turn the trade filter off | `docker compose run --rm collector ai off` |
 | Stop everything | `docker compose down` |
 | Back up data | `cp data/aitrader.db ~/aitrader-$(date +%F).db` (or `sqlite3 data/aitrader.db ".backup ..."`) |

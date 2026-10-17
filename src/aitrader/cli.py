@@ -325,6 +325,22 @@ def cmd_learn(s: Settings, args) -> int:
             print("backtesting them:")
             run_tests(new)
         return 0
+    if cmd == "add-library":
+        from .learn.library import library_specs
+
+        specs, skipped = library_specs(args.book)
+        added = 0
+        for spec in specs:
+            e = Entry(id=spec_id(spec), kind="rule", name=spec["name"], spec=spec,
+                      source=f"{spec['source']['book']} {spec['source']['pages']}".strip())
+            added += reg.add(e)
+        for name, why in skipped:
+            print(f"  - {name}: skipped ({why[:150]})")
+        reg.save()
+        print(f"{added} new strategies from the book library ({len(specs)} in it) -> {args.registry}")
+        if args.test:
+            run_tests(reg.with_status("candidate"))
+        return 0
     if cmd == "add-builtin":
         for name in args.names or list(STRATEGIES):
             e = Entry(id=f"builtin-{name}", kind="builtin", name=name, source=STRATEGIES[name].spec.source)
@@ -366,10 +382,13 @@ def cmd_learn(s: Settings, args) -> int:
     if cmd == "paper":
         from .events import CalendarFilter
 
+        from .ai import LiveFilter
+
         store = CandleStore(s.db_path)
         trader = PaperTrader(store, args.registry, exchanges, symbols,
                              PaperConfig(start_equity=s.paper_start_usdt, backtest=cfg),
-                             calendar=None if args.no_calendar else CalendarFilter())
+                             calendar=None if args.no_calendar else CalendarFilter(),
+                             ai_filter=None if args.no_ai else LiveFilter(args.models))
         try:
             if args.once:
                 print(trader.tick())
@@ -379,6 +398,167 @@ def cmd_learn(s: Settings, args) -> int:
             store.close()
         return 0
     raise RuleError(f"unknown learn command {cmd}")
+
+
+def _filter_strategies(reg, use_all: bool) -> list:
+    """(id, strategy) pairs the filter learns from: by default the strategies that passed the
+    backtest gate (paper, or retired after paper); with ``use_all`` every builtin and rule."""
+    from .learn import make_strategy
+    from .learn.registry import Entry
+    from .strategies import STRATEGIES
+
+    if not use_all:
+        entries = reg.with_status("paper", "retired")
+    else:
+        entries = [e for e in reg.entries.values() if e.kind == "rule"]
+        entries += [Entry(id=f"builtin-{n}", kind="builtin", name=n) for n in STRATEGIES]
+    return [(e.id, make_strategy(e)) for e in entries]
+
+
+def cmd_ai(s: Settings, args) -> int:
+    """Phase 4 trade filter: build the training set, train and test, promote, roll back."""
+    import getpass
+
+    from .ai import ModelRegistry, TrainConfig, build_dataset, load_dataset, save_dataset, train
+    from .backtest import BacktestConfig
+    from .learn import Registry
+
+    models = ModelRegistry(args.models)
+    cmd = args.ai_cmd
+
+    def make_dataset():
+        reg = Registry(args.registry)
+        strategies = _filter_strategies(reg, args.all)
+        if not strategies:
+            print("no strategies to learn from: run `aitrader learn add-library --test` (or "
+                  "`learn add-builtin` + `learn test`) first, or pass --all", file=sys.stderr)
+            return None
+        cfg = BacktestConfig(taker_fee=s.paper_taker_fee, maker_fee=s.paper_maker_fee,
+                             slippage_bps=s.paper_slippage_bps)
+        store = CandleStore(s.db_path)
+        try:
+            frame = build_dataset(store, strategies, args.exchange or EXCHANGES,
+                                  args.symbol or s.symbols, cfg, args.include_final,
+                                  None if args.no_paper else args.paper_state)
+        finally:
+            store.close()
+        save_dataset(frame, args.dataset)
+        print(f"{len(frame)} signals from {len(strategies)} strategies -> {args.dataset}")
+        if len(frame):
+            by = frame.groupby("source").size().to_dict()
+            print(f"  sources {by}, reached 1R {frame['hit_1r'].mean():.0%}, "
+                  f"unfiltered trades {int(frame['taken'].sum())}")
+        return frame
+
+    def do_train(frame) -> int:
+        current = models.load_active()
+        model, report = train(frame, TrainConfig(), current=current[1] if current else None)
+        version = models.add(model, report, {"path": args.dataset, "rows": len(frame)})
+        print(models.report_text(version))
+        if report["passed"]:
+            print(f"{version} is a CANDIDATE. It is not in use until you approve it:\n"
+                  f"  aitrader ai promote {version}")
+        else:
+            print(f"{version} was REJECTED and will not be used.")
+        return 0
+
+    if cmd == "dataset":
+        return 0 if make_dataset() is not None else 1
+    if cmd in ("train", "retrain"):
+        if cmd == "retrain":
+            frame = make_dataset()
+            if frame is None:
+                return 1
+        else:
+            if not os.path.exists(args.dataset):
+                print(f"no training set at {args.dataset}; run `aitrader ai dataset` first",
+                      file=sys.stderr)
+                return 1
+            frame = load_dataset(args.dataset)
+        try:
+            return do_train(frame)
+        except ValueError as exc:
+            print(f"not trained: {exc}", file=sys.stderr)
+            return 1
+    if cmd == "list":
+        if not models.versions():
+            print("no models yet (aitrader ai retrain)")
+        for v in models.versions():
+            m = models.info(v)
+            u, f = m["test"]["unfiltered"], m["test"]["filtered"]
+            print(f"{v:18} {m['status']:9} test: unfiltered {u['trades']:4d} tr "
+                  f"{u['expectancy_r']:+.3f}R dd {u['max_drawdown_r']:.1f}R | filtered "
+                  f"{f['trades']:4d} tr {f['expectancy_r']:+.3f}R dd {f['max_drawdown_r']:.1f}R"
+                  + ("  <- active" if v == models.active else ""))
+        return 0
+    if cmd == "report":
+        v = args.version or (models.versions() or [None])[-1]
+        if not v:
+            print("no models yet")
+            return 1
+        print(models.report_text(v))
+        return 0
+    if cmd == "promote":
+        print(models.report_text(args.version))
+        by = args.by or os.environ.get("USER") or getpass.getuser()
+        if not args.yes:
+            if not sys.stdin.isatty():
+                print("promotion needs a person: run it in a terminal, or pass --yes", file=sys.stderr)
+                return 1
+            typed = input(f"Type the version ({args.version}) to make it the active filter: ").strip()
+            if typed != args.version:
+                print("not promoted")
+                return 1
+        try:
+            models.promote(args.version, by)
+        except (ValueError, KeyError) as exc:
+            print(f"not promoted: {exc}", file=sys.stderr)
+            return 1
+        print(f"{args.version} is now the active trade filter (approved by {by}). "
+              "The paper service picks it up on its next tick. Undo: aitrader ai rollback")
+        return 0
+    if cmd == "rollback":
+        prev = models.rollback(getpass.getuser())
+        print(f"active trade filter is now {prev or 'off (every signal is taken)'}")
+        return 0
+    if cmd == "off":
+        models.deactivate(getpass.getuser())
+        print("trade filter off: every signal is taken at full size")
+        return 0
+    if cmd == "score":
+        from .ai.dataset import signal_rows
+        from .indicators import candles_to_frame
+        from .learn import make_strategy
+
+        reg = Registry(args.registry)
+        entry = reg.get(args.strategy)
+        version = args.model or models.active
+        if not version:
+            print("no active model; pass --model VERSION", file=sys.stderr)
+            return 1
+        model = models.load(version)
+        store = CandleStore(s.db_path)
+        candles = store.load(args.score_exchange, args.score_symbol, args.timeframe)
+        store.close()
+        if not candles:
+            print("no stored candles for that market", file=sys.stderr)
+            return 1
+        from .ai.dataset import finish
+
+        frame = finish(signal_rows(make_strategy(entry), entry.id, candles_to_frame(candles),
+                                   args.score_exchange, args.score_symbol, args.timeframe))
+        frame = frame.tail(args.last)
+        if frame.empty:
+            print("no signals")
+            return 0
+        frame["prob"] = model.predict(frame)
+        frame["size"] = model.sizes(frame["prob"])
+        for _, r in frame.iterrows():
+            verdict = f"take x{r['size']:.2f}" if r["size"] > 0 else "skip"
+            print(f"{_fmt(int(r['signal_ts']))}  p={r['prob']:.3f}  {verdict:10} "
+                  f"(result {r['r']:+.2f}R, reached 1R: {'yes' if r['hit_1r'] else 'no'})")
+        return 0
+    raise ValueError(f"unknown ai command {cmd}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -462,6 +642,9 @@ def build_parser() -> argparse.ArgumentParser:
     lr.add_argument("book", help="PDF, Markdown or text file")
     lr.add_argument("--max", type=int, default=12, help="most strategies to keep from one book")
     lr.add_argument("--test", action="store_true", help="backtest the new drafts straight away")
+    ll = le_sub.add_parser("add-library", help="register the strategies already read from the supplied books")
+    ll.add_argument("--book", help="only books whose title contains this")
+    ll.add_argument("--test", action="store_true", help="backtest them straight away")
     lb = le_sub.add_parser("add-builtin", help="register the hand-coded strategies too")
     lb.add_argument("names", nargs="*")
     lt = le_sub.add_parser("test", help="backtest candidates; passes go to paper trading")
@@ -477,6 +660,43 @@ def build_parser() -> argparse.ArgumentParser:
     lp.add_argument("--interval", type=float, default=60)
     lp.add_argument("--once", action="store_true")
     lp.add_argument("--no-calendar", action="store_true", help="ignore the economic calendar filter")
+    lp.add_argument("--no-ai", action="store_true", help="ignore the active AI trade filter")
+    lp.add_argument("--models", default="data/ai/models", help="trade-filter model registry folder")
+
+    ai = sub.add_parser("ai", help="Phase 4 AI trade filter: training set, train/test, promote, rollback")
+    ai.add_argument("--models", default="data/ai/models", help="model registry folder")
+    ai.add_argument("--dataset", default="data/ai/dataset.csv")
+    ai.add_argument("--registry", default="data/learn/registry.json", help="strategy registry")
+    ai_sub = ai.add_subparsers(dest="ai_cmd", required=True)
+    for name, text in [("dataset", "backtest the strategies and save one row per signal"),
+                       ("retrain", "build the training set, then train and test a new model "
+                                   "(never promotes; run monthly)")]:
+        a = ai_sub.add_parser(name, help=text)
+        a.add_argument("--exchange", action="append", choices=EXCHANGES)
+        a.add_argument("--symbol", action="append")
+        a.add_argument("--all", action="store_true",
+                       help="learn from every strategy, not just those that passed `learn test`")
+        a.add_argument("--include-final", action="store_true",
+                       help="also use the final 20%% of history kept back for the go/no-go test")
+        a.add_argument("--no-paper", action="store_true", help="leave out closed paper trades")
+        a.add_argument("--paper-state", default="data/learn/paper_state.json")
+    ai_sub.add_parser("train", help="train and test a new model on the saved training set")
+    ai_sub.add_parser("list", help="every model version with its test results")
+    ar = ai_sub.add_parser("report", help="side-by-side report of one version (default: newest)")
+    ar.add_argument("version", nargs="?")
+    ap = ai_sub.add_parser("promote", help="make a candidate the active filter (needs your approval)")
+    ap.add_argument("version")
+    ap.add_argument("--by", help="who approves (default: your user name)")
+    ap.add_argument("--yes", action="store_true", help="skip the typed confirmation")
+    ai_sub.add_parser("rollback", help="switch back to the previous model at once")
+    ai_sub.add_parser("off", help="stop filtering: take every signal at full size")
+    asc = ai_sub.add_parser("score", help="show the filter's probability for a strategy's recent signals")
+    asc.add_argument("--strategy", required=True, help="strategy id or name from `learn list`")
+    asc.add_argument("--exchange", dest="score_exchange", default="binance", choices=EXCHANGES)
+    asc.add_argument("--symbol", dest="score_symbol", default="BTC/USDT")
+    asc.add_argument("--timeframe", default="4h")
+    asc.add_argument("--last", type=int, default=20)
+    asc.add_argument("--model", help="version (default: the active one)")
     return p
 
 
@@ -500,6 +720,7 @@ def main(argv: list[str] | None = None) -> int:
         "calendar": cmd_calendar,
         "kb": cmd_kb,
         "learn": cmd_learn,
+        "ai": cmd_ai,
     }[args.cmd]
     result = handler(settings, args)
     if asyncio.iscoroutine(result):

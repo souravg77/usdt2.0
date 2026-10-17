@@ -222,3 +222,53 @@ def test_registry_has_no_live_status(tmp_path):
     e = Entry(id="a", kind="builtin", name="trend_pullback")
     with pytest.raises(ValueError):
         e.set_status("live", "nope")
+
+
+# ---- book library and the newer rule features ----------------------------------------------------
+
+
+def test_library_specs_are_valid_and_run():
+    from aitrader.learn.library import library_books, library_specs
+
+    books = library_books()
+    assert len(books) >= 5
+    specs, skipped = library_specs()
+    assert len(specs) == sum(len(b["strategies"]) for b in books) and not skipped
+    assert len({spec_id(s) for s in specs}) == len(specs)
+    df = synthetic(n=1500, vol=0.02)
+    fired = 0
+    for spec in specs:
+        assert spec["source"]["book"] and spec["source"]["quote"], spec["name"]
+        sigs = RuleStrategy(spec).generate(df, "binance", "BTC/USDT", spec["timeframes"][0])
+        assert all(s.stop < s.entry for s in sigs), spec["name"]
+        fired += bool(sigs)
+    assert fired >= len(specs) // 2  # most book rules trigger at least once on noisy data
+
+
+def test_exit_when_condition_closes_trade():
+    close = np.r_[np.linspace(100, 120, 40), np.linspace(119, 100, 20)]
+    df = pd.DataFrame({"ts": np.arange(60) * H, "open": close, "high": close + 0.5,
+                       "low": close - 0.5, "close": close, "volume": 1.0})
+    spec = {"name": "x", "timeframes": ["1h"], "stop": {"type": "percent", "pct": 0.2},
+            "entry": [{"left": "close", "op": "crosses_above", "right": "sma(5)"}],
+            "exit": {"when": [{"left": "close", "op": "crosses_below", "right": "sma(10)"}]}}
+    df.loc[10, ["close", "high"]] = [95, 101]  # dip so the cross fires early on
+    trades = run_backtest(RuleStrategy(spec), df, "b", "X", "1h", BacktestConfig(0, 0, 0))
+    assert trades and trades[0].exit_reason == "trail"
+    assert 40 <= trades[0].exit_ts // H <= 45
+    with pytest.raises(RuleError, match="exit.when"):
+        validate_spec({**spec, "exit": {"when": [{"left": "nope", "op": ">", "right": 1}]}})
+
+
+@pytest.mark.parametrize("expr", [
+    "cci(20)", "stoch_k(14,3)", "stoch_d", "force_index(13)", "plus_di(14)", "minus_di", "ha_green",
+    "bar_range", "nr(7)", "range_atr(10)", "bullish_engulfing", "hammer", "doji", "inside_bar",
+    "lower_shadow_ratio", "green_streak", "red_streak", "closes_above_sma(5)", "closes_below_sma(20)",
+    "rsi_bull_div(14,30)", "cci_bull_div", "macd_bull_div(40)", "highest_high(30)[1]",
+])
+def test_every_new_feature_evaluates(expr):
+    from aitrader.learn.rules import _feature
+
+    df = synthetic(n=600, vol=0.02)
+    s = _feature(df, parse_expr(expr), {})
+    assert len(s) == len(df) and s.notna().sum() > 400

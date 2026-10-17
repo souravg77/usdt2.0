@@ -37,6 +37,19 @@ def ema_stack(close: pd.Series, periods: tuple[int, ...] = (20, 50, 200)) -> pd.
     return bull.astype(int) - bear.astype(int)
 
 
+def directional_index(df: pd.DataFrame, n: int = 14) -> pd.DataFrame:
+    """Wilder's +DI and -DI (0-100)."""
+    up = df["high"].diff()
+    down = -df["low"].diff()
+    plus_dm = pd.Series(np.where((up > down) & (up > 0), up, 0.0), index=df.index)
+    minus_dm = pd.Series(np.where((down > up) & (down > 0), down, 0.0), index=df.index)
+    atr_ = _true_range(df).ewm(alpha=1 / n, adjust=False, min_periods=n).mean()
+    return pd.DataFrame({
+        "plus_di": 100 * plus_dm.ewm(alpha=1 / n, adjust=False, min_periods=n).mean() / atr_,
+        "minus_di": 100 * minus_dm.ewm(alpha=1 / n, adjust=False, min_periods=n).mean() / atr_,
+    })
+
+
 def adx(df: pd.DataFrame, n: int = 14) -> pd.Series:
     """Average Directional Index (Wilder): trend strength, 0-100."""
     up = df["high"].diff()
@@ -72,6 +85,41 @@ def stoch_rsi(close: pd.Series, n: int = 14, k: int = 3, d: int = 3) -> pd.DataF
     raw = ((r - lo) / (hi - lo).replace(0, np.nan)).clip(0, 1)
     k_line = raw.rolling(k, min_periods=k).mean()
     return pd.DataFrame({"stoch_rsi": raw, "k": k_line, "d": k_line.rolling(d, min_periods=d).mean()})
+
+
+def stochastic(df: pd.DataFrame, n: int = 14, smooth: int = 3, d: int = 3) -> pd.DataFrame:
+    """Slow stochastic oscillator (0-100): %K smoothed over ``smooth`` bars, %D over ``d``."""
+    lo = df["low"].rolling(n, min_periods=n).min()
+    hi = df["high"].rolling(n, min_periods=n).max()
+    raw = 100 * (df["close"] - lo) / (hi - lo).replace(0, np.nan)
+    k = raw.rolling(smooth, min_periods=smooth).mean()
+    return pd.DataFrame({"k": k, "d": k.rolling(d, min_periods=d).mean()})
+
+
+def cci(df: pd.DataFrame, n: int = 20) -> pd.Series:
+    """Commodity Channel Index on the typical price with Lambert's 0.015 constant."""
+    tp = (df["high"] + df["low"] + df["close"]) / 3
+    ma = tp.rolling(n, min_periods=n).mean()
+    mad = tp.rolling(n, min_periods=n).apply(lambda x: np.abs(x - x.mean()).mean(), raw=True)
+    return (tp - ma) / (0.015 * mad.replace(0, np.nan))
+
+
+def force_index(df: pd.DataFrame, n: int = 13) -> pd.Series:
+    """Elder's Force Index: EMA of (close - previous close) x volume."""
+    raw = df["close"].diff() * df["volume"]
+    return raw.ewm(span=n, adjust=False, min_periods=n).mean()
+
+
+def heikin_ashi(df: pd.DataFrame) -> pd.DataFrame:
+    ha_close = (df["open"] + df["high"] + df["low"] + df["close"]) / 4
+    o = np.empty(len(df))
+    if len(df):
+        o[0] = (df["open"].iloc[0] + df["close"].iloc[0]) / 2
+        hc = ha_close.to_numpy(float)
+        for i in range(1, len(df)):
+            o[i] = (o[i - 1] + hc[i - 1]) / 2
+    ha_open = pd.Series(o, index=df.index)
+    return pd.DataFrame({"open": ha_open, "close": ha_close})
 
 
 def macd(close: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> pd.DataFrame:
@@ -224,6 +272,63 @@ def support_resistance(
     return [
         {"price": float(np.mean(g)), "touches": len(g)} for g in levels if len(g) >= min_touches
     ]
+
+
+# ---- candlestick patterns (1.0 where the pattern completes on this bar, else 0.0) ---------------
+
+
+def candle_patterns(df: pd.DataFrame) -> pd.DataFrame:
+    """Common single- and two-bar patterns, judged on the bar that completes them.
+
+    - bullish_engulfing: a down bar followed by an up bar whose body covers the previous body
+    - hammer: lower wick at least 2x the body, upper wick at most 0.5x the body (or a tenth of
+      the range), body in the upper third of the range
+    - doji: body at most 10% of the bar's range
+    - inside_bar: high below the previous high and low above the previous low
+    - bullish_bar: close above open
+    """
+    o, h, lo, c = df["open"], df["high"], df["low"], df["close"]
+    body = (c - o).abs()
+    rng = (h - lo).replace(0, np.nan)
+    upper = h - pd.concat([o, c], axis=1).max(axis=1)
+    lower = pd.concat([o, c], axis=1).min(axis=1) - lo
+    po, pc = o.shift(1), c.shift(1)
+    engulf = (pc < po) & (c > o) & (c >= po) & (o <= pc) & (body > (pc - po).abs())
+    hammer = (lower >= 2 * body) & ((upper <= 0.5 * body) | (upper <= 0.1 * rng)) & \
+        (pd.concat([o, c], axis=1).min(axis=1) >= lo + 2 / 3 * (h - lo)) & (body > 0)
+    doji = body <= 0.1 * rng
+    inside = (h < h.shift(1)) & (lo > lo.shift(1))
+    return pd.DataFrame({"bullish_engulfing": engulf, "hammer": hammer, "doji": doji,
+                         "inside_bar": inside, "bullish_bar": c > o}, index=df.index).astype(float)
+
+
+def streak(cond: pd.Series) -> pd.Series:
+    """How many bars in a row (ending at this bar) ``cond`` has been true."""
+    c = cond.fillna(False).astype(bool)
+    groups = (~c).cumsum()
+    return c.astype(int).groupby(groups).cumsum().astype(float)
+
+
+def bullish_divergence(df: pd.DataFrame, osc: pd.Series, lookback: int = 30,
+                       left: int = 2, right: int = 2) -> pd.Series:
+    """1.0 on the bar where a bullish divergence becomes known: the latest confirmed swing low
+    in price is lower than the previous swing low (within ``lookback`` bars), while the
+    oscillator at those two lows made a higher low. Swings are fractal lows confirmed ``right``
+    bars later, so there is no look-ahead."""
+    lows = df["low"].to_numpy(float)
+    o = osc.to_numpy(float)
+    n, win = len(df), left + right + 1
+    out = np.zeros(n)
+    prev = None  # (index, price, osc) of the previous swing low
+    for t in range(win - 1, n):
+        j = t - right  # candidate swing low, confirmed at bar t
+        seg = lows[t - win + 1:t + 1]
+        if lows[j] != seg.min() or np.isnan(o[j]):
+            continue
+        if prev is not None and j - prev[0] <= lookback and lows[j] < prev[1] and o[j] > prev[2]:
+            out[t] = 1.0
+        prev = (j, lows[j], o[j])
+    return pd.Series(out, index=df.index)
 
 
 FIB_RATIOS = (0.236, 0.382, 0.5, 0.618, 0.786)
