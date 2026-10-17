@@ -12,7 +12,8 @@
 #   4. creates .env with strong random secrets (the dashboard password is printed once)
 #   5. builds the image, prepares the database, starts collector, context, paper, web and caddy
 #   6. schedules a daily backup (cron, 03:30) and makes the first one, a daily pair ranking (02:45)
-#      and a weekly backtest-teacher lesson (Sunday 04:15; never turned on by itself)
+#      and a weekly backtest-teacher lesson (Sunday 04:15; never turned on by itself), and cleans up
+#      old Docker images, build cache and long logs (now and weekly, Sunday 05:00; never the data)
 #   7. runs `aitrader doctor`
 # Live trading stays locked. Running it again is safe: existing settings are kept.
 set -euo pipefail
@@ -177,6 +178,13 @@ RANK_LINE="45 2 * * * cd '$DIR' && docker compose run --rm -T collector pairs ra
 TEACH_LINE="15 4 * * 0 cd '$DIR' && docker compose run --rm -T collector learn teach >> data/teacher.log 2>&1"
 ( crontab -l 2>/dev/null | grep -v 'learn teach' || true; echo "$TEACH_LINE" ) | crontab -
 DOCKER="$DOCKER" ./deploy/backup.sh || echo "warning: the first backup failed; run ./deploy/backup.sh to see why" >&2
+
+say "Cleaning up disk space"
+# Old Docker images from earlier installs, old build cache and long logs; never the data, backups or
+# .env (deploy/cleanup.sh). Weekly too, Sunday 05:00.
+CLEAN_LINE="0 5 * * 0 cd '$DIR' && ./deploy/cleanup.sh >> data/cleanup.log 2>&1"
+( crontab -l 2>/dev/null | grep -v 'deploy/cleanup.sh' || true; echo "$CLEAN_LINE" ) | crontab -
+DOCKER="$DOCKER" ./deploy/cleanup.sh || echo "warning: the cleanup failed; run ./deploy/cleanup.sh to see why" >&2
 
 say "Health check"
 sleep 10
