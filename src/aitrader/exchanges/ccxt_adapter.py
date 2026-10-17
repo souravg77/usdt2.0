@@ -213,7 +213,7 @@ class BybitAdapter(CcxtAdapter):
     orders need the real-account key and the live lock.
 
     A symbol with a settle currency (``BTC/USDT:USDT``) is the USDT perpetual; the agent only
-    sells those short (``trade.futures``), one-way mode, closing with reduce-only orders. The
+    sells those short and buys the Futures AI's longs there (``trade.futures``), one-way mode, closing with reduce-only orders. The
     account must be in Isolated Margin mode: the agent checks it and never changes it itself,
     because on a Unified Trading Account that setting covers the whole account.
     """
@@ -269,7 +269,8 @@ class BybitAdapter(CcxtAdapter):
         """A resting stop-loss on Bybit that waits on the exchange, so the position is protected
         even while this server is down. Spot: a conditional order (orderFilter StopOrder) selling
         ``amount`` at market once the last price falls to ``trigger_price``. Perpetual short
-        (``side`` BUY): a reduce-only conditional buy once the mark price rises to it."""
+        (``side`` BUY): a reduce-only conditional buy once the mark price rises to it; perpetual
+        long (``side`` SELL): a reduce-only conditional sell once the mark price falls to it."""
         self._check_order_allowed()
         await self.throttle.acquire()
         amount = await self._precise(symbol, amount)
@@ -365,13 +366,13 @@ class BybitAdapter(CcxtAdapter):
                 raise
         ready[symbol] = leverage
 
-    async def perp_position_info(self, symbol: str) -> dict:
-        """The open short on ``symbol`` as Bybit reports it: size (coins), entry, mark price,
+    async def perp_position_info(self, symbol: str, side: str = "short") -> dict:
+        """The open ``side`` ("short" or "long") position on ``symbol`` as Bybit reports it: size (coins), entry, mark price,
         Bybit's own liquidation price, leverage, margin mode and position index. Empty when there
         is none."""
         await self.throttle.acquire()
         for r in await self.client.fetch_positions([symbol]):
-            if r.get("symbol") != symbol or r.get("side") != "short" or not float(r.get("contracts") or 0):
+            if r.get("symbol") != symbol or r.get("side") != side or not float(r.get("contracts") or 0):
                 continue
             info = r.get("info") or {}
 
@@ -395,7 +396,7 @@ class BybitAdapter(CcxtAdapter):
         """USDT the funding settlements on ``symbol`` took from the account since ``since_ms``
         (negative when they paid us). Read from the transaction log's SETTLEMENT rows: ``funding``
         is the fee (positive = paid out); older rows without it fall back to ``-change``. Bybit
-        only answers for a 7-day window, so a short held longer counts its last 7 days."""
+        only answers for a 7-day window, so a position held longer counts its last 7 days."""
         if not getattr(self.client, "markets", None):
             await self.client.load_markets()
         await self.throttle.acquire()
@@ -412,12 +413,13 @@ class BybitAdapter(CcxtAdapter):
                 total -= float(r.get("change") or 0)
         return total
 
-    async def perp_position(self, symbol: str) -> float:
-        """Size of the open short on ``symbol`` in coins (0 when there is none)."""
+    async def perp_position(self, symbol: str, side: str = "short") -> float:
+        """Size of the open ``side`` ("short" or "long") position on ``symbol`` in coins (0 when
+        there is none)."""
         await self.throttle.acquire()
         rows = await self.client.fetch_positions([symbol])
         return sum(float(r.get("contracts") or 0) for r in rows
-                   if r.get("symbol") == symbol and r.get("side") == "short")
+                   if r.get("symbol") == symbol and r.get("side") == side)
 
 
 ADAPTERS = {"bybit": BybitAdapter}

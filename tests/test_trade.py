@@ -853,6 +853,7 @@ class PerpAdapter(StopAdapter):
     def __init__(self, margin_mode="ISOLATED_MARGIN", **kw):
         super().__init__(**kw)
         self.short: dict[str, float] = {}
+        self.long: dict[str, float] = {}
         self.margin_mode, self.prepared = margin_mode, []
 
     async def prepare_perp(self, symbol, leverage):
@@ -862,8 +863,8 @@ class PerpAdapter(StopAdapter):
             raise PerpNotReady("switch the Bybit account to Isolated Margin")
         self.prepared.append((symbol, leverage))
 
-    async def perp_position(self, symbol):
-        return self.short.get(symbol, 0.0)
+    async def perp_position(self, symbol, side="short"):
+        return (self.short if side == "short" else self.long).get(symbol, 0.0)
 
     async def place_order(self, symbol, side, amount, type=OrderType.MARKET, price=None, reason="",
                           client_id=None, reduce_only=False):
@@ -872,12 +873,17 @@ class PerpAdapter(StopAdapter):
         if client_id in self.orders:
             return self.orders[client_id]
         px = self.ask if side is Side.BUY else self.bid
-        held = self.short.get(symbol, 0.0)
-        if side is Side.BUY:
-            assert reduce_only and amount <= held + 1e-12, "a buy on the perp only ever closes the short"
+        # one-way mode: a reduce-only order closes, any other opens; never both sides at once
+        book = self.long if (side is Side.BUY) != reduce_only else self.short
+        other = self.short if book is self.long else self.long
+        held = book.get(symbol, 0.0)
+        if reduce_only:
+            assert amount <= held + 1e-12, "a reduce-only order only ever closes what is held"
+        else:
+            assert not other.get(symbol), "one-way mode would net this against the other side"
         o = Order(client_id, "bybit", symbol, side, type, amount, None, OrderStatus.FILLED, filled=amount,
                   average=px, fee=amount * px * 0.00055, fee_currency="USDT")
-        self.short[symbol] = held + (amount if side is Side.SELL else -amount)
+        book[symbol] = held + (-amount if reduce_only else amount)
         self.cash["USDT"] -= o.fee
         self.orders[client_id] = o
         self.sent.append(o)
@@ -896,6 +902,16 @@ class PerpAdapter(StopAdapter):
                 o.status, o.filled, o.average = OrderStatus.FILLED, o.amount, ask
                 o.fee, o.fee_currency = o.amount * ask * 0.00055, "USDT"
                 self.short[o.symbol] -= o.amount
+
+
+    def fall(self, bid):
+        """The price drops through a perp long's stop: Bybit sells it."""
+        self.bid = bid
+        for o in self.stops.values():
+            if o.status is OrderStatus.OPEN and o.side is Side.SELL and ":" in o.symbol and bid <= o.price:
+                o.status, o.filled, o.average = OrderStatus.FILLED, o.amount, bid
+                o.fee, o.fee_currency = o.amount * bid * 0.00055, "USDT"
+                self.long[o.symbol] -= o.amount
 
 
 PERP = "BTC/USDT:USDT"
@@ -987,6 +1003,115 @@ def test_no_short_without_isolated_margin_or_near_liquidation(px, monkeypatch):
     e2.state["skipped"] = {}
     out = run(e2.tick())
     assert out["skipped"] == [KEY] and "liquidation" in next(iter(e2.state["skipped"].values()))
+
+
+# ---- Futures AI longs on the perpetual ----------------------------------------------------------
+
+FKEY = KEY + "|futures"
+
+
+@pytest.fixture
+def pl(ex, monkeypatch):
+    make, _adapter, paper, events = ex
+    monkeypatch.setenv("AITRADER_LEVERAGE", "2")
+    _paper(paper, {FKEY: _pos(SIG)})
+    adapter = PerpAdapter()
+
+    def make2(**kw):
+        e = make(**kw)
+        e.adapter = adapter
+        return e
+
+    return make2, adapter, paper, events
+
+
+def test_a_futures_long_buys_the_perpetual_with_a_resting_sell_stop(pl):
+    make, adapter, paper, events = pl
+    e = make()
+    out = run(e.tick())
+    assert out["opened"] == [FKEY] and adapter.prepared == [(PERP, 2.0)]
+    p = e.state["positions"][FKEY]
+    assert p["side"] == "long" and p["market"] == PERP and p["leverage"] == 2.0 and p["cost"] == 0.0
+    assert adapter.sent[0].symbol == PERP and adapter.sent[0].side is Side.BUY
+    assert "BTC" not in adapter.cash and adapter.long[PERP] == p["amount"]  # no spot coins bought
+    stop = adapter.stops[p["stop_cid"]]
+    assert stop.symbol == PERP and stop.side is Side.SELL and stop.price == 95.0
+    assert any("BUY LONG" in x["text"] and "2x isolated" in x["text"] for x in events.read())
+    # the paper twin closes in profit: the stop is cancelled, then the long is sold reduce-only
+    _paper(paper, {}, [{"key": FKEY, "signal_ts": SIG, "entry": 100.0, "exit": 105.0, "r": 1.0}])
+    adapter.bid = 105.0
+    out = run(e.tick())
+    assert out["closed"] == [FKEY] and adapter.long[PERP] == 0
+    row = e.state["closed"][0]
+    assert row["side"] == "buy" and row["market"] == "futures"
+    fees = p["amount"] * (100.1 + 105.0) * 0.00055
+    assert row["pnl_usdt"] == pytest.approx((105.0 - 100.1) * p["amount"] - fees)
+
+
+def test_a_futures_long_exits_at_its_stop_and_a_fired_stop_is_booked_once(pl):
+    make, adapter, *_ = pl
+    e = make()
+    run(e.tick())
+    adapter.bid = 94.0  # the executor sees it before Bybit's stop does
+    out = run(e.tick())
+    assert out["closed"] == [FKEY] and e.state["closed"][0]["r"] < 0 and adapter.long[PERP] == 0
+    e2 = make()
+    e2.state = {**e2.state, "positions": {}, "closed": [], "skipped": {}}
+    run(e2.tick())
+    adapter.fall(94.0)
+    out = run(e2.tick())
+    assert out["closed"] == [FKEY] and e2.state["closed"][0]["exit_reason"] == "stop on bybit"
+
+
+def test_a_futures_long_is_checked_against_the_perp_position_not_spot_coins(pl):
+    make, adapter, *_ = pl
+    e = make()
+    run(e.tick())
+    e.state["checked"], e.state["holdings_at"] = False, 0
+    run(e.tick())
+    assert e.state["positions"][FKEY]["status"] == "open" and not e.control.halted
+    adapter.long[PERP] = 0.0  # closed by hand on Bybit
+    e.state["checked"], e.state["holdings_at"] = False, 0
+    run(e.tick())
+    assert e.state["positions"][FKEY]["status"] == "missing" and e.control.halted
+
+
+def test_kill_switch_sells_futures_longs(pl):
+    make, adapter, *_ = pl
+    e = make()
+    run(e.tick())
+    e.control.kill(by="test")
+    out = run(e.tick())
+    assert out["closed"] == [FKEY] and e.state["flattened"] and adapter.long[PERP] == 0
+
+
+def test_a_perpetual_never_holds_a_long_and_a_short_at_once(pl):
+    make, adapter, paper, _events = pl
+    short = _pos(SIG, stop=105.0)
+    short["signal"].update(side="sell", target=90.0)
+    _paper(paper, {"s2|bybit|BTC/USDT|1h": short, FKEY: _pos(SIG)})
+    e = make()
+    out = run(e.tick())
+    # the first in the paper file opens; the other would only shrink it in one-way mode
+    assert out["opened"] == ["s2|bybit|BTC/USDT|1h"] and out["skipped"] == [FKEY]
+    assert "a short is already open" in e.state["skipped"][f"{FKEY}|{SIG}"]
+    assert adapter.short[PERP] > 0 and not adapter.long.get(PERP)
+
+
+def test_a_futures_long_needs_a_perp_adapter_and_room_before_liquidation(ex, pl, monkeypatch):
+    make_spot, spot_adapter, paper, _events = ex
+    _paper(paper, {FKEY: _pos(SIG)})
+    e = make_spot()
+    out = run(e.tick())
+    assert out["skipped"] == [FKEY] and not spot_adapter.sent
+    assert "can't trade futures" in e.state["skipped"][f"{FKEY}|{SIG}"]
+    make, adapter, *_ = pl
+    monkeypatch.setenv("AITRADER_LEVERAGE", "3")
+    _paper(paper, {FKEY: _pos(SIG, stop=80.0)})  # at 3x liquidation is ~33% down: 20% uses over half
+    e2 = make()
+    e2.state["skipped"] = {}
+    out = run(e2.tick())
+    assert out["skipped"] == [FKEY] and "liquidation" in e2.state["skipped"][f"{FKEY}|{SIG}"]
 
 
 def test_leverage_is_never_above_three():

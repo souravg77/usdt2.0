@@ -17,6 +17,10 @@ Short signals (the short twins) are sold on the coin's USDT perpetual instead (`
 isolated margin at ``AITRADER_LEVERAGE``, sized by the same risk engine from the stop distance
 (only the margin comes out of free cash), a reduce-only stop resting on Bybit above the entry,
 bought back with a reduce-only order. The account must already be in Isolated Margin mode.
+The Futures AI's long signals (paper keys ending ``|futures``) are bought on the perpetual the
+same way: same leverage cap, a reduce-only stop resting below the entry, sold with a reduce-only
+order. Bybit's one-way mode nets a long against a short, so a perpetual never holds both: an
+entry on the other side of an open position on the same perpetual is skipped.
 
 Safety and failure handling:
 
@@ -38,7 +42,7 @@ Safety and failure handling:
       ``RECHECK_S``), or
   (c) the price stream for a coin with an open position has been quiet for ``feed_halt_s()``, or
   (d) ``HALT_AFTER_FAILURES`` ticks in a row failed, or
-  (e) a short is within ``LIQ_HALT_DISTANCE`` of Bybit's own liquidation price, or its stop is
+  (e) a perpetual position is within ``LIQ_HALT_DISTANCE`` of Bybit's own liquidation price, or its stop is
       no longer at most halfway from entry to that price (checked every ``LIQ_CHECK_S`` on the
       mark price, the price Bybit liquidates on).
   Resting stops and exits are left alone: the halt only stops new risk.
@@ -69,8 +73,9 @@ DISCONNECT_AFTER = 3  # consecutive failed ticks before a disconnect alert
 STOP_GRACE_S = 120  # an open position must have a confirmed resting stop by then
 RECHECK_S = 300  # how often the account is compared with the ledger
 HALT_AFTER_FAILURES = 5  # consecutive failed ticks that halt new entries
-LIQ_CHECK_S = 60  # how often open shorts are compared with Bybit's liquidation price
-LIQ_HALT_DISTANCE = 0.03  # a short this close (3% of the mark price) to liquidation halts
+LIQ_CHECK_S = 60  # how often open perpetual positions are compared with Bybit's liquidation price
+LIQ_HALT_DISTANCE = 0.03  # a perpetual position this close (3% of the mark price) to liquidation halts
+FUTURES_SUFFIX = "|futures"  # learn.paper's key for a Futures AI long (same as learn.paper.FUTURES_SUFFIX)
 
 
 def feed_halt_s() -> float:
@@ -196,12 +201,12 @@ class Executor:
         return (self.prices is not None and symbol in self.prices.symbols
                 and self.prices.stale(symbol, 3 * self.price_max_age))
 
-    async def _bid(self, symbol: str) -> float | None:
+    async def _bid(self, symbol: str, market: str | None = None) -> float | None:
         if self.prices is not None and not self.prices.stale(symbol, self.price_max_age):
             bid = self.prices.best_bid(symbol)
             if bid is not None:
                 return bid
-        return (await self.adapter.get_orderbook(symbol, 5)).best_bid
+        return (await self.adapter.get_orderbook(market or symbol, 5)).best_bid
 
     async def _ask(self, p: dict) -> float | None:
         if self.prices is not None and not self.prices.stale(p["symbol"], self.price_max_age):
@@ -216,9 +221,11 @@ class Executor:
         now_ms = int(self.clock() * 1000)
         for key, pos in paper.get("open", {}).items():
             parts = key.split("|")
-            if len(parts) != 4:  # a Futures AI paper long (key|futures): live longs are spot buys only
+            # a Futures AI long is the plain key plus "|futures": bought on the perpetual
+            perp_long = len(parts) == 5 and "|" + parts[4] == FUTURES_SUFFIX
+            if len(parts) != 4 and not perp_long:
                 continue
-            entry_id, ex, symbol, tf = parts
+            entry_id, ex, symbol, tf = parts[:4]
             sig = pos["signal"]
             mark = f"{key}|{sig['ts']}"
             if ex != self.exchange or key in self.state["positions"] or mark in self.state["skipped"]:
@@ -226,10 +233,18 @@ class Executor:
             if self.strategies and entry_id not in self.strategies:
                 continue
             short = sig.get("side", "buy") == Side.SELL.value
-            if short and not getattr(self.adapter, "supports_perps", False):
-                self._skip(mark, key, "short signal: this exchange adapter can't trade futures", out)
+            if perp_long and short:
+                continue  # not a key the paper trader writes
+            perp = short or perp_long
+            if perp and not getattr(self.adapter, "supports_perps", False):
+                self._skip(mark, key, f"{'short' if short else 'Futures long'} signal: this exchange adapter "
+                           "can't trade futures", out)
                 continue
-            market = futures.perp_symbol(symbol) if short else symbol
+            market = futures.perp_symbol(symbol) if perp else symbol
+            if perp and self._other_side_open(market, short):
+                # one-way mode: an order the other way would shrink that position, not open this one
+                self._skip(mark, key, f"a {'long' if short else 'short'} is already open on {market}", out)
+                continue
             if now_ms - sig["ts"] > self.max_signal_age_bars * TIMEFRAME_MS[tf]:
                 self._skip(mark, key, "signal is too old to enter now", out)
                 continue
@@ -249,7 +264,7 @@ class Executor:
                 # a pair may not be listed on this exchange: skip, don't fail the tick
                 self._skip(mark, key, f"{market} isn't listed on {self.exchange} {self.mode}", out)
                 continue
-            lev = futures.leverage() if short else 1.0
+            lev = futures.leverage() if perp else 1.0
             if short:
                 price = book.best_bid
                 if not price or price >= sig["stop"]:
@@ -258,6 +273,15 @@ class Executor:
                 if not futures.short_stop_ok(price, sig["stop"], lev):
                     self._skip(mark, key, f"stop {sig['stop']} is too close to the liquidation price at {lev:g}x", out)
                     continue
+            else:
+                price = book.best_ask
+                if not price or price <= sig["stop"]:
+                    self._skip(mark, key, f"price {price} is at or below the stop {sig['stop']}", out)
+                    continue
+                if perp_long and not futures.long_stop_ok(price, sig["stop"], lev):
+                    self._skip(mark, key, f"stop {sig['stop']} is too close to the liquidation price at {lev:g}x", out)
+                    continue
+            if perp:
                 try:
                     await self.adapter.prepare_perp(market, lev)
                 except Exception as exc:
@@ -265,14 +289,10 @@ class Executor:
                         raise
                     self._skip(mark, key, str(exc), out)
                     continue
-            else:
-                price = book.best_ask
-                if not price or price <= sig["stop"]:
-                    self._skip(mark, key, f"price {price} is at or below the stop {sig['stop']}", out)
-                    continue
             equity, free = await self._equity()
             sizing = self.risk.size(symbol, equity, free, price, sig["stop"], sig.get("risk_pct", 0.005),
-                                    pos.get("size_mult", 1.0), self._exposure(), short=short, leverage=lev)
+                                    pos.get("size_mult", 1.0), self._exposure(), short=short, leverage=lev,
+                                    perp=perp)
             if not sizing.ok:
                 self._skip(mark, key, "; ".join(sizing.reasons), out)
                 continue
@@ -282,8 +302,8 @@ class Executor:
                 "signal_ts": sig["ts"], "stop": sig["stop"], "target": sig.get("target"),
                 "status": "pending_entry", "entry_cid": cid, "planned_units": sizing.units,
                 "risk_usdt": sizing.risk_usdt, "ai_prob": pos.get("ai_prob"), "notes": sizing.reasons}
-            if short:
-                self.state["positions"][key].update(side="short", market=market, leverage=lev)
+            if perp:
+                self.state["positions"][key].update(side="short" if short else "long", market=market, leverage=lev)
             self.save()  # written before sending, so a crash can't lose track of the order
             order = await self.adapter.place_order(market, Side.SELL if short else Side.BUY, sizing.units,
                                                    OrderType.MARKET, reason=f"{entry_id}: paper signal {sig['ts']}",
@@ -293,17 +313,18 @@ class Executor:
     async def _apply_entry(self, key: str, order, out: dict) -> None:
         p = self.state["positions"][key]
         self._log_order(order, p, "entry")
-        if order.filled > 0 and _short(p):
+        if order.filled > 0 and _perp(p):
             avg = order.average or order.price
             fee_quote = await self._fee_in_quote(order, avg)
-            # a short ties up no cash beyond its margin (still in the USDT balance), so cost is 0;
-            # its notional counts as exposure
+            # a perpetual position ties up no cash beyond its margin (still in the USDT balance), so
+            # cost is 0; its notional counts as exposure
             p.update(status="open", amount=order.filled, entry=avg, entry_fee=fee_quote, cost=0.0,
                      notional=avg * order.filled, entry_ts=order.ts or int(self.clock() * 1000))
             if order.filled < p["planned_units"] * 0.999:
                 p["notes"].append(f"partial fill {order.filled:g} of {p['planned_units']:g}")
             out["opened"].append(key)
-            self.events.emit("trade_open", f"{self.mode} SELL SHORT {order.filled:g} {_market(p)} @ {avg:g} "
+            self.events.emit("trade_open", f"{self.mode} {'SELL SHORT' if _short(p) else 'BUY LONG'} "
+                             f"{order.filled:g} {_market(p)} @ {avg:g} "
                              f"({p['entry_id']}, stop {p['stop']:g}, {p.get('leverage', 1):g}x isolated)",
                              key=key, mode=self.mode)
         elif order.filled > 0:
@@ -356,7 +377,7 @@ class Executor:
                     if ask is not None and ask >= p["stop"]:
                         reason = f"live price {ask:g} at or above the stop"
                 else:
-                    bid = await self._bid(p["symbol"])
+                    bid = await self._bid(p["symbol"], _market(p))
                     if bid is not None:
                         p["mark"] = bid  # what selling it fetches now, for the loss cap
                     if bid is not None and bid <= p["stop"]:
@@ -388,8 +409,8 @@ class Executor:
             p.pop("stop_cid", None)
             p.pop("stop_armed", None)
             self.save()
-        if _short(p):
-            await self._exit_short(key, p, reason, out)
+        if _perp(p):
+            await self._exit_perp(key, p, reason, out)
             return
         base = p["symbol"].split("/")[0]
         bal = await self.adapter.balance()
@@ -411,20 +432,20 @@ class Executor:
                                                reason=f"{p['entry_id']}: {reason}", client_id=cid)
         await self._apply_exit(key, order, out)
 
-    async def _exit_short(self, key: str, p: dict, reason: str, out: dict) -> None:
-        held = await self.adapter.perp_position(_market(p))
+    async def _exit_perp(self, key: str, p: dict, reason: str, out: dict) -> None:
+        held = await self.adapter.perp_position(_market(p), side=p["side"])
         amount = min(p["amount"], held)
         if amount <= 0:
             p["status"] = "missing"
-            self.events.emit("error", f"{self.mode}: no short left on {_market(p)} to close for {key}",
+            self.events.emit("error", f"{self.mode}: no {p['side']} left on {_market(p)} to close for {key}",
                              level="error", key=key)
             return
         cid = client_id(self.mode, key, p["signal_ts"], f"exit{len(p.get('exits', []))}")
         p.update(status="pending_exit", exit_cid=cid, exit_reason=reason)
         self.save()
-        order = await self.adapter.place_order(_market(p), Side.BUY, amount, OrderType.MARKET,
-                                               reason=f"{p['entry_id']}: {reason}", client_id=cid,
-                                               reduce_only=True)
+        order = await self.adapter.place_order(_market(p), Side.BUY if _short(p) else Side.SELL, amount,
+                                               OrderType.MARKET, reason=f"{p['entry_id']}: {reason}",
+                                               client_id=cid, reduce_only=True)
         await self._apply_exit(key, order, out)
 
     async def _apply_exit(self, key: str, order, out: dict) -> None:
@@ -440,8 +461,9 @@ class Executor:
         avg = order.average or order.price
         fee_quote = await self._fee_in_quote(order, avg)
         share = order.filled / p["amount"] if p["amount"] else 1.0
-        if _short(p):  # sold at entry, bought back at avg; funding is added when the short is done
-            pnl = (p["entry"] - avg) * order.filled - fee_quote - p.get("entry_fee", 0.0) * min(share, 1.0)
+        if _perp(p):  # the price move times the size; funding is added when the position is done
+            move = p["entry"] - avg if _short(p) else avg - p["entry"]
+            pnl = move * order.filled - fee_quote - p.get("entry_fee", 0.0) * min(share, 1.0)
         else:
             proceeds = avg * order.filled - fee_quote
             pnl = proceeds - p["cost"] * min(share, 1.0)
@@ -450,21 +472,21 @@ class Executor:
         if remaining > p["amount"] * 0.001 and await self._sellable(_market(p), remaining, avg) > 0:
             p.update(status="open", amount=remaining, cost=p["cost"] * (1 - share),
                      realized=p.get("realized", 0.0) + pnl)
-            if _short(p):
+            if _perp(p):
                 p.update(entry_fee=p.get("entry_fee", 0.0) * (1 - share), notional=p["entry"] * remaining)
             p.setdefault("exits", []).append({"filled": order.filled, "avg": avg})
             return
         # what is left (if anything) is dust the exchange won't take as an order: the trade is done
         pnl += p.get("realized", 0.0)
-        funding = await self._funding(p, exit_ts) if _short(p) else 0.0
+        funding = await self._funding(p, exit_ts) if _perp(p) else 0.0
         pnl -= funding
         row = {k: p.get(k) for k in ("key", "entry_id", "symbol", "timeframe", "signal_ts", "entry",
                                       "entry_ts", "stop", "risk_usdt", "ai_prob", "exit_reason")}
         row.update(exit=avg, exit_ts=exit_ts, amount=p["amount"], pnl_usdt=round(pnl, 6),
                    r=round(pnl / p["risk_usdt"], 4) if p["risk_usdt"] else 0.0, mode=self.mode,
                    side="sell" if _short(p) else "buy")
-        if _short(p):
-            row["funding_usdt"] = round(funding, 6)
+        if _perp(p):
+            row.update(market="futures", funding_usdt=round(funding, 6))
         row.update(self._twin(p, avg))
         self.state["closed"].append(row)
         del self.state["positions"][key]
@@ -520,9 +542,10 @@ class Executor:
             p.update(stops=n + 1, stop_cid=client_id(self.mode, key, p["signal_ts"], f"stop{n}"), stop_armed=False)
             self.save()  # written before sending, like every order
             try:
-                if _short(p):
+                if _perp(p):
                     order = await place(_market(p), amount, p["stop"], p["stop_cid"],
-                                        reason=f"{p['entry_id']}: resting stop", side=Side.BUY)
+                                        reason=f"{p['entry_id']}: resting stop",
+                                        side=Side.BUY if _short(p) else Side.SELL)
                 else:
                     order = await place(p["symbol"], amount, p["stop"], p["stop_cid"],
                                         reason=f"{p['entry_id']}: resting stop")
@@ -616,9 +639,10 @@ class Executor:
         groups: dict[tuple, list[str]] = {}
         for key, p in self.state["positions"].items():
             if p["status"] == "open":
-                groups.setdefault((_short(p), _market(p)), []).append(key)
-        for (short, market), keys in groups.items():
-            held = await self.adapter.perp_position(market) if short else bal.total(market.split("/")[0])
+                groups.setdefault((p.get("side") if _perp(p) else None, _market(p)), []).append(key)
+        for (side, market), keys in groups.items():
+            held = (await self.adapter.perp_position(market, side=side) if side
+                    else bal.total(market.split("/")[0]))
             expected = sum(self.state["positions"][k]["amount"] for k in keys)
             if held < expected * 0.98:
                 for key in keys:
@@ -656,12 +680,12 @@ class Executor:
                 and now - self.state.get("liq_at", 0) >= LIQ_CHECK_S):
             self.state["liq_at"] = now
             for key, p in list(self.state["positions"].items()):
-                if p["status"] == "open" and _short(p) and not p.get("halted_liq"):
+                if p["status"] == "open" and _perp(p) and not p.get("halted_liq"):
                     await self._check_liquidation(key, p, out)
 
     async def _check_liquidation(self, key: str, p: dict, out: dict) -> None:
         try:
-            info = await self.adapter.perp_position_info(_market(p))
+            info = await self.adapter.perp_position_info(_market(p), side=p["side"])
         except Exception as exc:  # reported; the next check tries again
             self.events.emit("error", f"{self.mode}: couldn't read the {_market(p)} position: "
                              f"{type(exc).__name__}: {exc}", level="warning", key=key)
@@ -670,11 +694,11 @@ class Executor:
         if not liq:
             return
         p.update(mark=mark, liq_price=liq)
-        dist = derivs.liquidation_distance(mark, liq, short=True)
+        dist = derivs.liquidation_distance(mark, liq, short=_short(p))
         why = None
         if dist is not None and dist < LIQ_HALT_DISTANCE:
             why = (f"{key} is {dist:.1%} from liquidation (mark {mark:g}, Bybit liquidates at {liq:g})")
-        elif p.get("stop") and not derivs.stop_inside_liquidation(p["entry"], p["stop"], liq, short=True):
+        elif p.get("stop") and not derivs.stop_inside_liquidation(p["entry"], p["stop"], liq, short=_short(p)):
             why = (f"{key}'s stop {p['stop']:g} is more than halfway from entry {p['entry']:g} to "
                    f"Bybit's liquidation price {liq:g}")
         if why:
@@ -682,7 +706,7 @@ class Executor:
             await self._halt(why, out)
 
     async def _funding(self, p: dict, exit_ts: int) -> float:
-        """USDT the funding settlements cost this short while it was open (Bybit settles them in
+        """USDT the funding settlements cost this perpetual position while it was open (Bybit settles them in
         the wallet, so the fill prices don't show them). 0 when the adapter can't tell."""
         reader = getattr(self.adapter, "funding_paid", None)
         if reader is None:
@@ -747,12 +771,17 @@ class Executor:
         invested = sum(p.get("cost", 0.0) for p in self._open())
         equity = cash + invested
         if self.pilot_max_usdt is not None:  # the pilot only ever uses this much of the account
-            # a short's margin stays in the USDT balance but is spoken for
+            # a perpetual position's margin stays in the USDT balance but is spoken for
             margin = sum(futures.margin(p.get("notional") or p.get("planned_units", 0) * p["stop"],
-                                        p.get("leverage", 1.0)) for p in self._open() if _short(p))
+                                        p.get("leverage", 1.0)) for p in self._open() if _perp(p))
             equity = min(equity, self.pilot_max_usdt)
             free = max(0.0, min(free, self.pilot_max_usdt - invested - margin))
         return equity, free
+
+    def _other_side_open(self, market: str, short: bool) -> bool:
+        """A position (or one being entered or closed) on ``market`` the other way."""
+        other = "long" if short else "short"
+        return any(_market(p) == market and p.get("side") == other for p in self._open())
 
     def _open(self) -> list[dict]:
         return [p for p in self.state["positions"].values() if p["status"] in ("open", "pending_entry", "pending_exit")]
@@ -769,6 +798,8 @@ class Executor:
                 continue
             if _short(p):
                 u = (p["entry"] - p["mark"]) * p["amount"] - p.get("entry_fee", 0.0)
+            elif _perp(p):
+                u = (p["mark"] - p["entry"]) * p["amount"] - p.get("entry_fee", 0.0)
             else:
                 u = p["mark"] * p["amount"] - p.get("cost", p["entry"] * p["amount"])
             loss += min(0.0, u)
@@ -839,6 +870,11 @@ def _short(p: dict) -> bool:
     return p.get("side") == "short"
 
 
+def _perp(p: dict) -> bool:
+    """A position on the USDT perpetual (``BTC/USDT:USDT``): a short, or a Futures AI long."""
+    return p.get("side") == "short" or ":" in (p.get("market") or "")
+
+
 def _market(p: dict) -> str:
-    """Where the position trades: the spot pair, or the USDT perpetual for a short."""
+    """Where the position trades: the spot pair, or the USDT perpetual."""
     return p.get("market") or p["symbol"]
