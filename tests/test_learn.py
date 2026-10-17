@@ -274,3 +274,39 @@ def test_every_new_feature_evaluates(expr):
     df = synthetic(n=600, vol=0.02)
     s = _feature(df, parse_expr(expr), {})
     assert len(s) == len(df) and s.notna().sum() > 400
+
+
+def test_paper_honours_pause_context_and_writes_events(tmp_path):
+    from types import SimpleNamespace
+
+    from aitrader.ops import EventLog
+    from aitrader.trade import Control
+
+    df = synthetic(n=900)
+    store = CandleStore(str(tmp_path / "c.db"))
+    fill_store(store, df)
+    reg_path = str(tmp_path / "reg.json")
+    reg = Registry(reg_path)
+    reg.add(Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR), status="paper"))
+    reg.save()
+    control = Control(str(tmp_path / "control.json"))
+    control.pause("test")
+    events = EventLog(str(tmp_path / "ev.jsonl"), service="paper")
+    blocked = SimpleNamespace(decide=lambda ex, sym, now: SimpleNamespace(allow_entries=False, size_multiplier=0))
+    half = SimpleNamespace(decide=lambda ex, sym, now: SimpleNamespace(allow_entries=True, size_multiplier=0.5))
+    trader = PaperTrader(store, reg_path, ["binance"], ["BTC/USDT"], state_path=str(tmp_path / "s.json"),
+                         control=control, context=blocked, events=events)
+    ticks = [int(df.ts.iloc[i]) + H for i in range(600, 700)]
+    for t in ticks[:30]:
+        assert not trader.tick(now_ms=t)["opened"]  # paused
+    control.resume()
+    filtered = sum(len(trader.tick(now_ms=t)["filtered"]) for t in ticks[30:60])
+    assert filtered and not trader.state["open"]  # context blocks entries
+    trader.context = half
+    for t in ticks[60:]:
+        trader.tick(now_ms=t)
+    sizes = [p["size_mult"] for p in trader.state["open"].values()]
+    kinds = [e["kind"] for e in events.read()]
+    assert "trade_open" in kinds
+    assert all(s == pytest.approx(0.5) for s in sizes)
+    store.close()

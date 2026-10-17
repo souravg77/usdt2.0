@@ -114,18 +114,20 @@ def test_migrate_and_backup(tmp_path, monkeypatch):
 
     db = tmp_path / "a.db"
     s = store_mod.CandleStore(str(db))
-    assert s.schema_version() == 0 and s.migrate() == [1] and s.migrate() == []
+    released = [v for v, _ in store_mod.MIGRATIONS]
+    assert s.schema_version() == 0 and s.migrate() == released and s.migrate() == []
     s.upsert([Candle("binance", "BTC/USDT", "1h", 0, 1, 2, 0.5, 1.5, 10)])
+    nxt = store_mod.SCHEMA_VERSION + 1
     monkeypatch.setattr(store_mod, "MIGRATIONS", store_mod.MIGRATIONS + [
-        (2, "CREATE TABLE IF NOT EXISTS extra (x INTEGER);")])
-    monkeypatch.setattr(store_mod, "SCHEMA_VERSION", 2)
-    assert s.migrate() == [2] and s.schema_version() == 2
+        (nxt, "CREATE TABLE IF NOT EXISTS extra (x INTEGER);")])
+    monkeypatch.setattr(store_mod, "SCHEMA_VERSION", nxt)
+    assert s.migrate() == [nxt] and s.schema_version() == nxt
     s.backup(str(tmp_path / "bk" / "a.db"))
     s.close()
     copy = store_mod.CandleStore(str(tmp_path / "bk" / "a.db"))
-    assert len(copy.load("binance", "BTC/USDT", "1h")) == 1 and copy.schema_version() == 2
+    assert len(copy.load("binance", "BTC/USDT", "1h")) == 1 and copy.schema_version() == nxt
     copy.close()
-    monkeypatch.setattr(store_mod, "SCHEMA_VERSION", 1)
+    monkeypatch.setattr(store_mod, "SCHEMA_VERSION", nxt - 1)
     with pytest.raises(RuntimeError, match="newer"):
         store_mod.CandleStore(str(db)).migrate()
 

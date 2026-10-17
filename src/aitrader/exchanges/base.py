@@ -28,10 +28,17 @@ class ExchangeAdapter(ABC):
         type: OrderType = OrderType.MARKET,
         price: float | None = None,
         reason: str = "",
-    ) -> Order: ...
+        client_id: str | None = None,
+    ) -> Order:
+        """``client_id`` makes the order idempotent: re-sending the same id after a timeout
+        can't create a second order, and ``find_order`` can look it up after a restart."""
 
     @abstractmethod
     async def cancel_order(self, order_id: str, symbol: str) -> Order: ...
+
+    async def find_order(self, client_id: str, symbol: str) -> Order | None:
+        """The order sent with ``client_id``, or None if the exchange never received it."""
+        return None
 
     @abstractmethod
     async def positions(self) -> list[Position]: ...

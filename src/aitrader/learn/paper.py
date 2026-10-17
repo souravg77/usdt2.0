@@ -52,12 +52,16 @@ class PaperConfig:
 class PaperTrader:
     def __init__(self, store: CandleStore, registry_path: str, exchanges: list[str],
                  symbols: list[str], cfg: PaperConfig | None = None,
-                 state_path: str = DEFAULT_STATE, calendar=None, ai_filter=None):
+                 state_path: str = DEFAULT_STATE, calendar=None, ai_filter=None, control=None,
+                 context=None, events=None):
         self.store, self.registry_path = store, registry_path
         self.exchanges, self.symbols = exchanges, symbols
         self.cfg = cfg or PaperConfig()
         self.state_path, self.calendar = state_path, calendar
         self.ai_filter = ai_filter  # Phase 4 trade filter (aitrader.ai.LiveFilter) or None
+        self.control = control  # trade.Control: pause / kill switch, or None
+        self.context = context  # market-context filter (funding, open interest...), or None
+        self.events = events  # ops.EventLog for alerts and the stability record, or None
         self.state = {"open": {}, "trades": [], "equity": {}, "last_signal": {}}
         if os.path.exists(state_path):
             with open(state_path, encoding="utf-8") as fh:
@@ -71,6 +75,8 @@ class PaperTrader:
         events = {"opened": [], "closed": [], "retired": [], "filtered": []}
         self._manage_open(reg, now_ms, events)
         allow, size_mult = self._calendar(now_ms)
+        if self.control is not None and self.control.paused:
+            allow = False
         for entry in reg.with_status("paper"):
             strat = make_strategy(entry)
             for ex in self.exchanges:
@@ -88,13 +94,17 @@ class PaperTrader:
                             continue
                         sig = sigs[-1]
                         self.state["last_signal"][key] = sig.ts
+                        ctx_mult = self._context(ex, sym, now_ms)
+                        if ctx_mult <= 0:
+                            events["filtered"].append(key)
+                            continue
                         ai = self._ai_check(sig, entry.id, df)
                         if not ai["take"]:
                             self._note_filtered(key, sig, ai)
                             events["filtered"].append(key)
                             continue
                         self.state["open"][key] = {"entry_id": entry.id, "signal": _sig_dict(sig),
-                                                   "size_mult": size_mult * ai["size"], "filled": False,
+                                                   "size_mult": size_mult * ctx_mult * ai["size"], "filled": False,
                                                    "ai_prob": ai["prob"], "ai_version": ai["version"]}
                         events["opened"].append(key)
                         log.info("paper signal %s entry~%.6g stop %.6g ai p=%s size x%.2f", key,
@@ -102,20 +112,35 @@ class PaperTrader:
         self._score(reg, events)
         reg.save()
         self.save()
+        self._emit(events)
         return events
 
     def run(self, interval: float = 60.0, stop_after: int | None = None) -> None:
+        from ..ops import Heartbeat
+
+        beat = Heartbeat(self.events) if self.events is not None else None
+        if self.events is not None:
+            self.events.emit("start", "paper service started")
         n = 0
-        while stop_after is None or n < stop_after:
-            try:
-                ev = self.tick()
-                if any(ev.values()):
-                    log.info("paper tick: %s", {k: len(v) for k, v in ev.items()})
-            except Exception:  # keep the service alive; the next tick retries
-                log.exception("paper tick failed")
-            n += 1
-            if stop_after is None or n < stop_after:
-                time.sleep(interval)
+        try:
+            while stop_after is None or n < stop_after:
+                try:
+                    ev = self.tick()
+                    if any(ev.values()):
+                        log.info("paper tick: %s", {k: len(v) for k, v in ev.items()})
+                except Exception as exc:  # keep the service alive; the next tick retries
+                    log.exception("paper tick failed")
+                    if self.events is not None:
+                        self.events.emit("error", f"paper tick failed: {exc!r}", level="error")
+                if beat is not None:
+                    beat.beat(open=len(self.state["open"]))
+                n += 1
+                if stop_after is None or n < stop_after:
+                    time.sleep(interval)
+        except BaseException as exc:
+            if self.events is not None and not isinstance(exc, KeyboardInterrupt):
+                self.events.emit("crash", f"paper service stopped: {exc!r}", level="error")
+            raise
 
     # ---- internals ------------------------------------------------------------------------------
 
@@ -123,6 +148,36 @@ class PaperTrader:
         step = TIMEFRAME_MS[tf]
         candles = [c for c in self.store.load(ex, sym, tf, start) if c.ts + step <= now_ms]
         return candles_to_frame(candles) if candles else None
+
+    def _context(self, exchange: str, symbol: str, now_ms: int) -> float:
+        """Size multiplier from the market-context filter (0 = no new entry)."""
+        if self.context is None:
+            return 1.0
+        try:
+            d = self.context.decide(exchange, symbol, now_ms)
+        except Exception:  # missing context data must never stop paper trading
+            log.exception("market-context filter failed; ignoring it this tick")
+            return 1.0
+        if not d.allow_entries:
+            return 0.0
+        return d.size_multiplier
+
+    def _emit(self, events: dict) -> None:
+        if self.events is None:
+            return
+        for key in events["opened"]:
+            sig = self.state["open"][key]["signal"]
+            ai = self.state["open"][key].get("ai_prob")
+            self.events.emit("trade_open", f"paper BUY signal {key} entry~{sig['entry']:.6g} "
+                             f"stop {sig['stop']:.6g}" + (f" (AI p={ai:.2f})" if ai is not None else ""),
+                             key=key, mode="paper")
+        for key in events["closed"]:
+            t = next((t for t in reversed(self.state["trades"]) if t["key"] == key), None)
+            if t:
+                self.events.emit("trade_close", f"paper close {key} {t['exit_reason']} {t['r']:+.2f}R "
+                                 f"({t['pnl_usdt']:+.2f} USDT)", key=key, mode="paper", r=t["r"])
+        for sid in events["retired"]:
+            self.events.emit("error", f"paper: strategy {sid} retired by its results", level="warning")
 
     def _ai_check(self, sig: Signal, entry_id: str, df) -> dict:
         if self.ai_filter is None:

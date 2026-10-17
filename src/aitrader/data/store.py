@@ -23,11 +23,24 @@ CREATE TABLE IF NOT EXISTS candles (
 ) WITHOUT ROWID;
 """
 
+# Market-context series (funding, open interest, global market cap...): see data/context.py.
+CONTEXT_SCHEMA = """
+CREATE TABLE IF NOT EXISTS context (
+    exchange TEXT NOT NULL,
+    symbol   TEXT NOT NULL,
+    metric   TEXT NOT NULL,
+    ts       INTEGER NOT NULL,
+    value    REAL NOT NULL,
+    PRIMARY KEY (exchange, symbol, metric, ts)
+) WITHOUT ROWID;
+"""
+
 
 # Schema changes after the first release go here, in order: (version, SQL). ``migrate`` applies
 # the ones newer than the database's ``PRAGMA user_version``. Never edit a released entry.
 MIGRATIONS: list[tuple[int, str]] = [
     (1, SCHEMA),  # the original candles table
+    (2, CONTEXT_SCHEMA),  # market context: funding, open interest, global market data
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 

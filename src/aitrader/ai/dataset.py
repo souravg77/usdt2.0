@@ -26,6 +26,7 @@ import pandas as pd
 
 from ..backtest import BacktestConfig, split_periods
 from ..backtest.engine import simulate_signal
+from ..data.context import ContextStore, attach_context, has_context
 from ..indicators import candles_to_frame
 from ..models import TIMEFRAME_MS, Side
 from ..strategies.base import Signal, Strategy
@@ -124,6 +125,7 @@ def build_dataset(store, strategies: list[tuple[str, Strategy]], exchanges: list
     """Backtest every (strategy id, strategy) on every stored market and return the rows."""
     rows: list[dict] = []
     markets: dict[tuple, tuple] = {}
+    context = ContextStore(store) if has_context(store) else None  # funding / open interest
     for sid, strat in strategies:
         for ex in exchanges:
             for sym in symbols:
@@ -135,6 +137,8 @@ def build_dataset(store, strategies: list[tuple[str, Strategy]], exchanges: list
                             markets[key] = (None, None)
                         else:
                             df = candles_to_frame(candles)
+                            if context is not None:
+                                df = attach_context(df, context, ex, sym, tf)
                             if not include_final:
                                 ins, oos, _final = split_periods(df)
                                 df = pd.concat([ins, oos])

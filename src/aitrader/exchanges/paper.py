@@ -36,6 +36,7 @@ class PaperExchange(ExchangeAdapter):
         self.orders: dict[str, Order] = {}
         self.fills: list[Order] = []
         self._ids = itertools.count(1)
+        self._client_ids: dict[str, str] = {}
 
     # ---- market data is delegated --------------------------------------------------------------
 
@@ -79,7 +80,20 @@ class PaperExchange(ExchangeAdapter):
             reason=reason,
         )
 
-    async def place_order(self, symbol, side, amount, type=OrderType.MARKET, price=None, reason=""):
+    async def place_order(self, symbol, side, amount, type=OrderType.MARKET, price=None, reason="",
+                          client_id=None):
+        if client_id and client_id in self._client_ids:
+            return self.orders[self._client_ids[client_id]]  # same id: the same order, once
+        order = await self._place_order(symbol, side, amount, type, price, reason)
+        if client_id:
+            self._client_ids[client_id] = order.id
+        return order
+
+    async def find_order(self, client_id, symbol):
+        oid = self._client_ids.get(client_id)
+        return self.orders.get(oid) if oid else None
+
+    async def _place_order(self, symbol, side, amount, type, price, reason):
         if amount <= 0:
             raise ValueError("amount must be positive")
         base, quote = _split(symbol)
