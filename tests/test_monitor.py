@@ -157,6 +157,11 @@ def test_risk_view_exposure_daily_cap_margin_and_var(tmp_path):
                                                                         "short": True}], str(db), "bybit", int(NOW * 1000))
     assert hedged == pytest.approx(0.0, abs=1e-6)  # a long and an equal short cancel out
     assert value_at_risk([], str(db), "bybit", int(NOW * 1000)) == 0.0
+    # a Futures AI long on the perpetual holds margin too
+    st = _live_state(NOW)
+    st["positions"]["a"].update(market="BTC/USDT:USDT", leverage=2.0)
+    r = risk_view(st, {"open": {}}, str(db), "bybit", RiskLimits(), NOW)
+    assert r["margin_usdt"] == 1_500.0 and r["positions"][0]["perp"] and not r["positions"][0]["short"]
 
 
 def test_risk_panel_and_one_click_kill_switch(mon):

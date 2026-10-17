@@ -1416,6 +1416,8 @@ def _live_usdt(p: dict) -> float | None:
         return None
     if p.get("side") == "short":  # the executor's word for a perp short
         return (p["entry"] - p["mark"]) * p["amount"] - p.get("entry_fee", 0.0)
+    if ":" in (p.get("market") or ""):  # a Futures AI long on the perpetual: margin only, no coins bought
+        return (p["mark"] - p["entry"]) * p["amount"] - p.get("entry_fee", 0.0)
     return p["mark"] * p["amount"] - p.get("cost", p["entry"] * p["amount"])
 
 

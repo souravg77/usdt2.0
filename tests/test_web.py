@@ -544,6 +544,9 @@ def test_open_positions_show_usdt_now():
     assert _paper_usdt({"filled": True, "units": 3, "signal": sig}) is None  # no candle closed yet
     short = {"side": "short", "entry": 100.0, "mark": 98.0, "amount": 2, "entry_fee": 0.1}
     assert _live_usdt(short) == 3.9  # bought back cheaper, after the fee
+    long_perp = {"side": "long", "market": "BTC/USDT:USDT", "entry": 100.0, "mark": 101.0, "amount": 2,
+                 "entry_fee": 0.1, "cost": 0.0}
+    assert _live_usdt(long_perp) == 1.9  # a Futures long: the move times the size, not the coins' value
     assert _live_usdt({"entry": 100.0, "amount": 2}) is None  # no price read yet
 
 
