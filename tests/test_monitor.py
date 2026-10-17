@@ -173,3 +173,49 @@ def test_risk_panel_and_one_click_kill_switch(mon):
     resp = client.post("/trading/kill", data={"csrf": csrf, "confirm": "KILL"}, follow_redirects=False)
     assert resp.status_code == 303
     assert client.get("/api/monitor/risk").json()["control"]["killed"] is True
+
+
+def test_the_futures_view_shows_only_the_top_10_perpetual_gainers(mon, monkeypatch):
+    from aitrader.learn import wallet
+    from aitrader.market import gainers
+
+    client, paths, perp, db = mon
+    login(client)
+    _store(db, symbols=("APT/USDT", "INJ/USDT"))
+    wallet.set_market(wallet.market_path(paths.paper_state), True)
+    seen = []
+    real = perp.snapshot
+
+    async def snap(symbols):
+        seen.append(list(symbols))
+        return await real(symbols)
+    perp.snapshot = snap
+    text = client.get("/monitor").text
+    assert "Futures top gainers list is off" in text and seen[-1] == []
+    pairs = [{"symbol": s} for s in ["APT/USDT", "INJ/USDT"] + [f"C{i}/USDT" for i in range(12)]]
+    gainers.save({"on": True, "top": 15, "generated": int(NOW * 1000), "pairs": pairs}, gainers.DEFAULT_PATH)
+    monkeypatch.setattr(gainers.time, "time", lambda: NOW)
+    text = client.get("/monitor").text
+    boards = client.get("/api/monitor/signals").json()["boards"]
+    assert "top 10 perpetual gainers" in text and len(seen[-1]) == 10 and "BTC/USDT" not in seen[-1]
+    assert [b["symbol"] for b in boards][:2] == ["APT/USDT", "INJ/USDT"]
+    assert all(b["symbol"] != "BTC/USDT" for b in boards)
+    wallet.set_market(wallet.market_path(paths.paper_state), False)
+    assert "Spot AI view" in client.get("/monitor").text
+
+
+def test_perp_snapshot_skips_pairs_without_a_perpetual():
+    import asyncio
+
+    from aitrader.web.monitor_pages import PerpMarket
+
+    class Client:
+        async def load_markets(self):
+            return {"BTC/USDT:USDT": {}}
+
+        async def fetch_tickers(self, symbols):
+            assert symbols == ["BTC/USDT:USDT"]  # NOPE/USDT has no perpetual: not asked for
+            return {"BTC/USDT:USDT": {"last": 100.0, "info": {"lastPrice": "100", "markPrice": "100"}}}
+
+    out = asyncio.run(PerpMarket(Client()).snapshot(["BTC/USDT", "NOPE/USDT"]))
+    assert out["source"] == "live" and [r["symbol"] for r in out["rows"]] == ["BTC/USDT"]
