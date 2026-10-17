@@ -78,7 +78,8 @@ def test_replay_api_and_page(client):
                                          "months": "1"}, follow_redirects=False)
     assert d.status_code == 303 and "month=2025-03" in d.headers["location"]
     job = [j for j in runner.list() if j["meta"].get("kind") == "download"][0]
-    assert job["steps"] == [["download", "--since", "2025-02-16", "--until", "2025-04-01", "--exchange", "bybit",
+    assert job["steps"] == [["download", "--since", "2025-02-16", "--until", "2025-04-01", "--market", "spot",
+                             "--exchange", "bybit",
                              "--symbol", "ETH/USDT", "--timeframe", "1h"]]
     assert d.headers["location"].endswith("&download=" + job["id"])
     runner.wait_idle()
@@ -210,6 +211,8 @@ def test_spot_replay_leaves_out_short_strategies(client, monkeypatch, tmp_path):
         json.dump({"on": True, "generated": int(time.time() * 1000), "pairs": [{"symbol": "BTC/USDT"}]}, fh)
     monkeypatch.setenv("AITRADER_GAINERS_FILE", fut)
     wallet.set_market(wallet.market_path("data/learn/paper_state.json"), True)
+    assert c.get("/api/replay?symbol=BTC/USDT&tf=1h&month=2025-02").json()["candles"] == []  # perp: none yet
+    make_store(tmp_path / "x_futures.db").close()  # Futures AI's own database: the perpetual's candles
     ids = {s["id"] for s in c.get("/api/replay?symbol=BTC/USDT&tf=1h&month=2025-03").json()["strategies"]}
     assert "short-up" in ids
 

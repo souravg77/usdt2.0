@@ -28,6 +28,7 @@ from .. import clock
 from ..config import EXCHANGE
 from ..backtest import BacktestConfig
 from ..backtest.engine import as_perp
+from ..data.perp import db_for
 from ..data.store import CandleStore
 from ..learn import keep, picks
 from ..learn.registry import Registry
@@ -120,6 +121,9 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
 
         return bool(paper_state) and wallet.futures_on(wallet.market_path(paper_state))
 
+    def ws() -> str:
+        return "futures" if futures_mode() else "spot"
+
     def pairs() -> list[str]:
         """The workspace's pairs: Futures AI's (its top gainers while that list is on) in the Futures
         view, Spot AI's in the Spot view."""
@@ -187,7 +191,7 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
         entries = [e for e in known_entries(Registry(registry_path).entries) if picks.trades_now(e, False, mkt)]
         if not futures_mode():  # Spot AI never shorts: its replay leaves the short twins out
             entries = [e for e in entries if e.kind != "short"]
-        store = CandleStore(settings.db_path)
+        store = CandleStore(db_for(settings.db_path, mkt))  # Futures view: the perpetuals' candles
         try:
             start_ms = int(start.timestamp() * 1000)
             end_ms = int(_add_months(start, months).timestamp() * 1000)
@@ -262,9 +266,9 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
         since = (start - timedelta(milliseconds=WARMUP_BARS * TIMEFRAME_MS[tf])).strftime("%Y-%m-%d")
         until = min(_add_months(start, months), datetime.now(timezone.utc)).strftime("%Y-%m-%d")
         job_id = jobs.submit(f"Download {symbol} {tf} for {month}",
-                             [["download", "--since", since, "--until", until,
+                             [["download", "--since", since, "--until", until, "--market", ws(),
                                "--exchange", exchange, "--symbol", symbol, "--timeframe", tf]],
-                             meta={"kind": "download", "by": user, "symbol": symbol, "tf": tf,
+                             meta={"kind": "download", "by": user, "symbol": symbol, "tf": tf, "market": ws(),
                                    "since_ms": _day_ms(since), "until_ms": _day_ms(until)})
         cache.clear()
         q = f"symbol={_q(symbol)}&tf={_q(tf)}&month={_q(month)}&months={months}"
@@ -287,7 +291,7 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
             running = [j for j in jobs.list() if j["status"] == "running"
                        and j.get("meta", {}).get("kind") == "download"]
             ahead = running[0]["title"] if running else ""
-        store = CandleStore(settings.db_path)
+        store = CandleStore(db_for(settings.db_path, meta.get("market", "spot")))
         try:
             have = store.count(exchange, meta["symbol"], meta["tf"], meta["since_ms"], meta["until_ms"])
         finally:
@@ -323,7 +327,8 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
                 return RedirectResponse("/replay?error=" + _q(f"{where} has no pairs to test yet"), status_code=303)
             steps = []
             for t in PICK_ALL_ORDER:  # the quick timeframes first, 5m (the most candles) last
-                steps += [["download", "--since", since, "--exchange", exchange, "--timeframe", t, *sym_args],
+                steps += [["download", "--since", since, "--market", mkt, "--exchange", exchange, "--timeframe", t,
+                           *sym_args],
                           ["learn", *sym_args, "pick-timeframe", t, "--years", str(PICK_YEARS),
                            "--market", mkt, "--skip-empty"]]
             jobs.submit(f"Keep only the winners on every timeframe on {where} pairs", steps,
@@ -339,7 +344,8 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
             sym_args = [a for sym in pairs() for a in ("--symbol", sym)]
             where = "Futures AI" if futures_mode() else "Spot AI"
             jobs.submit(f"Keep only the {tf} winners on {where} pairs",
-                        [["download", "--since", since, "--exchange", exchange, "--timeframe", tf, *sym_args],
+                        [["download", "--since", since, "--market", ws(), "--exchange", exchange, "--timeframe", tf,
+                          *sym_args],
                          ["learn", *sym_args, "pick-timeframe", tf, "--years", str(PICK_YEARS),
                           "--market", "futures" if futures_mode() else "spot"]],
                         meta={"kind": "pick", "by": user, "market": "futures" if futures_mode() else "spot"})

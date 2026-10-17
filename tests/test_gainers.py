@@ -27,7 +27,7 @@ def spot(base):
 
 MARKETS = {m["symbol"]: m for m in [
     perp("PEPE"), spot("PEPE"), perp("WIF"), spot("WIF"), perp("BTC"), spot("BTC"),
-    perp("ONLYPERP"),  # no spot market: no candles, left out
+    perp("ONLYPERP"),  # no spot market: Futures AI reads only perpetual data, so it is kept
     perp("USDC"), spot("USDC"),  # stablecoin
     perp("THIN"), spot("THIN"),  # too little turnover
     perp("DOWN"), spot("DOWN"),  # fell
@@ -53,11 +53,11 @@ class FakePerps:
         return TICKERS
 
 
-def test_pick_keeps_liquid_perp_risers_that_also_trade_on_spot():
+def test_pick_keeps_liquid_perp_risers_with_or_without_a_spot_listing():
     got = gainers.pick(MARKETS, TICKERS, top=5)
-    assert [g["symbol"] for g in got] == ["PEPE/USDT", "WIF/USDT", "BTC/USDT"]
-    assert got[0]["change"] == 31.5
-    assert [g["symbol"] for g in gainers.pick(MARKETS, TICKERS, top=3)][:2] == ["PEPE/USDT", "WIF/USDT"]
+    assert [g["symbol"] for g in got] == ["ONLYPERP/USDT", "PEPE/USDT", "WIF/USDT", "BTC/USDT"]
+    assert got[1]["change"] == 31.5
+    assert [g["symbol"] for g in gainers.pick(MARKETS, TICKERS, top=3)][:2] == ["ONLYPERP/USDT", "PEPE/USDT"]
 
 
 def test_switch_refresh_and_configured_symbols(tmp_path):
