@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import sys
@@ -274,6 +275,112 @@ def cmd_kb(_s: Settings, args) -> int:
     return 0
 
 
+def cmd_learn(s: Settings, args) -> int:
+    """The agent's own strategy pipeline: read a book, backtest the drafts, paper-trade survivors."""
+    from .backtest import BacktestConfig
+    from .learn import (Entry, Registry, RuleError, claude_caller, evaluate, extract_strategies,
+                        spec_id, PaperConfig, PaperTrader)
+    from .strategies import STRATEGIES
+
+    reg = Registry(args.registry)
+    exchanges = args.exchange or EXCHANGES
+    symbols = args.symbol or s.symbols
+    cfg = BacktestConfig(taker_fee=s.paper_taker_fee, maker_fee=s.paper_maker_fee,
+                         slippage_bps=s.paper_slippage_bps)
+
+    def run_tests(entries) -> None:
+        store = CandleStore(s.db_path)
+        for e in entries:
+            res = evaluate(e, store, exchanges, symbols, cfg)
+            m = res["out_of_sample"]
+            verdict = {"paper": "PASSED -> paper trading", "rejected": "rejected"}.get(e.status, "untested")
+            print(f"  {e.id:40} {verdict:24} oos trades={m['trades']:4d} exp={m['expectancy_r']:+.3f}R"
+                  + (f"\n      why: {'; '.join(res['failed'])}" if res["failed"] else ""))
+        store.close()
+        reg.save()
+
+    cmd = args.learn_cmd
+    if cmd == "read":
+        try:
+            caller = claude_caller()
+        except RuntimeError as exc:
+            print(exc, file=sys.stderr)
+            return 1
+        print(f"reading {args.book} ...")
+        ex = extract_strategies(args.book, caller, max_strategies=args.max)
+        new = []
+        for spec in ex.specs:
+            e = Entry(id=spec_id(spec), kind="rule", name=spec["name"], spec=spec,
+                      source=f"{spec['source']['book']} {spec['source']['pages']}".strip())
+            if reg.add(e):
+                new.append(e)
+            print(f"  + {e.id:40} {e.source}\n      {spec['description'][:150]}")
+        for name, err in ex.rejected:
+            print(f"  - {name}: could not be written as rules ({err[:200]})")
+        for note in ex.notes:
+            print(f"  note {note[:300]}")
+        reg.save()
+        print(f"{len(new)} new strategies from \"{ex.book}\" -> {args.registry}")
+        if args.test and new:
+            print("backtesting them:")
+            run_tests(new)
+        return 0
+    if cmd == "add-builtin":
+        for name in args.names or list(STRATEGIES):
+            e = Entry(id=f"builtin-{name}", kind="builtin", name=name, source=STRATEGIES[name].spec.source)
+            print(("  + " if reg.add(e) else "  = ") + e.id)
+        reg.save()
+        return 0
+    if cmd == "test":
+        if args.ids:
+            entries = [reg.get(i) for i in args.ids]
+        else:
+            entries = reg.with_status("candidate", *(("rejected",) if args.retest else ()))
+        if not entries:
+            print("nothing to test (add strategies with `learn read` or `learn add-builtin`)")
+            return 0
+        run_tests(entries)
+        return 0
+    if cmd == "list":
+        if not reg.entries:
+            print("no strategies yet")
+        for e in sorted(reg.entries.values(), key=lambda e: (e.status, e.id)):
+            bt = e.backtest.get("out_of_sample", {})
+            pp = e.paper or {}
+            print(f"{e.status:9} {e.id:40} bt oos {bt.get('trades', 0):4d} tr {bt.get('expectancy_r', 0):+.3f}R"
+                  f" | paper {pp.get('trades', 0):3d} tr {pp.get('expectancy_r', 0):+.3f}R "
+                  f"{pp.get('equity_usdt', 0) or 0:,.0f} USDT  {e.source[:40]}")
+        return 0
+    if cmd == "show":
+        e = reg.get(args.id)
+        print(json.dumps({"id": e.id, "status": e.status, "source": e.source, "spec": e.spec,
+                          "backtest": e.backtest, "paper": e.paper, "history": e.history},
+                         indent=2, default=str))
+        return 0
+    if cmd == "retire":
+        e = reg.get(args.id)
+        e.set_status("retired", args.reason or "retired by hand")
+        reg.save()
+        print(f"{e.id} retired")
+        return 0
+    if cmd == "paper":
+        from .events import CalendarFilter
+
+        store = CandleStore(s.db_path)
+        trader = PaperTrader(store, args.registry, exchanges, symbols,
+                             PaperConfig(start_equity=s.paper_start_usdt, backtest=cfg),
+                             calendar=None if args.no_calendar else CalendarFilter())
+        try:
+            if args.once:
+                print(trader.tick())
+            else:
+                trader.run(args.interval)
+        finally:
+            store.close()
+        return 0
+    raise RuleError(f"unknown learn command {cmd}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="aitrader", description=__doc__)
     p.add_argument("--env-file", default=".env")
@@ -345,6 +452,31 @@ def build_parser() -> argparse.ArgumentParser:
     kbs.add_argument("--source", help="only search documents whose title contains this")
     kbs.add_argument("--full", action="store_true", help="print whole passages")
     kbs.add_argument("--index", default="data/kb/index.json")
+
+    le = sub.add_parser("learn", help="agent-written strategies: read a book, backtest, paper-trade")
+    le.add_argument("--registry", default="data/learn/registry.json")
+    le.add_argument("--exchange", action="append", choices=EXCHANGES)
+    le.add_argument("--symbol", action="append")
+    le_sub = le.add_subparsers(dest="learn_cmd", required=True)
+    lr = le_sub.add_parser("read", help="have Claude read a book and draft strategies (needs ANTHROPIC_API_KEY)")
+    lr.add_argument("book", help="PDF, Markdown or text file")
+    lr.add_argument("--max", type=int, default=12, help="most strategies to keep from one book")
+    lr.add_argument("--test", action="store_true", help="backtest the new drafts straight away")
+    lb = le_sub.add_parser("add-builtin", help="register the hand-coded strategies too")
+    lb.add_argument("names", nargs="*")
+    lt = le_sub.add_parser("test", help="backtest candidates; passes go to paper trading")
+    lt.add_argument("ids", nargs="*")
+    lt.add_argument("--retest", action="store_true", help="also re-test rejected strategies")
+    le_sub.add_parser("list", help="every strategy with its status and results")
+    ls = le_sub.add_parser("show", help="full rules, sources and results of one strategy")
+    ls.add_argument("id")
+    lx = le_sub.add_parser("retire", help="stop paper-trading a strategy")
+    lx.add_argument("id")
+    lx.add_argument("--reason")
+    lp = le_sub.add_parser("paper", help="service: paper-trade every strategy that passed")
+    lp.add_argument("--interval", type=float, default=60)
+    lp.add_argument("--once", action="store_true")
+    lp.add_argument("--no-calendar", action="store_true", help="ignore the economic calendar filter")
     return p
 
 
@@ -367,6 +499,7 @@ def main(argv: list[str] | None = None) -> int:
         "backtest": cmd_backtest,
         "calendar": cmd_calendar,
         "kb": cmd_kb,
+        "learn": cmd_learn,
     }[args.cmd]
     result = handler(settings, args)
     if asyncio.iscoroutine(result):
