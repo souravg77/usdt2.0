@@ -30,3 +30,22 @@ services:
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "5" }
+
+  # Dashboard: submit books, see strategies and results. Needs AITRADER_WEB_PASSWORD in .env.
+  # Published on the server's localhost only; reach it through an SSH tunnel or an HTTPS proxy
+  # (docs/dashboard.md). It cannot place orders or unlock live trading.
+  web:
+    build: .
+    image: aitrader:latest
+    command: ["web", "--host", "0.0.0.0", "--port", "8080"]
+    env_file: .env
+    environment:
+      AITRADER_DB_PATH: /app/data/aitrader.db
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }

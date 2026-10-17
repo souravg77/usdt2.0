@@ -116,7 +116,19 @@ your approval; the active model is never replaced automatically:
 
 See [ai-filter.md](ai-filter.md) for what the model learns and how it is tested.
 
-## 8. Updating
+## 8. Open the dashboard
+
+Set `AITRADER_WEB_PASSWORD` (12+ characters) and `AITRADER_WEB_SECRET` in `.env`, then run
+`docker compose up -d web`. It listens on the server's localhost only. From your own computer:
+
+```bash
+ssh -L 8080:localhost:8080 you@your-vps     # then open http://localhost:8080
+```
+
+There you can upload a book for the agent to read, turn into strategies and test. See
+[dashboard.md](dashboard.md) for HTTPS with your own domain.
+
+## 9. Updating
 
 ```bash
 git pull
