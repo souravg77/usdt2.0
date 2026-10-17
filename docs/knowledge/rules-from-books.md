@@ -24,9 +24,9 @@ helps; these are the starting values.
 The economics and policy books (Chiu & Koeppl, Deloitte, Treasury) don't contain trading rules.
 They feed the reference notes and the risk guardrails above.
 
-## Strategy books (second batch)
+## Strategy books (second and third batch)
 
-Six more books were read in full. Their strategies are rule specs in
+Eight more books were read in full (six, then two price-action books by Galen Woods). Their strategies are rule specs in
 `src/aitrader/learn/library/`, one file per book. `aitrader learn add-library --test` registers
 them and sends each one through the same backtest gate and paper stage as everything else.
 Each spec cites its page and quote, lists the choices made where the book is vague
@@ -80,11 +80,25 @@ strategy, `cci_divergence` (`src/aitrader/strategies/divergence.py`).
 | `cardoza_sma_crossover_22_34` | Introduction to Trading System Development | 4h, 1d | Strategy 2 of the book: buy when the fast SMA crosses above the slow SMA, exit when it crosses back under; len |
 | `cardoza_smoothies_range_support_buy` | Introduction to Trading System Development | 1h, 4h, 1d | Generic 'smoothies' support/resistance trade from the book's overview: buy when price reaches support expectin |
 | `cci_divergence` | The Power of Divergence | 1d, 4h | Bullish CCI(20) divergence (zone, zero-line and Fibonacci rules), close above the falling trendline |
+| `inside_bar_after_sma21_cross` | How to Trade with Price Action: Strategies | 5m, 15m, 1h | After price clears completely above the 21 SMA from below, buy the break of the first bullish inside bar... |
+| `four_down_days_swing_low_holds` | How to Trade with Price Action: Strategies | 4h, 1d | Fade 4+ consecutive down bars that fail to breach the last swing low; buy above the next bullish bar. |
+| `enhanced_three_bar_reversal` | How to Trade with Price Action: Strategies | 5m, 15m | Alton Hill's three-bar reversal: down bar, lower-low middle bar, then a bar that closes above the highs of... |
+| `nr7_ema20_trend_breakout` | How to Trade with Price Action: Strategies | 5m, 15m, 1h | In an uptrend where the last 7 bars are completely above the 20 EMA, buy the break of an NR7 bar's high. |
+| `trend_bar_failure_long` | How to Trade with Price Action: Strategies | 5m, 1h, 1d | In an uptrend (20 EMA sloping up), a bear trend bar's low is broken without follow-through; buy above the... |
+| `bullish_engulfing_market_structure` | How to Trade with Price Action: Strategies | 4h, 1d | In an uptrend of higher swing highs and lows, buy a bullish engulfing pattern whose high is still below... |
+| `hikkake_long` | How to Trade with Price Action: Strategies | 4h, 1d | Dan Chesler's Hikkake: an inside bar followed by a false breakdown bar (lower high and lower low); buy... |
+| `low_volume_pullback_long` | How to Trade with Price Action: Strategies | 4h, 1d | Above the 20 SMA, after a breakout over the last swing high on higher volume, a pullback on lower volume;... |
+| `wide_bull_inside_bar_breakout` | How to Trade with Price Action: Master Edition | 5m, 15m, 1h | Buy the upside break of a wide-range (>75% of prior bar range) bullish inside bar while the 20 EMA slopes... |
+| `sma20_shallow_pullback_trend_confirm` | How to Trade with Price Action: Master Edition | 5m, 15m, 1h | Woods' MA+price-action bull-trend confirmation: price touches the 20 SMA, holds above it on a shallow... |
+| `ema20_pullback_two_bar_reversal` | How to Trade with Price Action: Master Edition | 5m, 15m, 1h | In a bullish context (price above a rising 20 EMA), buy a pullback that touches the 20 EMA and reverses... |
+| `nr7_bull_pullback_trigger` | How to Trade with Price Action: Master Edition | 5m, 15m, 1h | In an uptrend, a pullback ending in an NR7 bar outside tight congestion; buy the break above the NR7 high... |
+| `hikkake_inside_bar_false_breakdown_long` | How to Trade with Price Action: Master Edition | 5m, 15m, 1h | Hikkake long: an inside bar's downside breakout fails and price reverses up through the inside bar high,... |
 
 New rule-language features added for these books: CCI, slow stochastic, Force Index, +DI/-DI,
 Heikin-Ashi colour, NR7 / bar range, range-to-ATR, candle patterns (bullish engulfing, hammer,
 doji, inside bar, lower-shadow ratio), candle and close-above/below-MA streaks, bullish RSI / CCI
-/ MACD divergence, and exit conditions (`exit.when`).
+/ MACD divergence, and exit conditions (`exit.when`). For Woods's two price-action books:
+candle body as a share of the range (`body_pct`, a "trend bar" is 0.5 or more) and outside bars.
 
 ### Not coded yet
 
@@ -102,6 +116,10 @@ in each spec's `uncodable`:
 - Stop-trading-for-the-day after two losses (needs a portfolio-level loss counter; Phase 4 risk
   engine).
 - Every short-side setup (no shorting in the pilot).
+- Four of Woods's setups wait on features the rule language lacks, so `add-library` skips them
+  and says why: M2B (counting the two legs of a pullback), the high-close doji at floor pivots
+  (prior-session pivot levels), the moving-average price channel (averages of highs and lows),
+  and the pin-bar re-entry (a pin-bar feature and a trigger, stop-out, re-entry sequence).
 
 ### Testing lessons from Cardoza
 

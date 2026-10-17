@@ -32,7 +32,7 @@ behind the Phase 6 go/no-go gate and the three-setting live lock.
 
 ## Strategies already read from the books
 
-The six strategy books Shawn sent were read in full, and their 41 rule-based strategies ship
+The eight strategy books Shawn sent were read in full, and their 54 rule-based strategies ship
 with the code in `src/aitrader/learn/library/`. `learn add-library` registers them, so they
 don't need the API key. Carli's CCI divergence is a hand-coded strategy (`cci_divergence`); add
 it with `learn add-builtin`. The list and what was approximated are in
@@ -46,7 +46,7 @@ trading. Only strategies with results that hold up survive.
 
 ```bash
 aitrader learn read data/books/my-book.pdf --test   # draft strategies, then backtest them
-aitrader learn add-library --test                   # the 41 strategies already read from Shawn's books
+aitrader learn add-library --test                   # the 54 strategies already read from Shawn's books
 aitrader learn add-builtin                          # also run the hand-coded strategies through the gate
 aitrader learn test                                 # backtest anything still untested
 aitrader learn list                                 # every strategy: status, backtest and paper results

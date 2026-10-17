@@ -115,6 +115,8 @@ FEATURES: dict[str, tuple[tuple[float, ...], str]] = {
     "hammer": ((), "1 for a hammer: lower wick >= 2x body, small upper wick, body in top third"),
     "doji": ((), "1 if the body is at most 10% of the bar's range"),
     "inside_bar": ((), "1 if high < previous high and low > previous low"),
+    "outside_bar": ((), "1 if high > previous high and low < previous low"),
+    "body_pct": ((), "candle body / bar range, 0-1 (a 'trend bar' is usually >= 0.5)"),
     "lower_shadow_ratio": ((), "lower wick / body (body floored at 1% of range)"),
     "green_streak": ((), "up bars in a row ending at this bar"),
     "red_streak": ((), "down bars in a row ending at this bar"),
@@ -408,6 +410,10 @@ def _feature(df: pd.DataFrame, e: Expr, cache: dict) -> pd.Series:
         elif n == "range_atr":
             span = df["high"].rolling(a[0], min_periods=a[0]).max() - df["low"].rolling(a[0], min_periods=a[0]).min()
             s = span / atr(df)
+        elif n == "outside_bar":
+            s = ((df["high"] > df["high"].shift(1)) & (df["low"] < df["low"].shift(1))).astype(float)
+        elif n == "body_pct":
+            s = (close - df["open"]).abs() / (df["high"] - df["low"]).replace(0, np.nan)
         elif n in ("bullish_engulfing", "hammer", "doji", "inside_bar"):
             s = candle_patterns(df)[n]
         elif n == "lower_shadow_ratio":

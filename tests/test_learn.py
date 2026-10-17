@@ -233,7 +233,9 @@ def test_library_specs_are_valid_and_run():
     books = library_books()
     assert len(books) >= 5
     specs, skipped = library_specs()
-    assert len(specs) == sum(len(b["strategies"]) for b in books) and not skipped
+    waiting = {s["name"] for b in books for s in b["strategies"] if s.get("needs")}
+    assert len(specs) == sum(len(b["strategies"]) for b in books) - len(waiting)
+    assert {name for name, _ in skipped} == waiting  # only specs waiting on a missing feature
     assert len({spec_id(s) for s in specs}) == len(specs)
     df = synthetic(n=1500, vol=0.02)
     fired = 0
@@ -262,7 +264,7 @@ def test_exit_when_condition_closes_trade():
 
 @pytest.mark.parametrize("expr", [
     "cci(20)", "stoch_k(14,3)", "stoch_d", "force_index(13)", "plus_di(14)", "minus_di", "ha_green",
-    "bar_range", "nr(7)", "range_atr(10)", "bullish_engulfing", "hammer", "doji", "inside_bar",
+    "bar_range", "nr(7)", "range_atr(10)", "bullish_engulfing", "hammer", "doji", "inside_bar", "outside_bar", "body_pct",
     "lower_shadow_ratio", "green_streak", "red_streak", "closes_above_sma(5)", "closes_below_sma(20)",
     "rsi_bull_div(14,30)", "cci_bull_div", "macd_bull_div(40)", "highest_high(30)[1]",
 ])

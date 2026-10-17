@@ -1,0 +1,505 @@
+{
+ "book": "How to Trade with Price Action: Master Edition",
+ "author": "Galen Woods",
+ "year": 2014,
+ "strategies": [
+  {
+   "name": "wide_bull_inside_bar_breakout",
+   "description": "Buy the upside break of a wide-range (>75% of prior bar range) bullish inside bar while the 20 EMA slopes up; 1:1 target as in the book's backtest.",
+   "source": {
+    "book": "How to Trade with Price Action: Master Edition",
+    "pages": "p. 11-15",
+    "quote": "We focused on wide range inside bars that closed in the direction of our trade"
+   },
+   "timeframes": [
+    "5m",
+    "15m",
+    "1h"
+   ],
+   "entry": [
+    {
+     "left": "inside_bar[1]",
+     "op": ">=",
+     "right": 1
+    },
+    {
+     "left": "close[1]",
+     "op": ">",
+     "right": "open[1]"
+    },
+    {
+     "left": "bar_range[1]",
+     "op": ">",
+     "right": "0.75*bar_range[2]"
+    },
+    {
+     "left": "high",
+     "op": ">",
+     "right": "high[1]"
+    },
+    {
+     "left": "ema(20)",
+     "op": ">",
+     "right": "ema(20)[1]"
+    }
+   ],
+   "stop": {
+    "type": "lowest_low",
+    "n": 1
+   },
+   "target": {
+    "r": 1
+   },
+   "exit": {
+    "trailing": null,
+    "time_stop_bars": 24,
+    "when": []
+   },
+   "risk_pct": 0.005,
+   "decisions": [
+    "Backtest was ES 5m futures; mapped to 5m/15m/1h crypto.",
+    "'Slope of 20-period EMA as trend filter' = ema(20) > ema(20) one bar ago.",
+    "Entry is a buy stop one tick above the inside bar high; modelled as high > high[1] on the next bar (fill at inside-bar high assumed by engine; if engine fills at close, entry is late).",
+    "Stop at the inside bar low (lowest_low of the previous 1 bar = inside bar), the usual pattern stop.",
+    "Target 1R exactly as in the book's test; time stop 24 bars added (book gives none).",
+    "Book gives no risk percentage; 0.5% chosen."
+   ],
+   "uncodable": [
+    "Short side (bearish inside bar closing down, break below, falling EMA) not codable long-only.",
+    "Regular-trading-session restriction has no crypto equivalent."
+   ]
+  },
+  {
+   "name": "sma20_shallow_pullback_trend_confirm",
+   "description": "Woods' MA+price-action bull-trend confirmation: price touches the 20 SMA, holds above it on a shallow pullback, then breaks the last extreme high; enter on that confirmation and trail with the SMA.",
+   "source": {
+    "book": "How to Trade with Price Action: Master Edition",
+    "pages": "p. 39-41, p. 51",
+    "quote": "Bull trend confirmed when price rises above the last extreme high."
+   },
+   "timeframes": [
+    "5m",
+    "15m",
+    "1h"
+   ],
+   "entry": [
+    {
+     "left": "low",
+     "op": "<=",
+     "right": "sma(20)",
+     "within": 20
+    },
+    {
+     "left": "closes_above_sma(20)",
+     "op": ">=",
+     "right": 3
+    },
+    {
+     "left": "low",
+     "op": ">",
+     "right": "sma(20)"
+    },
+    {
+     "left": "close",
+     "op": "crosses_above",
+     "right": "highest_high(10)"
+    }
+   ],
+   "stop": {
+    "type": "lowest_low",
+    "n": 5
+   },
+   "target": null,
+   "exit": {
+    "trailing": null,
+    "time_stop_bars": null,
+    "when": [
+     {
+      "left": "close",
+      "op": "<",
+      "right": "sma(20)"
+     }
+    ]
+   },
+   "risk_pct": 0.005,
+   "decisions": [
+    "'Price touches the MA' = some bar's low <= SMA(20) within the last 20 bars.",
+    "'No bar high below the MA during the pullback' approximated by >=3 consecutive closes above SMA(20) and the current low above it (cannot test every bar's high directly).",
+    "'Last extreme high' approximated as highest high of the previous 10 bars.",
+    "The book uses this as a trend definition, not a full setup; stop below the last 5-bar low and SMA trailing exit (book p. 51 suggests MA trailing stops) are our additions.",
+    "Book gives no risk percentage; 0.5% chosen."
+   ],
+   "uncodable": [
+    "Bear-trend version (short) not codable.",
+    "Session-open gap context.",
+    "Not coded yet: all_bars_high_above(sma(20), lookback since touch) — condition that holds for every bar in a window",
+    "Not coded yet: swing_high_pivot (last extreme high) instead of fixed 10-bar highest high"
+   ]
+  },
+  {
+   "name": "price_channel_two_bars_above",
+   "description": "Bernstein-style moving-average channel: go long when two consecutive bars sit completely above the channel (bull trend defined); exit when a bar is completely below it.",
+   "source": {
+    "book": "How to Trade with Price Action: Master Edition",
+    "pages": "p. 42-43",
+    "quote": "When two price bars stay completely above the channel, we define a bull trend."
+   },
+   "timeframes": [
+    "5m",
+    "15m",
+    "1h"
+   ],
+   "entry": [
+    {
+     "left": "low",
+     "op": ">",
+     "right": "bb_upper(20,1)"
+    },
+    {
+     "left": "low[1]",
+     "op": ">",
+     "right": "bb_upper(20,1)[1]"
+    },
+    {
+     "left": "low[2]",
+     "op": "<=",
+     "right": "bb_upper(20,1)[2]"
+    }
+   ],
+   "stop": {
+    "type": "lowest_low",
+    "n": 3
+   },
+   "target": null,
+   "exit": {
+    "trailing": null,
+    "time_stop_bars": null,
+    "when": [
+     {
+      "left": "high",
+      "op": "<",
+      "right": "bb_lower(20,1)"
+     }
+    ]
+   },
+   "risk_pct": 0.005,
+   "decisions": [
+    "Book's channel = moving averages of bar highs and bar lows, period not given. Grammar has no SMA of highs/lows; approximated with a 1-std Bollinger band (book says Bollinger/Keltner bands may be used with adapted rules). This is an approximation.",
+    "Period 20 chosen for consistency with the book's other 20-period tools.",
+    "Third condition makes it fire only on the first two-bar confirmation.",
+    "Exit when a bar is completely below the lower band (book: two bars below = bear trend; one bar used for faster exit). Stop below 3-bar low is our addition.",
+    "Book gives no risk percentage; 0.5% chosen."
+   ],
+   "needs": [
+    "sma_high(n): moving average of bar highs",
+    "sma_low(n): moving average of bar lows"
+   ],
+   "uncodable": [
+    "Bear-trend (short) version.",
+    "Not coded yet: needs moving averages of highs and lows (sma_high / sma_low); a Bollinger band is not the same channel"
+   ]
+  },
+  {
+   "name": "ema20_pullback_two_bar_reversal",
+   "description": "In a bullish context (price above a rising 20 EMA), buy a pullback that touches the 20 EMA and reverses with a two-bar reversal; modest target and EMA trailing exit.",
+   "source": {
+    "book": "How to Trade with Price Action: Master Edition",
+    "pages": "p. 48-52",
+    "quote": "In a bull trend, buy when prices retrace to the 20-period moving average."
+   },
+   "timeframes": [
+    "5m",
+    "15m",
+    "1h"
+   ],
+   "entry": [
+    {
+     "left": "ema(20)",
+     "op": ">",
+     "right": "ema(20)[5]"
+    },
+    {
+     "left": "close[3]",
+     "op": ">",
+     "right": "ema(20)[3]"
+    },
+    {
+     "left": "low",
+     "op": "<=",
+     "right": "ema(20)",
+     "within": 2
+    },
+    {
+     "left": "close[1]",
+     "op": "<",
+     "right": "open[1]"
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "open"
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "high[1]"
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "ema(20)"
+    }
+   ],
+   "stop": {
+    "type": "lowest_low",
+    "n": 2
+   },
+   "target": {
+    "r": 1.5
+   },
+   "exit": {
+    "trailing": null,
+    "time_stop_bars": 36,
+    "when": [
+     {
+      "left": "close",
+      "op": "<",
+      "right": "ema(20)"
+     }
+    ]
+   },
+   "risk_pct": 0.005,
+   "decisions": [
+    "Book uses an EMA (SMA also fine); EMA(20).",
+    "'Bull trend/bullish context' = EMA slope positive over 5 bars and price was above the EMA 3 bars ago (book's context questions are discretionary).",
+    "'Two-bar reversal' = a down bar followed by an up bar closing above the down bar's high.",
+    "'Retrace to the MA' = low touched EMA(20) in the last 2 bars.",
+    "Stop below the two-bar pattern low; target 1.5R because the book says aim for nearer targets in a non-strong trend; EMA trailing exit per p. 51.",
+    "Book gives no risk percentage; 0.5% chosen."
+   ],
+   "uncodable": [
+    "Short pullbacks in bear trends.",
+    "Discretionary context reading (MA overlap count, slope flips).",
+    "Not coded yet: two_bar_reversal (exact pattern feature; current version is an approximation)"
+   ]
+  },
+  {
+   "name": "pin_bar_reentry_long",
+   "description": "Skip the original bullish pin bar trade; after its buyers are stopped below the pin low, buy the break above a bullish bar while above the 20 EMA.",
+   "source": {
+    "book": "How to Trade with Price Action: Master Edition",
+    "pages": "p. 65-70",
+    "quote": "Look to buy when price breaks above any bullish bar"
+   },
+   "timeframes": [
+    "15m",
+    "30m",
+    "1h"
+   ],
+   "entry": [
+    {
+     "left": "hammer",
+     "op": ">=",
+     "right": 1,
+     "within": 12
+    },
+    {
+     "left": "low",
+     "op": "<",
+     "right": "lowest_low(10)",
+     "within": 6
+    },
+    {
+     "left": "close[1]",
+     "op": ">",
+     "right": "open[1]"
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "high[1]"
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "ema(20)"
+    }
+   ],
+   "stop": {
+    "type": "lowest_low",
+    "n": 6
+   },
+   "target": {
+    "r": 2
+   },
+   "exit": {
+    "trailing": null,
+    "time_stop_bars": 30,
+    "when": [
+     {
+      "left": "close",
+      "op": "<",
+      "right": "ema(20)"
+     }
+    ]
+   },
+   "risk_pct": 0.005,
+   "decisions": [
+    "Pin bar approximated by the grammar's hammer feature.",
+    "'Market falls below the pin low' approximated by a fresh 10-bar low within the last 6 bars (pin bars usually mark the local low); ordering pin -> trigger -> stop-out cannot be enforced.",
+    "'Breaks above any bullish bar' = previous bar is up, current close above its high.",
+    "Close above EMA(20) added: book's losing example re-entered below the EMA and the author flags that as the difference.",
+    "Book gives no stop/target for the re-entry; stop below the 6-bar low (re-entry swing low), target 2R, time stop 30 bars are our choices.",
+    "Examples were 30m/1h forex futures; mapped to 15m-1h.",
+    "Book gives no risk percentage; 0.5% chosen."
+   ],
+   "needs": [
+    "pin_bar (bullish, long lower tail) distinct from hammer",
+    "pattern_reference_levels: high/low of a specific earlier signal bar",
+    "event sequencing: pin bar -> break above pin high -> break below pin low (not more than X ATR) -> re-entry",
+    "max_undercut limit ('not too far below' pin low)"
+   ],
+   "uncodable": [
+    "Short re-entry (bearish pin) version.",
+    "Skipping setups after a projected chart-pattern target was hit.",
+    "Not coded yet: needs a pin-bar feature and a sequence of events (trigger, stop-out, re-entry) the rule language can't express"
+   ]
+  },
+  {
+   "name": "nr7_bull_pullback_trigger",
+   "description": "In an uptrend, a pullback ending in an NR7 bar outside tight congestion; buy the break above the NR7 high with a stop under its low.",
+   "source": {
+    "book": "How to Trade with Price Action: Master Edition",
+    "pages": "p. 77-78",
+    "quote": "A bullish pullback ended with a NR7 bar."
+   },
+   "timeframes": [
+    "5m",
+    "15m",
+    "1h"
+   ],
+   "entry": [
+    {
+     "left": "nr(7)[1]",
+     "op": ">=",
+     "right": 1
+    },
+    {
+     "left": "high",
+     "op": ">",
+     "right": "high[1]"
+    },
+    {
+     "left": "ema(20)",
+     "op": ">",
+     "right": "ema(20)[5]"
+    },
+    {
+     "left": "close[1]",
+     "op": "<",
+     "right": "close[4]"
+    },
+    {
+     "left": "close[1]",
+     "op": ">",
+     "right": "ema(50)[1]"
+    },
+    {
+     "left": "range_atr(20)[2]",
+     "op": ">",
+     "right": 3
+    }
+   ],
+   "stop": {
+    "type": "lowest_low",
+    "n": 1
+   },
+   "target": {
+    "r": 2
+   },
+   "exit": {
+    "trailing": null,
+    "time_stop_bars": 24,
+    "when": []
+   },
+   "risk_pct": 0.005,
+   "decisions": [
+    "Bullish context = rising EMA(20) over 5 bars; pullback = NR7 bar close below the close 3 bars earlier but still above EMA(50).",
+    "'Not within tight congestion' = 20-bar range before the NR7 exceeds 3 ATR (threshold chosen; book gives none).",
+    "Entry on break above NR7 high (stop-order style); stop below the NR7 bar low.",
+    "Book's target is the last extreme high; approximated as 2R.",
+    "Book gives no risk percentage; 0.5% chosen."
+   ],
+   "uncodable": [
+    "Short-side NR7 setups.",
+    "Intraday volatility-pattern (time-of-day) filter.",
+    "Not coded yet: target_at_last_swing_high (structural target)",
+    "Not coded yet: congestion filter: no higher close for >=3 consecutive bars (book's definition)"
+   ]
+  },
+  {
+   "name": "hikkake_inside_bar_false_breakdown_long",
+   "description": "Hikkake long: an inside bar's downside breakout fails and price reverses up through the inside bar high, trading against the trapped breakout sellers.",
+   "source": {
+    "book": "How to Trade with Price Action: Master Edition",
+    "pages": "p. 60-61",
+    "quote": "It waits for a breakout of an inside bar to fail."
+   },
+   "timeframes": [
+    "5m",
+    "15m",
+    "1h"
+   ],
+   "entry": [
+    {
+     "left": "inside_bar[2]",
+     "op": ">=",
+     "right": 1
+    },
+    {
+     "left": "low[1]",
+     "op": "<",
+     "right": "low[2]"
+    },
+    {
+     "left": "high[1]",
+     "op": "<=",
+     "right": "high[2]"
+    },
+    {
+     "left": "close",
+     "op": ">",
+     "right": "high[2]"
+    },
+    {
+     "left": "ema(20)",
+     "op": ">",
+     "right": "ema(20)[1]"
+    }
+   ],
+   "stop": {
+    "type": "lowest_low",
+    "n": 2
+   },
+   "target": {
+    "r": 2
+   },
+   "exit": {
+    "trailing": null,
+    "time_stop_bars": 24,
+    "when": []
+   },
+   "risk_pct": 0.005,
+   "decisions": [
+    "Book describes Hikkake only conceptually (details in another edition); the standard two-bar failure window is used: inside bar, next bar breaks its low without breaking its high, then close above the inside bar high.",
+    "Rising EMA(20) filter added to keep with-trend, per the book's trend emphasis.",
+    "Stop below the false-breakdown low; target 2R; both our choices.",
+    "Book gives no risk percentage; 0.5% chosen."
+   ],
+   "uncodable": [
+    "Bearish Hikkake (short).",
+    "Not coded yet: hikkake pattern with variable confirmation window (up to 3 bars after the false break)"
+   ]
+  }
+ ]
+}
