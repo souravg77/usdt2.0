@@ -42,6 +42,7 @@ class BacktestConfig:
     max_cost_r: float = 0.25  # skip signals whose round-trip costs exceed this share of the risk (0: off)
     min_rr: float = 0.0  # skip signals whose fixed target is less than this many R away (0: off)
     split_tp: bool = False  # take half the position at halfway to the target, the rest at the target
+    breakeven: bool = False  # with split_tp: once the first half is taken, the stop moves to breakeven
     maker_entry: bool = False  # enter with a post-only limit order (maker fee), or not at all (maker_fill)
 
 
@@ -142,19 +143,24 @@ def simulate_signal(sig: Signal, df: pd.DataFrame, pos: int, cfg: BacktestConfig
 
     exit_px, exit_reason, exit_i, exit_fee = None, "", None, cfg.taker_fee
     end = min(len(df), pos + cfg.max_bars_in_trade)
+    stop, why = sig.stop, "stop"
+    # breakeven: the price where the second half's exit pays back both fees and the slippage
+    be = entry * (1 + entry_fee + cfg.taker_fee + slip) / (1 - slip)
     for i in range(pos, end):
         # a limit entry fills somewhere inside its candle: a target touched in that same candle may
         # have come before the fill, so it isn't counted (the stop still is: the cautious reading)
         limit_bar = maker is not None and i == pos
         # gap through stop at the open
-        if i > pos and o[i] <= sig.stop:
-            exit_px, exit_reason, exit_i = o[i] * (1 - slip), "stop_gap", i
+        if i > pos and o[i] <= stop:
+            exit_px, exit_reason, exit_i = o[i] * (1 - slip), why + "_gap", i
             break
-        if lo[i] <= sig.stop:
-            exit_px, exit_reason, exit_i = sig.stop * (1 - slip), "stop", i
+        if lo[i] <= stop:
+            exit_px, exit_reason, exit_i = stop * (1 - slip), why, i
             break
         if tp1 is not None and half is None and h[i] >= tp1 and not limit_bar:
             half = tp1
+            if cfg.breakeven and stop < be < tp1:  # from the next candle on, the rest can't lose
+                stop, why = be, "breakeven"
         if target is not None and h[i] >= target and not limit_bar:
             exit_px, exit_reason, exit_i, exit_fee = target, "target", i, cfg.maker_fee
             break
@@ -175,7 +181,7 @@ def simulate_signal(sig: Signal, df: pd.DataFrame, pos: int, cfg: BacktestConfig
     taken = 0.5 if half is not None else 0.0  # the share closed early at tp1 (as maker)
     fees = entry * entry_fee + taken * _half_or(half) * cfg.maker_fee + (1 - taken) * exit_px * exit_fee
     # slipped exits were priced at (1 - slip) times the quoted price; targets and "end" were not
-    slipped_exit = exit_reason in ("stop", "stop_gap", "trail", "time")
+    slipped_exit = exit_reason in ("stop", "stop_gap", "breakeven", "breakeven_gap", "trail", "time")
     slippage = (0.0 if maker is not None else entry - o[pos]) + (1 - taken) * (exit_px / (1 - slip) - exit_px if slipped_exit and slip < 1 else 0.0)
     gross = taken * (_half_or(half) - entry) + (1 - taken) * (exit_px - entry)
     net = gross - fees - funding
@@ -240,18 +246,22 @@ def _simulate_short(sig: Signal, df: pd.DataFrame, pos: int, cfg: BacktestConfig
 
     exit_px, exit_reason, exit_i, exit_fee = None, "", None, cfg.perp_taker_fee
     end = min(len(df), pos + cfg.max_bars_in_trade)
+    stop, why = sig.stop, "stop"
+    be = entry * (1 - entry_fee - cfg.perp_taker_fee - slip) / (1 + slip)
     for i in range(pos, end):
         # a limit entry fills somewhere inside its candle: a target touched in that same candle may
         # have come before the fill, so it isn't counted (the stop still is: the cautious reading)
         limit_bar = maker is not None and i == pos
-        if i > pos and o[i] >= sig.stop:
-            exit_px, exit_reason, exit_i = o[i] * (1 + slip), "stop_gap", i
+        if i > pos and o[i] >= stop:
+            exit_px, exit_reason, exit_i = o[i] * (1 + slip), why + "_gap", i
             break
-        if h[i] >= sig.stop:
-            exit_px, exit_reason, exit_i = sig.stop * (1 + slip), "stop", i
+        if h[i] >= stop:
+            exit_px, exit_reason, exit_i = stop * (1 + slip), why, i
             break
         if tp1 is not None and half is None and lo[i] <= tp1 and not limit_bar:
             half = tp1
+            if cfg.breakeven and tp1 < be < stop:
+                stop, why = be, "breakeven"
         if target is not None and lo[i] <= target and not limit_bar:
             exit_px, exit_reason, exit_i, exit_fee = target, "target", i, cfg.perp_maker_fee
             break
@@ -272,7 +282,7 @@ def _simulate_short(sig: Signal, df: pd.DataFrame, pos: int, cfg: BacktestConfig
     funding = cfg.perp_funding_8h * bars * tf_hours / 8 * entry
     taken = 0.5 if half is not None else 0.0
     fees = entry * entry_fee + taken * _half_or(half) * cfg.perp_maker_fee + (1 - taken) * exit_px * exit_fee
-    slipped_exit = exit_reason in ("stop", "stop_gap", "trail", "time")
+    slipped_exit = exit_reason in ("stop", "stop_gap", "breakeven", "breakeven_gap", "trail", "time")
     slippage = (0.0 if maker is not None else o[pos] - entry) + (1 - taken) * (exit_px - exit_px / (1 + slip) if slipped_exit else 0.0)
     gross = taken * (entry - _half_or(half)) + (1 - taken) * (entry - exit_px)
     net = gross - fees - funding

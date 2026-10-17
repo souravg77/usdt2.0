@@ -11,6 +11,9 @@
   when the close is above EMA 50 and EMA 20 is above EMA 50, down when both are below.
 - **Split take-profit** (``split_tp``): half the position is closed halfway to the target, the
   rest at the target (``backtest.engine``).
+- **Breakeven after the first half** (``breakeven``, with the split take-profit): once the first half
+  is taken, the stop of the rest moves to the entry price plus fees and slippage, so the trade can no
+  longer end in a loss.
 - **Exposure caps**: at most ``max_long`` long and ``max_short`` short positions at once, and at
   most ``max_correlated`` positions on the same side whose hourly returns over the last week move
   together with the new pair (correlation of at least ``corr_min``), so one Bitcoin move can't hit
@@ -37,7 +40,7 @@ from datetime import datetime, timedelta
 from . import wallet
 
 DEFAULTS = {"breaker": True, "day_pause_pct": 3.0, "pause_hours": 24.0, "week_close_pct": 6.0,
-            "min_rr": 0.0, "trend": False, "split_tp": False, "maker_entry": False,
+            "min_rr": 0.0, "trend": False, "split_tp": False, "breakeven": False, "maker_entry": False,
             "max_long": 8.0, "max_short": 8.0, "max_correlated": 3.0, "corr_min": 0.8, "trade_usdt": 0.0}
 RANGES = {"day_pause_pct": (0.5, 50.0), "pause_hours": (1.0, 168.0), "week_close_pct": (1.0, 90.0),
           "min_rr": (0.0, 10.0), "max_long": (1.0, 200.0), "max_short": (1.0, 200.0),
@@ -46,7 +49,7 @@ RANGES = {"day_pause_pct": (0.5, 50.0), "pause_hours": (1.0, 168.0), "week_close
 OFF_AT_ZERO = ("min_rr", "trade_usdt")  # 0 means off / automatic, not the range's minimum
 WHOLE = ("max_long", "max_short", "max_correlated")
 CORR_BARS = 168  # hourly returns of the last week
-SWITCHES = ("breaker", "trend", "split_tp", "maker_entry")
+SWITCHES = ("breaker", "trend", "split_tp", "breakeven", "maker_entry")
 
 HIGHER = {"5m": ("4h", "1d"), "15m": ("4h", "1d"), "30m": ("4h", "1d"), "1h": ("4h", "1d"), "4h": ("1d",)}
 TREND_BARS = 120  # candles of a higher timeframe read for its trend (EMA 50 needs ~60 to settle)

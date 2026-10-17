@@ -387,3 +387,27 @@ def test_the_amount_per_trade_has_its_own_save_button(tmp_path, monkeypatch):
     r = client.post("/trading/paper/amount", data={"csrf": csrf, "market": "futures", "trade_usdt": "ten"},
                     follow_redirects=False)
     assert "bad=1" in r.headers["location"]
+
+
+def test_breakeven_after_the_first_half_means_the_rest_cannot_lose():
+    """From Gemini's file (Shawn chose to add it): stop to breakeven once the first half is taken."""
+    split = BacktestConfig(**{**FREE.__dict__, "split_tp": True})
+    be = BacktestConfig(**{**FREE.__dict__, "split_tp": True, "breakeven": True})
+    df = _bars([(100, 100, 100, 100), (100, 102.5, 99.5, 102), (102, 102, 97, 97)])
+    assert simulate_signal(_sig(), df, 1, split, {}).r == pytest.approx(0.0)  # 1R on half, -1R on half
+    t = simulate_signal(_sig(), df, 1, be, {})
+    assert t.exit_reason == "breakeven" and t.r == pytest.approx(0.5)  # 1R on half, 0 on the rest
+    # the stop moves only from the candle after the first half: that candle's own low still uses the old stop
+    df = _bars([(100, 100, 100, 100), (100, 102.5, 99.0, 102), (102, 104.5, 101, 104)])
+    assert simulate_signal(_sig(), df, 1, be, {}).r == pytest.approx(1.5)
+    short = _sig(Side.SELL, entry=100, stop=102, target=96)
+    df = _bars([(100, 100, 100, 100), (100, 100.5, 97.5, 98), (98, 103, 98, 103)])
+    t = simulate_signal(short, df, 1, be, {})
+    assert t.exit_reason == "breakeven" and t.r == pytest.approx(0.5)
+    # with costs the breakeven stop pays them back: the rest ends at about 0R, not a loss
+    costs = BacktestConfig(split_tp=True, breakeven=True, max_cost_r=0)
+    df = _bars([(100, 100, 100, 100), (100, 102.5, 99.5, 102), (102, 102, 97, 97)])
+    t = simulate_signal(_sig(), df, 1, costs, {})
+    half = simulate_signal(_sig(), df, 1, BacktestConfig(split_tp=True, max_cost_r=0), {})
+    assert t.r > half.r and t.r > 0.4
+    assert guards.DEFAULTS["breakeven"] is False  # off until a person turns it on

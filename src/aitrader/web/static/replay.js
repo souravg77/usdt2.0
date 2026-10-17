@@ -99,7 +99,8 @@
         (d.fee_skipped ? " " + d.fee_skipped + " more signals were skipped because fees and slippage would cost over " +
           Math.round(d.max_cost_r * 100) + "% of the risk." : "") +
         (d.min_rr ? " Only trades whose target is at least " + d.min_rr + "R away (the engine's minimum reward)." : "") +
-        (d.split_tp ? " Half of each trade is taken halfway to its target (split take-profit)." : "") +
+        (d.split_tp ? " Half of each trade is taken halfway to its target (split take-profit)" +
+          (d.breakeven ? ", then the stop moves to breakeven." : ".") : "") +
         (d.maker_entry ? " Entries are limit orders (maker fee); signals whose entry candle never came back to the price are missed." : "") +
         (d.capped ? " That period has more than " + d.max_bars + " " + d.timeframe + " candles, so the first " +
           d.max_bars + " are shown: pick a shorter length or a longer timeframe to see the rest." : "") +
