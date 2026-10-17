@@ -630,9 +630,14 @@ class PaperTrader:
                                           f"filled at {t.entry:.6g}: the stop is past liquidation even at 1x")
                         log.info("paper %s skipped: filled at %.6g, stop too close to liquidation", key, t.entry)
                         continue
+                    setting = wallet.paper_leverage(self.market_path) or futures.leverage()
                     if lev < chosen:
+                        pos["lev_why"] = f"stop too wide for {chosen:g}x"
                         log.info("paper %s: %gx instead of %gx so the stop comes well before liquidation",
                                  key, lev, chosen)
+                    elif chosen < setting:
+                        pos["lev_why"] = f"Bybit's maximum for {sym}"
+                    pos["lev_setting"] = setting
                 amount = self._guards[mkt]["trade_usdt"]
                 if amount > 0:  # a fixed amount per trade: the cost on Spot, the margin on Futures
                     units = amount * pos.get("size_mult", 1.0) * lev / t.entry

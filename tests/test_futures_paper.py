@@ -81,6 +81,21 @@ def test_a_fixed_amount_per_trade_is_the_margin(tmp_path):
     assert abs(b["units"] * b["entry"] - 1000) < 1e-6
 
 
+def test_the_position_shows_its_leverage_margin_and_why_it_is_less(tmp_path):
+    from aitrader.web.app import _lev_cell
+
+    tr = _run(tmp_path, [(103, 103.5, 102.8, 103.2), (103, 104, 102, 103)])  # stop too wide for 20x
+    [pos] = tr.state["open"].values()
+    assert pos["lev_setting"] == 20 and pos["lev_why"] == "stop too wide for 20x"
+    cell = _lev_cell(pos, "buy")
+    assert f"{pos['leverage']:g}x" in cell and "setting 20x; stop too wide for 20x" in cell and "margin" in cell
+    ok = _run(tmp_path / "ok", [(100, 100.5, 99.9, 100.2), (100.2, 100.6, 100, 100.4)], lev=5.0, amount=10)
+    [o] = ok.state["open"].values()
+    cell = _lev_cell(o, "buy")
+    assert o["leverage"] == 5 and "lev_why" not in o
+    assert "<b>5x</b>" in cell and "margin 10.00 · size 50.00 USDT" in cell and "setting" not in cell
+
+
 def test_safe_leverage():
     # a 5% stop on a short (the APT/USDT 4h signal): 20x would put liquidation inside it
     assert not futures.short_stop_ok(0.8566, 0.899665, 20)

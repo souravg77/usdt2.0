@@ -9,6 +9,11 @@
     for (var i = 0; i < boxes.length; i++) {
       var e = boxes[i];
       if (e === document.activeElement) return true;
+      if (e.tagName === "SELECT") {  // a select has no defaultValue: compare with its selected option
+        var opt = e.querySelector("option[selected]");
+        if (opt && e.value !== opt.value) return true;
+        continue;
+      }
       if (e.type !== "checkbox" && e.type !== "radio" && e.value && e.value !== e.defaultValue) return true;
     }
     return false;

@@ -1195,6 +1195,21 @@ def _close_button(key: str, csrf: str, asked: dict) -> str:
             '<button class="warn-btn mini">Close</button></form>')
 
 
+def _lev_cell(p: dict, side) -> str:
+    """A perpetual position's leverage, margin and size, and why it uses less than the setting."""
+    if not (p.get("perp") or side == "sell"):
+        return "<td>-</td>"
+    lev = p.get("leverage")
+    if not p.get("filled") or not lev or not p.get("units") or not p.get("entry"):
+        return '<td><span class="small muted">set when it fills</span></td>'
+    size = float(p["units"]) * float(p["entry"])
+    why = p.get("lev_why")
+    less = (f'<br><span class="small muted">setting {p.get("lev_setting", lev):g}x; {_e(why)}</span>'
+            if why else "")
+    return (f'<td><b>{lev:g}x</b><br><span class="small">margin {size / lev:,.2f} · size {size:,.2f} USDT</span>'
+            f"{less}</td>")
+
+
 def _liq_cell(p: dict, side) -> str:
     """A perpetual position's rough liquidation price and how far the price is from it."""
     from ..trade import futures
@@ -1259,7 +1274,7 @@ def _positions_table(paper: dict, execs: dict, csrf: str = "", asked: dict | Non
         rows.append(f"<tr><td>paper{_close_button(key, csrf, asked or {})}</td><td>{_e(sym)}{_short(sig.get('side'), p.get('perp'))} <span class=muted>{_e(ex)} {_e(tf)}</span></td>"
                     f"{_usdt_cell(usdt, pos_id=pid)}"
                     f"{_price_cells(pid, p.get('mark') if p.get('filled') else None, sig.get('stop', 0), sig.get('side'), _num(sig.get('target')), sig.get('trailing'))}"
-                    f"{_liq_cell(p, sig.get('side')) if futures_view else ''}"
+                    f"{_lev_cell(p, sig.get('side')) + _liq_cell(p, sig.get('side')) if futures_view else ''}"
                     f"<td>{'' if mark is None else f'{mark:+.2f}R'}</td>"
                     f"<td>{_e(entry_id)}</td><td>{p.get('entry', sig.get('entry', 0)):.6g}"
                     f"{'' if p.get('filled') else ' <span class=muted>(waiting)</span>'}</td>"
@@ -1273,15 +1288,15 @@ def _positions_table(paper: dict, execs: dict, csrf: str = "", asked: dict | Non
             pid = mode + "|" + str(p.get("key", ""))
             rows.append(f"<tr><td>{_e(mode)}</td><td>{_e(p['symbol'])} <span class=muted>{_e(p.get('amount', 0))}</span></td>"
                         f'{_usdt_cell(usdt, pos_id=pid)}{_price_cells(pid, p.get("mark"), p["stop"], p.get("side"), _num(p.get("target")))}'
-                        f'{"<td>-</td>" if futures_view else ""}<td class="{cls}">{_e(p.get("status"))}</td>'
+                        f'{"<td>-</td><td>-</td>" if futures_view else ""}<td class="{cls}">{_e(p.get("status"))}</td>'
                         f"<td>{_e(p['entry_id'])}</td><td>{p.get('entry') or 0:.6g}</td>"
                         f'<td>{_prob(p.get("ai_prob"))}</td>{_why_cell({}, why(p["entry_id"]) if why else "")}</tr>')
     if not rows:
         return "<p class=muted>No open positions.</p>"
     foot = (f'<tr><td colspan="2"><b>Total now</b> <span class="muted" id="pos-live">at the last closed candle</span></td>'
-            f'{_usdt_cell(total if counted else None, bold=True, pos_id="total")}<td colspan="{9 if futures_view else 8}"></td></tr>')
+            f'{_usdt_cell(total if counted else None, bold=True, pos_id="total")}<td colspan="{10 if futures_view else 8}"></td></tr>')
     return ("<table><tr><th>Where</th><th>Market</th><th>Now USDT</th><th>Price now</th><th>Stop loss</th><th>Take profit</th>"
-            + ("<th>Liquidation</th>" if futures_view else "") +
+            + ("<th>Leverage</th><th>Liquidation</th>" if futures_view else "") +
             "<th>R (last candle)</th><th>Strategy</th><th>Entry</th>"
             f"<th>AI p</th><th>Why (indicators)</th></tr>{''.join(rows)}{foot}</table>")
 
