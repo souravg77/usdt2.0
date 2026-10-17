@@ -230,3 +230,30 @@ def test_replay_still_shows_the_strategies_when_a_pick_kept_none(client):
     picks.save(path, {"1h": {"at": 2, "picked": ["other"], "results": []}})
     r = c.get("/api/replay?symbol=BTC/USDT&tf=1h&month=2025-03&months=1").json()
     assert r["picked"] and not r["none_kept"] and r["strategies"] == []  # a pick that kept others: only those
+
+
+def test_replay_offers_win_only_and_three_years(client, monkeypatch):
+    """Shawn: Length up to 3 years, and a Strategy choice that replays only the kept winners."""
+    import aitrader.web.replay_pages as rp
+
+    c, runner = client
+    up = Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR))
+    win = Entry(id="win1h-up", kind="rule", name="WIN 1h up_bar", spec=dict(validate_spec(EVERY_UP_BAR), pick="1h"))
+    monkeypatch.setattr(rp, "known_entries", lambda *a, **k: [up, win])
+    c.post("/login", data={"user": "admin", "password": PW})
+    page = c.get("/replay?tf=4h").text
+    assert '<option value="36">3 years</option>' in page and '<option value="win">WIN strategies only' in page
+    assert 'id="tf-pick" data-tf="4h"' in page  # the winners picker follows the chosen timeframe
+    r = c.get("/api/replay?symbol=BTC/USDT&tf=1h&month=2025-03&months=1&strategy=win").json()
+    assert r["win_only"] and [s["id"] for s in r["strategies"]] == ["win1h-up"]
+    r = c.get("/api/replay?symbol=BTC/USDT&tf=4h&month=2025-03&months=1&strategy=win").json()
+    assert r["win_only"] and r["strategies"] == []  # no 4h winners yet: none, not every strategy
+    r = c.get("/api/replay?symbol=BTC/USDT&tf=1h&month=2025-03&months=36").json()
+    assert not r["capped"] and r["end"] > START + 365 * 24 * HOUR  # 3 years of 1h fit
+    r = c.get("/api/replay?symbol=BTC/USDT&tf=5m&month=2025-03&months=36").json()
+    assert r["capped"] and r["end"] == START + rp.MAX_BARS * 300_000
+    csrf = Auth("admin", PW, "k").csrf(c.cookies.get(COOKIE))
+    c.post("/replay/download", data={"csrf": csrf, "symbol": "ETH/USDT", "tf": "5m", "month": "2025-03",
+                                     "months": "36"}, follow_redirects=False)
+    job = [j for j in runner.list() if j["meta"].get("kind") == "download"][0]
+    assert job["steps"][0][4] == "2025-06-02"  # only what Replay can show of 3 years of 5m
