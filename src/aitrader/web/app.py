@@ -683,7 +683,7 @@ paper trading. Nothing trades real money.</p>
                              week_close_pct: str = Form(""), min_rr: str = Form(""), trend: str = Form(""),
                              split_tp: str = Form(""), breakeven: str = Form(""), maker_entry: str = Form(""), max_long: str = Form(""),
                              max_short: str = Form(""), max_correlated: str = Form(""), corr_min: str = Form(""),
-                             trade_usdt: str = Form("")):
+                             trade_usdt: str = Form(""), agree: str = Form("")):
         """One engine's loss breakers, minimum reward, higher-timeframe trend check and split take-profit."""
         def act(user):
             from ..learn import guards
@@ -697,7 +697,7 @@ paper trading. Nothing trades real money.</p>
                     "split_tp": split_tp == "1", "breakeven": breakeven == "1", "maker_entry": maker_entry == "1",
                     "max_long": max_long,
                     "max_short": max_short, "max_correlated": max_correlated, "corr_min": corr_min,
-                    "trade_usdt": trade_usdt}, by=user)
+                    "trade_usdt": trade_usdt, "agree": agree}, by=user)
             except ValueError:
                 return "Not changed: enter numbers for the amount per trade, loss limits, hours and minimum reward.", False
             name = "Futures AI" if market == "futures" else "Spot AI"
@@ -1783,6 +1783,7 @@ def _guards_text(g: dict) -> str:
              ("split take-profit on, then breakeven stop" if g["breakeven"] else "split take-profit on") if g["split_tp"]
              else "one take-profit",
              "limit (maker) entries" if g["maker_entry"] else "market entries",
+             f"a trade only when {g['agree']:g} strategies agree" if g["agree"] > 1 else "every strategy trades alone",
              f"at most {g['max_long']:g} longs and {g['max_short']:g} shorts, {g['max_correlated']:g} that move "
              f"together (correlation {g['corr_min']:g}+)"]
     return ", ".join(parts)
@@ -1845,7 +1846,8 @@ def _guards_form(paths: Paths, csrf: str, ws: str) -> str:
             f'{box("breakeven", "Then stop to breakeven")} '
             f'{box("maker_entry", "Enter with limit orders (maker fee)")} '
             f'{num("max_long", "Max longs", "1")} {num("max_short", "Max shorts", "1")} '
-            f'{num("max_correlated", "Max moving together", "1")} {num("corr_min", "at correlation", "0.05")}'
+            f'{num("max_correlated", "Max moving together", "1")} {num("corr_min", "at correlation", "0.05")} '
+            f'{num("agree", "Strategies that must agree (1 off)", "1")}'
             '<button class="ghost">Set rules</button></form>'
             '<p class="small muted">Amount per trade: 0 sizes each trade from the strategy\'s risk (at most half '
             'the wallet). Any other amount (5 USDT or more) is what each new trade uses: the purchase amount on Spot, '
@@ -1863,7 +1865,10 @@ def _guards_form(paths: Paths, csrf: str, ws: str) -> str:
             'so the trade can no longer end in a loss, but it is stopped out more often on a pullback. Replay uses the '
             'minimum reward, the split take-profit and the breakeven stop too, so you can test them there first. Limit entries pay the maker fee (0.02% on '
             'perps instead of 0.055% plus slippage) but miss the trade when the entry candle never comes back to '
-            'the signal price; Replay shows both effects.</p>')
+            'the signal price; Replay shows both effects. Strategies that must agree: with 3, a coin is only traded '
+            'when 3 different strategies signal the same side on it at the same candle close, and then as one trade '
+            '(the one with the furthest target); 1 lets every strategy trade on its own. Real-money trades copy '
+            'these paper trades, so they follow it too.</p>')
 
 
 def _market_card(paths: Paths, paper: dict, csrf: str, ws: str = "spot") -> str:
