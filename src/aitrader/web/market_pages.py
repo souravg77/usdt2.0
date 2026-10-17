@@ -87,6 +87,19 @@ def add_market_routes(app, *, settings, page, guard, exchange: str = EXCHANGE, c
         symbol, tf = pick(symbol, tf)
         return JSONResponse({"symbol": symbol, "tf": tf, **await feed().candles(symbol, tf)})
 
+    @app.get("/api/market/history")
+    async def api_history(request: Request, symbol: str = "", tf: str = "15m", before: int = 0):
+        """Older candles for scrolling the chart back: up to 1000 that opened before ``before``
+        (Futures view: the perpetual's)."""
+        bad = api_guard(request)
+        if bad:
+            return bad
+        symbol, tf = pick(symbol, tf)
+        if before <= 0:
+            return JSONResponse({"error": "before is required"}, status_code=400)
+        return JSONResponse({"symbol": symbol, "tf": tf,
+                             **await feed().history(symbol, tf, int(before), TF_MS.get(tf, 900_000))})
+
     @app.get("/api/market/studies")
     async def api_studies(request: Request, symbol: str = "", tf: str = "15m"):
         """Indicators for the same candles /api/market/candles returns, plus the paper trader's
@@ -164,10 +177,11 @@ def add_market_routes(app, *, settings, page, guard, exchange: str = EXCHANGE, c
             f'<div id="ohlc" class="ohlc small"></div>'
             f'<div id="legend" class="legend js-only"></div>'
             f'<canvas id="chart" class="js-only" aria-label="live price chart"></canvas>'
+            f'{_chart_nav()}'
             f'<noscript>{_fallback(symbol, tf, bars)}</noscript></div>'
             '<p class="muted small">Prices and candles come from Bybit\'s public market data '
             '(no key needed) and refresh every 1.5 seconds while this page is open. Times are India time (IST) unless AITRADER_TZ says otherwise. '
-            'Hover or touch the chart to read a candle and its indicators. Indicators use the same '
+            'Hover or touch the chart to read a candle and its indicators. Drag or swipe it sideways to go back in time (older candles load as you go), pinch or scroll to zoom, and press Latest to jump back to now. Indicators use the same '
             'formulas as the strategies. Fibonacci levels and the volume profile cover the last 100 candles; '
             'candle pattern letters: E engulfing, H hammer, D doji, I inside bar. Triangles are the paper trader\'s entries (up: buy, down: '
             'short), dots its exits (green: profit, red: loss); an open trade shows its entry, stop '
@@ -212,6 +226,20 @@ STUDIES = [
 
 # always shown, whatever the strategies use
 ALWAYS_ON = {"trades", "vol"}
+
+
+def _chart_nav() -> str:
+    """Buttons to move the chart: back, zoom out, zoom in, forward, and back to the newest candle."""
+    def btn(act, label, path):
+        return (f'<button type="button" class="ghost chart-btn" data-chart="{act}" aria-label="{label}" title="{label}">'
+                f'<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+                f'stroke-linecap="round" aria-hidden="true"><path d="{path}"/></svg></button>')
+    return ('<div class="chart-nav js-only">'
+            + btn("back", "Older candles", "M15 5l-7 7 7 7")
+            + btn("out", "Zoom out", "M5 12h14")
+            + btn("in", "Zoom in", "M5 12h14M12 5v14")
+            + btn("fwd", "Newer candles", "M9 5l7 7-7 7")
+            + '<button type="button" id="chart-latest" class="chart-btn" data-chart="latest" hidden>Latest</button></div>')
 
 
 def _strategy_indicators(registry_path: str, market: str | None = None) -> dict[str, int]:

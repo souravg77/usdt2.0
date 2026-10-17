@@ -7,7 +7,9 @@
   var root = document.getElementById("market");
   if (!root) return;
   var state = { symbol: root.dataset.symbol, tf: root.dataset.tf, candles: [], hover: null,
-                last: null, lastOk: 0, busy: false, busySince: 0, source: "", studies: null, polls: 0 };
+                last: null, lastOk: 0, busy: false, busySince: 0, source: "", studies: null, polls: 0,
+                // scrolling back: bars hidden on the right, bar width (zoom), older candles loaded
+                offset: 0, barW: 0, older: [], olderDone: false, olderBusy: false };
   var POLL_MS = 1500, STUDY_EVERY = 2;  // indicators refresh every 2nd poll (3 seconds)
   var CS = window.ChartStudies, PANEL_H = CS.PANEL_H;
   var canvas = document.getElementById("chart");
@@ -92,7 +94,16 @@
       wantStudies ? get("/api/market/studies" + q).catch(function () { return null; }) : null
     ]).then(function (res) {
       if (sym === state.symbol && tf === state.tf) {
-        state.candles = res[0].candles || [];
+        var latest = res[0].candles || [], prev = state.candles;
+        var prevLast = prev.length ? prev[prev.length - 1][0] : null;
+        var first = latest.length ? latest[0][0] : null;
+        var older = state.older.filter(function (b) { return first === null || b[0] < first; });
+        var merged = older.concat(latest);
+        // scrolled back: a new candle on the right must not move what is being looked at
+        if (state.offset > 0 && prevLast !== null) {
+          state.offset += latest.filter(function (b) { return b[0] > prevLast; }).length;
+        }
+        state.candles = merged;
         state.source = res[0].source;
         state.note = res[0].note || "";
         if (res[1]) state.studies = res[1];
@@ -181,11 +192,51 @@
     state.candles.slice(-300).forEach(function (b) { widest = Math.max(widest, b[2]); });
     var axisW = Math.max(56, Math.ceil(ctx.measureText(fmt(widest || 1)).width) + 14), axisH = 22;
     var pn = panels(), plotW = w - axisW, priceH = h - axisH - pn.length * PANEL_H;
-    var barW = w < 500 ? 6 : 8;
+    var barW = state.barW || (w < 500 ? 6 : 8);
     var n = Math.max(10, Math.floor(plotW / barW));
-    var bars = state.candles.slice(-n);
+    var total = state.candles.length;
+    state.offset = Math.max(0, Math.min(state.offset, Math.max(0, total - 10)));
+    var end = total - state.offset, start = Math.max(0, end - n);
+    var bars = state.candles.slice(start, end);
+    if (start === 0 && total) loadOlder();  // at the oldest loaded candle: fetch the history before it
     return { w: w, h: h, axisW: axisW, axisH: axisH, plotW: plotW, priceH: priceH, panels: pn,
-             bars: bars, step: plotW / Math.max(bars.length, 1) };
+             bars: bars, step: plotW / Math.max(bars.length < n && state.offset ? n : bars.length, 1) };
+  }
+
+  // ---- scrolling back through the pair's whole history ----------------------------------------
+
+  function loadOlder() {
+    if (state.olderBusy || state.olderDone || !state.candles.length) return;
+    var sym = state.symbol, tf = state.tf, before = state.candles[0][0];
+    state.olderBusy = true;
+    get("/api/market/history?symbol=" + encodeURIComponent(sym) + "&tf=" + encodeURIComponent(tf) + "&before=" + before)
+      .then(function (res) {
+        if (sym !== state.symbol || tf !== state.tf) return;
+        var rows = (res.candles || []).filter(function (b) { return b[0] < before; });
+        if (!rows.length) { state.olderDone = true; return; }  // the pair's first candle is on screen
+        state.older = rows.concat(state.older);
+        state.candles = rows.concat(state.candles);
+        draw();
+      })
+      .catch(function () {})
+      .then(function () { setTimeout(function () { state.olderBusy = false; }, 800); });
+  }
+
+  function pan(bars) {
+    state.offset = Math.max(0, state.offset + bars);
+    updateLive();
+    draw();
+  }
+
+  function zoom(factor) {
+    var base = state.barW || (canvas.clientWidth < 500 ? 6 : 8);
+    state.barW = Math.max(2, Math.min(32, base * factor));
+    draw();
+  }
+
+  function updateLive() {
+    var btn = document.getElementById("chart-latest");
+    if (btn) btn.hidden = state.offset === 0;
   }
 
   function niceStep(span, count) {
@@ -316,7 +367,7 @@
     ctx.restore();
 
     // last price line and label
-    var last = bars[n - 1], ly = Math.round(y(last[4])) + 0.5;
+    var last = state.candles[state.candles.length - 1], ly = Math.round(y(last[4])) + 0.5;
     var lastUp = last[4] >= last[1];
     ctx.setLineDash([4, 4]); ctx.strokeStyle = lastUp ? up : down;
     ctx.beginPath(); ctx.moveTo(0, ly); ctx.lineTo(L.plotW, ly); ctx.stroke(); ctx.setLineDash([]);
@@ -363,6 +414,8 @@
     if (symbol) state.symbol = symbol;
     if (tf) state.tf = tf;
     state.candles = []; state.hover = null; state.studies = null; state.polls = 0;
+    state.offset = 0; state.older = []; state.olderDone = false; state.olderBusy = false;
+    updateLive();
     titleEl.textContent = state.symbol;
     document.querySelectorAll(".seg[data-tf]").forEach(function (b) {
       b.classList.toggle("active", b.dataset.tf === state.tf);
@@ -384,12 +437,63 @@
   document.querySelectorAll(".seg[data-tf]").forEach(function (b) {
     b.addEventListener("click", function () { select(null, b.dataset.tf); });
   });
-  canvas.addEventListener("mousemove", pointer);
-  // a phone sends a mouseleave right after each tap: keep the tapped candle's values on screen
-  var touchedAt = 0;
-  canvas.addEventListener("touchstart", function (ev) { touchedAt = Date.now(); pointer(ev); }, { passive: true });
-  canvas.addEventListener("touchmove", pointer, { passive: true });
+  // drag (mouse) or swipe (finger) sideways to scroll back in time; a tap or hover shows a candle;
+  // the wheel, pinch or the + / - buttons zoom; "Latest" jumps back to now
+  var drag = null, touchedAt = 0, pinch = null;
+  function stepPx() { return layout().step || 8; }
+  canvas.addEventListener("mousedown", function (ev) {
+    ev.preventDefault();  // no text selection while dragging
+    drag = { x: ev.clientX, off: state.offset, moved: false };
+    canvas.classList.add("dragging");
+  });
+  window.addEventListener("mouseup", function () { drag = null; canvas.classList.remove("dragging"); });
+  canvas.addEventListener("mousemove", function (ev) {
+    if (drag) {
+      var dx = ev.clientX - drag.x;
+      if (Math.abs(dx) > 3) drag.moved = true;
+      state.offset = Math.max(0, drag.off + Math.round(dx / stepPx())); updateLive(); draw();
+      return;
+    }
+    pointer(ev);
+  });
+  canvas.addEventListener("touchstart", function (ev) {
+    touchedAt = Date.now();
+    if (ev.touches.length === 2) {
+      pinch = { d: Math.abs(ev.touches[0].clientX - ev.touches[1].clientX) || 1,
+                w: state.barW || (canvas.clientWidth < 500 ? 6 : 8) };
+      drag = null;
+      return;
+    }
+    drag = { x: ev.touches[0].clientX, y: ev.touches[0].clientY, off: state.offset, moved: false };
+    pointer(ev);
+  }, { passive: true });
+  canvas.addEventListener("touchmove", function (ev) {
+    if (pinch && ev.touches.length === 2) {
+      var d = Math.abs(ev.touches[0].clientX - ev.touches[1].clientX) || 1;
+      state.barW = Math.max(2, Math.min(32, pinch.w * d / pinch.d)); draw();
+      return;
+    }
+    if (!drag) return;
+    var dx = ev.touches[0].clientX - drag.x;
+    if (Math.abs(dx) > 6) drag.moved = true;
+    if (drag.moved) { state.offset = Math.max(0, drag.off + Math.round(dx / stepPx())); updateLive(); draw(); }
+  }, { passive: true });
+  canvas.addEventListener("touchend", function () { drag = null; pinch = null; }, { passive: true });
+  canvas.addEventListener("wheel", function (ev) {
+    ev.preventDefault();
+    if (Math.abs(ev.deltaX) > Math.abs(ev.deltaY)) pan(Math.round(-ev.deltaX / stepPx()));  // trackpad sideways
+    else zoom(ev.deltaY < 0 ? 1.15 : 1 / 1.15);
+  }, { passive: false });
   canvas.addEventListener("mouseleave", function () { if (Date.now() - touchedAt < 1500) return; state.hover = null; draw(); });
+  document.querySelectorAll("[data-chart]").forEach(function (b) {
+    b.addEventListener("click", function () {
+      var a = b.dataset.chart;
+      if (a === "in") zoom(1.25); else if (a === "out") zoom(0.8);
+      else if (a === "back") pan(Math.round(layout().bars.length / 2));
+      else if (a === "fwd") pan(-Math.round(layout().bars.length / 2));
+      else { state.offset = 0; updateLive(); draw(); }
+    });
+  });
   window.addEventListener("resize", resize);
   function wake() { state.busy = false; poll(); }  // back from sleep or another tab: poll at once
   document.addEventListener("visibilitychange", function () { if (!document.hidden) wake(); });
