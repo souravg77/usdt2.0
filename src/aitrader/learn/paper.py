@@ -93,8 +93,12 @@ class PaperTrader:
     def __init__(self, store: CandleStore, registry_path: str, exchanges: list[str],
                  symbols: list[str], cfg: PaperConfig | None = None,
                  state_path: str = DEFAULT_STATE, calendar=None, ai_filter=None, control=None,
-                 context=None, events=None, news=None, teacher=None, market_symbols=None):
+                 context=None, events=None, news=None, teacher=None, market_symbols=None,
+                 futures_store: CandleStore | None = None):
         self.store, self.registry_path = store, registry_path
+        # Futures AI reads only USDT perpetual candles (``data.perp``), from their own database;
+        # without one (tests) both engines read ``store``
+        self.futures_store = futures_store or store
         # ``symbols`` may be a function returning the list (the pair ranking, read each tick)
         self.exchanges, self.symbols = exchanges, symbols
         # ``market_symbols(market)``: the pairs Spot AI or Futures AI may open on (each adds its own
@@ -181,104 +185,106 @@ class PaperTrader:
                     for tf in [t for t in strat.spec.timeframes if any(t in tfs[m] for m in wallet.MARKETS)]:
                         on = {m: live[m] and tf in tfs[m] for m in wallet.MARKETS}
                         key = f"{entry.id}|{ex}|{sym}|{tf}"
-                        # a long takes the plain key on Spot and key|futures on Futures; a short
-                        # (Futures only) takes the plain key
-                        slots = ([key] if on["spot"] else []) + ([key, key + FUTURES_SUFFIX] if on["futures"] else [])
-                        if not allow or all(k in self.state["open"] for k in slots):
-                            continue
-                        market = (ex, sym, tf)
-                        if market not in frames:
-                            df = self._frame(ex, sym, tf, now_ms - WINDOW_BARS * TIMEFRAME_MS[tf], now_ms)
-                            close = int(df["ts"].iloc[-1]) + TIMEFRAME_MS[tf] if df is not None and len(df) else None
-                            frames[market] = (df, close, close is not None and self._seen.get(market) != close)
-                        df, newest_close, fresh = frames[market]
-                        # signals only appear when a candle closes: skip markets with no new candle
-                        if not fresh or df is None or len(df) < MIN_BARS:
-                            continue
-                        checks += 1
-                        try:
-                            sdf = with_context(strat, df, self.store, ex, sym, tf)
-                            sigs = [s for s in strat.generate(sdf, ex, sym, tf) if s.ts == newest_close]
-                        except Exception:  # one strategy failing on one market must not stop the rest
-                            log.exception("%s failed on %s %s %s; skipping it this candle", entry.id, ex, sym, tf)
-                            continue
-                        if not sigs or sigs[-1].ts <= self.state["last_signal"].get(key, 0):
-                            continue
-                        sig = sigs[-1]
-                        self.state["last_signal"][key] = sig.ts
-                        late = now_ms - newest_close
-                        if late > max_data_age(tf):  # the candle arrived late: its prices are old now
-                            if market not in self._seen:
-                                # the first look at this market since the trader started (a restart or
-                                # update) or since the pair joined the list: a candle that closed hours
-                                # ago is history, not a missed trade, so it isn't listed as one
+                        for mkt in [m for m in wallet.MARKETS if on[m]]:
+                            # a long takes the plain key on Spot and key|futures on Futures; a short
+                            # (Futures only) takes the plain key
+                            slots = [key] if mkt == "spot" else [key, key + FUTURES_SUFFIX]
+                            if not allow or all(k in self.state["open"] for k in slots):
                                 continue
-                            self._log_signal(key, sig, "stale prices",
-                                             f"the candle closed {late / 60_000:.0f} min ago")
-                            events["filtered"].append(key)
-                            continue
-                        legs = self._legs(key, sig, sym, on, events)
-                        if not legs:
-                            continue
-                        ctx_mult = self._context(ex, sym, now_ms, sig.side.value)
-                        if ctx_mult <= 0:
-                            for k, _perp in legs:
-                                self._log_signal(k, sig, "market context or news filter")
-                                events["filtered"].append(k)
-                            continue
-                        # each engine uses the AI filter and the teacher only if it is set to
-                        ai_legs = [lg for lg in legs if uses["futures" if lg[1] else "spot"]["ai"]]
-                        ai = self._ai_check(sig, entry.id, df) if ai_legs else _NO_AI
-                        if not ai["take"]:
-                            self._note_filtered(key, sig, ai)
-                            for k, _perp in ai_legs:
-                                self._log_signal(k, sig, "AI filter")
-                                events["filtered"].append(k)
-                            legs = [lg for lg in legs if lg not in ai_legs]
-                        tch_legs = [lg for lg in legs if uses["futures" if lg[1] else "spot"]["teacher"]]
-                        tch = self._teacher_check(sig, entry.id, df) if tch_legs else _no_teacher(sig)
-                        if not tch["take"]:
-                            for k, _perp in tch_legs:
-                                self._log_signal(k, sig, "backtest teacher")
-                                events["filtered"].append(k)
-                            log.info("paper signal %s skipped: the backtest teacher %s says avoid %s",
-                                     key, tch["version"], tch["situation"])
-                            legs = [lg for lg in legs if lg not in tch_legs]
-                        if not legs:
-                            continue
-                        if market not in regimes:
-                            regimes[market] = _regime(df, tf)
-                        for k, perp in legs:
-                            leg_mkt = "futures" if perp else "spot"
-                            leg_ai = ai if (k, perp) in ai_legs else _NO_AI
-                            leg_tch = tch if (k, perp) in tch_legs else _no_teacher(sig)
-                            leg_sig = leg_tch["signal"]
-                            min_rr = self._guards[leg_mkt]["min_rr"]
-                            if leg_sig is not sig and too_little_reward(leg_sig, self._bcfg(perp, min_rr=min_rr)):
-                                # the teacher's shorter target must clear the minimum reward too
-                                self._log_signal(k, leg_sig, "reward too small",
-                                                 f"the teacher's target is {leg_sig.r_multiple_target:.2f}R away, "
-                                                 f"minimum {min_rr:g}R")
-                                events["filtered"].append(k)
+                            market = (mkt, ex, sym, tf)  # each engine its own candles: spot or perpetual
+                            if market not in frames:
+                                df = self._frame(ex, sym, tf, now_ms - WINDOW_BARS * TIMEFRAME_MS[tf], now_ms, mkt)
+                                close = int(df["ts"].iloc[-1]) + TIMEFRAME_MS[tf] if df is not None and len(df) else None
+                                frames[market] = (df, close, close is not None and self._seen.get(market) != close)
+                            df, newest_close, fresh = frames[market]
+                            # signals only appear when a candle closes: skip markets with no new candle
+                            if not fresh or df is None or len(df) < MIN_BARS:
                                 continue
-                            self.state["open"][k] = {"entry_id": entry.id, "signal": _sig_dict(leg_sig),
-                                                     "situation": leg_tch["situation"], "teacher": leg_tch["version"],
-                                                     "size_mult": size_mult * ctx_mult * leg_ai["size"],
-                                                     "filled": False,
-                                                     "ai_prob": leg_ai["prob"], "ai_version": leg_ai["version"],
-                                                     "regime": regimes[market], "perp": perp,
-                                                     "split_tp": self._guards[leg_mkt]["split_tp"],
-                                                     "maker_entry": self._guards[leg_mkt]["maker_entry"]}
-                            events["opened"].append(k)
-                            self._log_signal(k, leg_sig, "")
-                            log.info("paper signal %s entry~%.6g stop %.6g ai p=%s size x%.2f regime %s", k,
-                                     leg_sig.entry, leg_sig.stop, leg_ai["prob"], leg_ai["size"],
-                                     (regimes[market] or {}).get("label"))
+                            checks += 1
+                            try:
+                                sdf = with_context(strat, df, self.store, ex, sym, tf)
+                                sigs = [s for s in strat.generate(sdf, ex, sym, tf) if s.ts == newest_close]
+                            except Exception:  # one strategy failing on one market must not stop the rest
+                                log.exception("%s failed on %s %s %s; skipping it this candle", entry.id, ex, sym, tf)
+                                continue
+                            seen_key = key if mkt == "spot" else key + FUTURES_SUFFIX
+                            if not sigs or sigs[-1].ts <= self.state["last_signal"].get(seen_key, 0):
+                                continue
+                            sig = sigs[-1]
+                            self.state["last_signal"][seen_key] = sig.ts
+                            late = now_ms - newest_close
+                            if late > max_data_age(tf):  # the candle arrived late: its prices are old now
+                                if market not in self._seen:
+                                    # the first look at this market since the trader started (a restart or
+                                    # update) or since the pair joined the list: a candle that closed hours
+                                    # ago is history, not a missed trade, so it isn't listed as one
+                                    continue
+                                self._log_signal(key, sig, "stale prices",
+                                                 f"the candle closed {late / 60_000:.0f} min ago")
+                                events["filtered"].append(key)
+                                continue
+                            legs = self._legs(key, sig, sym, {m: m == mkt for m in wallet.MARKETS}, events)
+                            if not legs:
+                                continue
+                            ctx_mult = self._context(ex, sym, now_ms, sig.side.value)
+                            if ctx_mult <= 0:
+                                for k, _perp in legs:
+                                    self._log_signal(k, sig, "market context or news filter")
+                                    events["filtered"].append(k)
+                                continue
+                            # each engine uses the AI filter and the teacher only if it is set to
+                            ai_legs = [lg for lg in legs if uses["futures" if lg[1] else "spot"]["ai"]]
+                            ai = self._ai_check(sig, entry.id, df) if ai_legs else _NO_AI
+                            if not ai["take"]:
+                                self._note_filtered(key, sig, ai)
+                                for k, _perp in ai_legs:
+                                    self._log_signal(k, sig, "AI filter")
+                                    events["filtered"].append(k)
+                                legs = [lg for lg in legs if lg not in ai_legs]
+                            tch_legs = [lg for lg in legs if uses["futures" if lg[1] else "spot"]["teacher"]]
+                            tch = self._teacher_check(sig, entry.id, df) if tch_legs else _no_teacher(sig)
+                            if not tch["take"]:
+                                for k, _perp in tch_legs:
+                                    self._log_signal(k, sig, "backtest teacher")
+                                    events["filtered"].append(k)
+                                log.info("paper signal %s skipped: the backtest teacher %s says avoid %s",
+                                         key, tch["version"], tch["situation"])
+                                legs = [lg for lg in legs if lg not in tch_legs]
+                            if not legs:
+                                continue
+                            if market not in regimes:
+                                regimes[market] = _regime(df, tf)
+                            for k, perp in legs:
+                                leg_mkt = "futures" if perp else "spot"
+                                leg_ai = ai if (k, perp) in ai_legs else _NO_AI
+                                leg_tch = tch if (k, perp) in tch_legs else _no_teacher(sig)
+                                leg_sig = leg_tch["signal"]
+                                min_rr = self._guards[leg_mkt]["min_rr"]
+                                if leg_sig is not sig and too_little_reward(leg_sig, self._bcfg(perp, min_rr=min_rr)):
+                                    # the teacher's shorter target must clear the minimum reward too
+                                    self._log_signal(k, leg_sig, "reward too small",
+                                                     f"the teacher's target is {leg_sig.r_multiple_target:.2f}R away, "
+                                                     f"minimum {min_rr:g}R")
+                                    events["filtered"].append(k)
+                                    continue
+                                self.state["open"][k] = {"entry_id": entry.id, "signal": _sig_dict(leg_sig),
+                                                         "situation": leg_tch["situation"], "teacher": leg_tch["version"],
+                                                         "size_mult": size_mult * ctx_mult * leg_ai["size"],
+                                                         "filled": False,
+                                                         "ai_prob": leg_ai["prob"], "ai_version": leg_ai["version"],
+                                                         "regime": regimes[market], "perp": perp,
+                                                         "split_tp": self._guards[leg_mkt]["split_tp"],
+                                                         "maker_entry": self._guards[leg_mkt]["maker_entry"]}
+                                events["opened"].append(k)
+                                self._log_signal(k, leg_sig, "")
+                                log.info("paper signal %s entry~%.6g stop %.6g ai p=%s size x%.2f regime %s", k,
+                                         leg_sig.entry, leg_sig.stop, leg_ai["prob"], leg_ai["size"],
+                                         (regimes[market] or {}).get("label"))
         for market, (_df, close, _fresh) in frames.items():
             self._seen[market] = close
         newest = max((c for _d, c, _f in frames.values() if c), default=None)
         self.state["last_pass"] = {"at": now_ms, "strategies": built, "broken": broken, "pairs": len(symbols),
-                                   "markets": len(frames), "new_candles": sum(1 for *_x, f in frames.values() if f),
+                                   "markets": len({m[1:] for m in frames}), "new_candles": sum(1 for *_x, f in frames.values() if f),
                                    "checks": checks, "newest_candle": newest}
         if checks:
             log.info("paper pass: %d strategies checked %d new candles (%d markets), %d opened, %d skipped",
@@ -328,9 +334,11 @@ class PaperTrader:
             log.exception("can't read the pair list; skipping new entries this tick")
             return []
 
-    def _frame(self, ex, sym, tf, start, now_ms):
+    def _frame(self, ex, sym, tf, start, now_ms, market: str = "spot"):
+        """Closed candles of ``sym``: spot ones for Spot AI, the perpetual's for Futures AI."""
         step = TIMEFRAME_MS[tf]
-        candles = [c for c in self.store.load(ex, sym, tf, start) if c.ts + step <= now_ms]
+        db = self.futures_store if market == "futures" else self.store
+        candles = [c for c in db.load(ex, sym, tf, start) if c.ts + step <= now_ms]
         return candles_to_frame(candles) if candles else None
 
     def _context(self, exchange: str, symbol: str, now_ms: int, side: str = "buy") -> float:
@@ -436,7 +444,7 @@ class PaperTrader:
                 continue
             if g["trend"]:
                 ex, _sym, tf = key.split("|")[1:4]
-                bad = guards.against(sig.side is Side.SELL, self._higher_trends(ex, sym, tf))
+                bad = guards.against(sig.side is Side.SELL, self._higher_trends(ex, sym, tf, mkt))
                 if bad:
                     self._log_signal(k, sig, "against the higher-timeframe trend",
                                      f"the {bad} trend points {'up' if sig.side is Side.SELL else 'down'}")
@@ -466,34 +474,34 @@ class PaperTrader:
         others = {k.split("|")[2] for k, _o in mine} - {sym}
         if len(others) < int(g["max_correlated"]):
             return ""
-        mine_r = self._hourly_returns(ex, sym)
+        mine_r = self._hourly_returns(ex, sym, mkt)
         if mine_r is None:
             return ""
-        close = [o for o in sorted(others) if (r := self._hourly_returns(ex, o)) is not None
+        close = [o for o in sorted(others) if (r := self._hourly_returns(ex, o, mkt)) is not None
                  and guards.correlation(mine_r, r) >= g["corr_min"]]
         if len(close) >= int(g["max_correlated"]):
             return (f"{name} already holds {len(close)} {side} positions that move with {sym} "
                     f"(correlation {g['corr_min']:g} or more over the last week: {', '.join(close[:5])})")
         return ""
 
-    def _hourly_returns(self, ex: str, sym: str):
+    def _hourly_returns(self, ex: str, sym: str, market: str = "spot"):
         """Hourly returns of the last week, indexed by time (read once per pass), or None."""
-        if (ex, sym) not in self._returns:
+        if (market, ex, sym) not in self._returns:
             now = self._now or int(time.time() * 1000)
-            df = self._frame(ex, sym, "1h", now - (guards.CORR_BARS + 1) * TIMEFRAME_MS["1h"], now)
-            self._returns[(ex, sym)] = (None if df is None or len(df) < 48 else
-                                        df.set_index("ts")["close"].pct_change().dropna())
-        return self._returns[(ex, sym)]
+            df = self._frame(ex, sym, "1h", now - (guards.CORR_BARS + 1) * TIMEFRAME_MS["1h"], now, market)
+            self._returns[(market, ex, sym)] = (None if df is None or len(df) < 48 else
+                                                df.set_index("ts")["close"].pct_change().dropna())
+        return self._returns[(market, ex, sym)]
 
-    def _higher_trends(self, ex: str, sym: str, tf: str) -> dict:
+    def _higher_trends(self, ex: str, sym: str, tf: str, market: str = "spot") -> dict:
         """{higher timeframe: "up" / "down" / "flat"} for a signal on ``tf`` (read once per pass)."""
         out = {}
         now = self._now or int(time.time() * 1000)
         for htf in guards.HIGHER.get(tf, ()):
-            if (ex, sym, htf) not in self._trends:
-                df = self._frame(ex, sym, htf, now - guards.TREND_BARS * TIMEFRAME_MS[htf], now)
-                self._trends[(ex, sym, htf)] = guards.trend_of(df)
-            out[htf] = self._trends[(ex, sym, htf)]
+            if (market, ex, sym, htf) not in self._trends:
+                df = self._frame(ex, sym, htf, now - guards.TREND_BARS * TIMEFRAME_MS[htf], now, market)
+                self._trends[(market, ex, sym, htf)] = guards.trend_of(df)
+            out[htf] = self._trends[(market, ex, sym, htf)]
         return out
 
     def _lev(self, symbol: str = "") -> float:
@@ -583,7 +591,7 @@ class PaperTrader:
                 continue
             sig = _sig_from(pos["signal"])
             step = TIMEFRAME_MS[tf]
-            df = self._frame(ex, sym, tf, sig.ts - WINDOW_BARS * step, now_ms)
+            df = self._frame(ex, sym, tf, sig.ts - WINDOW_BARS * step, now_ms, pos_mkt)
             if df is None:
                 left += closing
                 continue

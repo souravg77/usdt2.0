@@ -47,7 +47,9 @@ def add_market_routes(app, *, settings, page, guard, exchange: str = EXCHANGE, c
         if not futures_mode():
             return live
         if not perp_live:
-            perp_live.append(LiveMarket(settings.db_path, exchange, perp=True))
+            from ..data.perp import futures_db_path
+
+            perp_live.append(LiveMarket(futures_db_path(settings.db_path), exchange, perp=True))
         return perp_live[0]
     memo: dict[tuple, tuple[tuple, dict]] = {}  # (symbol, tf) -> (candle fingerprint, studies)
     tfs = CHART_TIMEFRAMES
@@ -135,7 +137,9 @@ def add_market_routes(app, *, settings, page, guard, exchange: str = EXCHANGE, c
         now = int((clock or time.time)() * 1000)
         rows, bars = [], []
         try:
-            db = CandleStore(settings.db_path)
+            from ..data.perp import db_for
+
+            db = CandleStore(db_for(settings.db_path, "futures" if futures_mode() else "spot"))
             try:
                 hot = _hot(futures_mode())
                 mine = set(held())

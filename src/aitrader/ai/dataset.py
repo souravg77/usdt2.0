@@ -128,7 +128,8 @@ def add_history(frame: pd.DataFrame) -> pd.DataFrame:
 
 def build_dataset(store, strategies: list[tuple[str, Strategy]], exchanges: list[str],
                   symbols: list[str], cfg: BacktestConfig | None = None,
-                  include_final: bool = False, paper_state: str | None = None) -> pd.DataFrame:
+                  include_final: bool = False, paper_state: str | None = None,
+                  futures_store=None) -> pd.DataFrame:
     """Backtest every (strategy id, strategy) on every stored market and return the rows.
 
     One market's candles are in memory at a time: each is loaded, every strategy that trades its
@@ -162,7 +163,7 @@ def build_dataset(store, strategies: list[tuple[str, Strategy]], exchanges: list
                 if rows:
                     chunks.append(_compact(pd.DataFrame(rows)))
     if paper_state:
-        rows = paper_rows(store, paper_state, cfg)
+        rows = paper_rows(store, paper_state, cfg, futures_store)
         if rows:
             chunks.append(_compact(pd.DataFrame(rows)))
     return finish(chunks)
@@ -192,8 +193,9 @@ def finish(rows) -> pd.DataFrame:
     return frame[INFO + ALL]
 
 
-def paper_rows(store, state_path: str, cfg: BacktestConfig | None = None) -> list[dict]:
-    """Rows for the closed trades in a ``learn paper`` state file."""
+def paper_rows(store, state_path: str, cfg: BacktestConfig | None = None, futures_store=None) -> list[dict]:
+    """Rows for the closed trades in a ``learn paper`` state file. Futures AI's trades are read on
+    the perpetuals' candles (``futures_store``), Spot AI's on spot ones."""
     if not os.path.exists(state_path):
         return []
     with open(state_path, encoding="utf-8") as fh:
@@ -202,7 +204,8 @@ def paper_rows(store, state_path: str, cfg: BacktestConfig | None = None) -> lis
     for t in trades:
         sid, ex, sym, tf = t["key"].split("|")[:4]
         step = TIMEFRAME_MS[tf]
-        candles = store.load(ex, sym, tf, t["signal_ts"] - PAPER_WARMUP * step,
+        db = futures_store if futures_store is not None and t.get("market") == "futures" else store
+        candles = db.load(ex, sym, tf, t["signal_ts"] - PAPER_WARMUP * step,
                              t["exit_ts"] + LABEL_HORIZON * step)
         if not candles:
             continue

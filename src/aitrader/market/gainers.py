@@ -1,7 +1,7 @@
 """Top gainers: two scanners, one per trading workspace.
 
-- **Futures** (``DEFAULT_PATH``): Bybit USDT linear perpetuals that are open for trading and also
-  listed on spot (where the candles come from). Futures AI trades them.
+- **Futures** (``DEFAULT_PATH``): Bybit USDT linear perpetuals that are open for trading, with
+  or without a spot listing: Futures AI reads only perpetual data (``data.perp``) and trades them.
 - **Spot** (``SPOT_PATH``): Bybit USDT spot pairs. Spot AI trades them.
 
 Each scanner has its own switch on the Pairs page, its own count and its own window (1h, 4h or 24h).
@@ -119,7 +119,6 @@ def pick(markets: dict, tickers: dict, top: int = DEFAULT_TOP, min_turnover: flo
          market: str = "futures", max_spread: float = MAX_SPREAD_PCT) -> list[dict]:
     """The ``top`` biggest 24h risers that pass the filters, before scoring. ``markets`` and
     ``tickers`` are ccxt's ``load_markets`` / ``fetch_tickers`` results for that market."""
-    spot = {m["symbol"] for m in markets.values() if m.get("spot") and m.get("active", True)}
     rows = []
     for sym, m in markets.items():
         if market == "spot":
@@ -130,7 +129,7 @@ def pick(markets: dict, tickers: dict, top: int = DEFAULT_TOP, min_turnover: flo
             continue
         base = m.get("base") or ""
         pair = f"{base}/USDT"
-        if is_stablecoin(base) or is_leveraged_token(base) or (market != "spot" and pair not in spot):
+        if is_stablecoin(base) or is_leveraged_token(base):
             continue
         t = tickers.get(sym) or {}
         change, turnover = t.get("percentage"), t.get("quoteVolume")

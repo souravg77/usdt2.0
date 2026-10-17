@@ -65,7 +65,7 @@ class Paths:
 def create_app(settings: Settings, auth: Auth, jobs: JobRunner, paths: Paths | None = None,
                secure_cookie: bool = False, users=None, keys_secret: str = "", signup: bool = False,
                verifier=None, checkers: dict | None = None, live=None, account=None,
-               monitor: dict | None = None) -> FastAPI:
+               monitor: dict | None = None, perp_live=None) -> FastAPI:
     """``users`` (an ``accounts.UserStore``) turns on user accounts: sign-up when ``signup`` is
     true, each user's own page, and the admin's Users page. Without it only the admin can log in."""
     paths = paths or Paths()
@@ -186,6 +186,17 @@ data-tz-label="{_e(tz_label(now))}"{f' data-reload-ms="{int(refresh * 1000)}"' i
         from .live import LiveMarket
 
         live = LiveMarket(settings.db_path, EXCHANGE)
+    perp_feed: list = [perp_live] if perp_live is not None else []  # Futures AI's positions: perpetual prices
+
+    def feed_for(ws: str):
+        if ws != "futures":
+            return live
+        if not perp_feed:  # made on first use
+            from ..data.perp import futures_db_path
+            from .live import LiveMarket
+
+            perp_feed.append(LiveMarket(futures_db_path(settings.db_path), EXCHANGE, perp=True))
+        return perp_feed[0]
 
     @app.get("/api/positions")
     async def api_positions(request: Request):
@@ -200,7 +211,7 @@ data-tz-label="{_e(tz_label(now))}"{f' data-reload-ms="{int(refresh * 1000)}"' i
         symbols = sorted(set(_open_symbols(paper, execs)))
         if not symbols:
             return JSONResponse({"source": "", "rows": {}, "total": None})
-        prices = await live.tickers(symbols)
+        prices = await feed_for(ws).tickers(symbols)
         return JSONResponse(live_position_usdt(paper, execs, {t["symbol"]: t.get("price") for t in prices.get("tickers", [])},
                                                source=prices.get("source", "")))
 
