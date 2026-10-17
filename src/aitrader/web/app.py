@@ -727,6 +727,26 @@ paper trading. Nothing trades real money.</p>
             return f"Saved: {name} now uses {what}. Open trades keep their size."
         return _control_post(request, csrf, act)
 
+    @app.post("/trading/paper/timeframes")
+    async def trading_paper_timeframes(request: Request):
+        """The timeframes one engine opens new paper trades on (the ticked boxes; none ticked = all)."""
+        form = await request.form()
+        market = str(form.get("market", ""))
+        chosen = [str(t) for t in form.getlist("tf")]
+
+        def act(user):
+            from ..learn import guards
+
+            if market not in ("spot", "futures"):
+                return "Not changed: choose Spot AI or Futures AI.", False
+            g = guards.save(guards.path_for(paths.paper_state), market, {"timeframes": chosen or list(guards.TIMEFRAMES)}, by=user)
+            name = "Futures AI" if market == "futures" else "Spot AI"
+            what = ", ".join(g["timeframes"])
+            _event("paper_guards", f"{name} timeframes set by {user}: {what}")
+            return (f"Saved: {name} now opens trades only on {what} candles. Open trades on other timeframes "
+                    "still run to their exits.")
+        return _control_post(request, str(form.get("csrf", "")), act)
+
     @app.post("/trading/paper/leverage")
     def trading_paper_leverage(request: Request, csrf: str = Form(""), lev: str = Form("")):
         def act(user):
@@ -1786,6 +1806,20 @@ def _amount_form(paths: Paths, csrf: str, ws: str) -> str:
             f'<button>Save amount</button> <span class="small muted">{now}</span></form>')
 
 
+def _timeframes_form(paths: Paths, csrf: str, ws: str) -> str:
+    """Which candle timeframes this engine opens new trades on."""
+    from ..learn import guards
+
+    on = guards.load(guards.path_for(paths.paper_state))[ws]["timeframes"]
+    boxes = " ".join(f'<label class="small"><input type="checkbox" name="tf" value="{t}"'
+                     f'{" checked" if t in on else ""}> {t}</label>' for t in guards.TIMEFRAMES)
+    now = "every timeframe" if len(on) == len(guards.TIMEFRAMES) else "only " + ", ".join(on)
+    return (f'<form method="post" action="/trading/paper/timeframes" class="row">{csrf}'
+            f'<input type="hidden" name="market" value="{ws}">'
+            f'<span class="small">Trade on</span> {boxes} <button class="ghost">Set timeframes</button> '
+            f'<span class="small muted">now {now}</span></form>')
+
+
 def _guards_form(paths: Paths, csrf: str, ws: str) -> str:
     """The engine's extra rules: loss breakers, minimum reward, trend check, split take-profit."""
     from ..learn import guards
@@ -1883,6 +1917,7 @@ def _market_card(paths: Paths, paper: dict, csrf: str, ws: str = "spot") -> str:
            f'max="{wallet.MAX_OPEN_RANGE[1]}" value="{lim["max_open"]}" style="width:5em"></label>'
            '<button class="ghost">Set limits</button></form>')
     out += _amount_form(paths, csrf, ws)
+    out += _timeframes_form(paths, csrf, ws)
     out += _guards_form(paths, csrf, ws)
     if ws == "futures":
         choices = sorted(set(futures.PAPER_LEVERAGE_CHOICES) | {lev})
