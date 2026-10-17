@@ -38,6 +38,7 @@ class CcxtAdapter(ExchangeAdapter):
 
     ccxt_id: str = ""
     supports_testnet: bool = False
+    client_id_param: str = "clientOrderId"  # ccxt's unified name; exchanges may override
 
     def __init__(
         self,
@@ -106,14 +107,39 @@ class CcxtAdapter(ExchangeAdapter):
             return
         assert_live_allowed(self.settings)
 
-    async def place_order(self, symbol, side, amount, type=OrderType.MARKET, price=None, reason=""):
+    async def place_order(self, symbol, side, amount, type=OrderType.MARKET, price=None, reason="",
+                          client_id=None):
         self._check_order_allowed()
         await self.throttle.acquire()
-        log.info("ORDER %s %s %s %s @ %s reason=%s", self.name, side.value, amount, symbol, price, reason)
-        raw = await self.client.create_order(symbol, type.value, side.value, amount, price)
+        amount = await self._precise(symbol, amount)
+        log.info("ORDER %s %s %s %s @ %s id=%s reason=%s", self.name, side.value, amount, symbol,
+                 price, client_id, reason)
+        if client_id:
+            raw = await self.client.create_order(symbol, type.value, side.value, amount, price,
+                                                 {self.client_id_param: client_id})
+        else:
+            raw = await self.client.create_order(symbol, type.value, side.value, amount, price)
         order = self._to_order(raw, symbol)
         order.reason = reason
         return order
+
+    async def find_order(self, client_id, symbol):
+        await self.throttle.acquire()
+        try:
+            raw = await self.client.fetch_order(None, symbol, {self.client_id_param: client_id})
+        except Exception as exc:  # ccxt raises OrderNotFound (or similar) for unknown ids
+            if type(exc).__name__ in ("OrderNotFound", "InvalidOrder", "BadRequest"):
+                return None
+            raise
+        return self._to_order(raw, symbol) if raw else None
+
+    async def _precise(self, symbol: str, amount: float) -> float:
+        """Round the amount to the exchange's step size (needs market info, loaded once)."""
+        if not hasattr(self.client, "amount_to_precision"):
+            return amount
+        if not getattr(self.client, "markets", None):
+            await self.client.load_markets()
+        return float(self.client.amount_to_precision(symbol, amount))
 
     async def cancel_order(self, order_id, symbol):
         self._check_order_allowed()
@@ -167,6 +193,7 @@ class BinanceAdapter(CcxtAdapter):
     name = "binance"
     ccxt_id = "binance"
     supports_testnet = True
+    client_id_param = "newClientOrderId"
 
 
 class HtxAdapter(CcxtAdapter):

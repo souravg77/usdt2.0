@@ -1,7 +1,8 @@
 # Dashboard
 
-A small web app for the agent, behind a login. This is the start of the Phase 5 dashboard.
-It cannot place orders, unlock live trading, or move a strategy to a new status by hand.
+A small web app for the agent, behind a login (the Phase 5 dashboard). It cannot open a trade,
+approve going live, unlock live trading, or move a strategy to a new status by hand. The only
+order it can cause is the kill switch selling what the executors bought.
 
 ## What it does
 
@@ -18,6 +19,13 @@ It cannot place orders, unlock live trading, or move a strategy to a new status 
   its status, out-of-sample backtest result, paper result and last status change; click one to
   see its rules, sources and history. It also shows the AI trade filter (active model and
   candidates waiting for approval), paper-trading totals, and recent jobs.
+
+- **Trading.** Pause, resume and the kill switch (type `KILL` to confirm). Open positions from
+  paper, testnet and live, with the AI filter's probability; the paper P&L curve and the
+  executors' equity curves; the last 40 closed trades with their result in R, USDT and the paper
+  twin's R; the event feed (trades, errors, disconnects, pauses); and the go/no-go gate with a
+  "Check the gate now" button. The page refreshes every minute. See
+  [live-trading.md](live-trading.md).
 
 Uploaded books are saved in `data/books/` under a generated name and are never committed.
 
