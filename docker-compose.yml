@@ -1,141 +1,136 @@
+# aitrader services. Start the core with `docker compose up -d`; optional services have a
+# profile (`docker compose --profile <name> up -d <service>`). See docs/install-ubuntu.md.
+#
+# Every app container runs as the unprivileged user `trader`, with a read-only filesystem
+# (only ./data and /tmp are writable), no Linux capabilities, no privilege escalation and a
+# memory limit. Only the `caddy` HTTPS proxy is reachable from the internet.
+
+x-app: &app
+  build:
+    context: .
+    args:
+      UID: ${AITRADER_UID:-1000}  # the server user's uid (id -u), so it can write ./data too
+  image: aitrader:latest
+  env_file: .env
+  environment:
+    AITRADER_DB_PATH: /app/data/aitrader.db
+  volumes:
+    - ./data:/app/data
+  restart: unless-stopped
+  read_only: true
+  tmpfs:
+    - /tmp:size=256m
+    - /home/trader:size=64m,uid=${AITRADER_UID:-1000},gid=${AITRADER_UID:-1000}
+  security_opt:
+    - no-new-privileges:true
+  cap_drop: [ALL]
+  mem_limit: 1g
+  pids_limit: 256
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "5" }
+
 services:
+  # Keeps candles up to date in the database. Public market data, no keys needed.
   collector:
-    build: .
-    image: aitrader:latest
+    <<: *app
     command: ["collect", "--interval", "60", "--backfill-days", "30"]
-    env_file: .env
-    environment:
-      AITRADER_DB_PATH: /app/data/aitrader.db
-    volumes:
-      - ./data:/app/data
-    restart: unless-stopped
-    logging:
-      driver: json-file
-      options: { max-size: "10m", max-file: "5" }
-
-  # Paper-trades every strategy that passed `aitrader learn test`, using the collector's candles.
-  # Applies the AI trade filter once you have promoted a model (`aitrader ai promote`).
-  # Never sends exchange orders.
-  paper:
-    build: .
-    image: aitrader:latest
-    depends_on: [collector]
-    command: ["learn", "paper", "--interval", "60"]
-    env_file: .env
-    environment:
-      AITRADER_DB_PATH: /app/data/aitrader.db
-    volumes:
-      - ./data:/app/data
-    restart: unless-stopped
-    logging:
-      driver: json-file
-      options: { max-size: "10m", max-file: "5" }
-
-  # Dashboard: submit books, see strategies and results. Needs AITRADER_WEB_PASSWORD in .env.
-  # Published on the server's localhost only; reach it through an SSH tunnel or an HTTPS proxy
-  # (docs/dashboard.md). It cannot place orders or unlock live trading.
-  web:
-    build: .
-    image: aitrader:latest
-    command: ["web", "--host", "0.0.0.0", "--port", "8080"]
-    env_file: .env
-    environment:
-      AITRADER_DB_PATH: /app/data/aitrader.db
-    ports:
-      - "127.0.0.1:8080:8080"
-    volumes:
-      - ./data:/app/data
-    restart: unless-stopped
-    logging:
-      driver: json-file
-      options: { max-size: "10m", max-file: "5" }
 
   # Market context (funding, open interest, total market cap) for the context filter and the AI
   # features. Public data, no keys needed.
   context:
-    build: .
-    image: aitrader:latest
+    <<: *app
     command: ["context", "collect", "--interval", "900"]
-    env_file: .env
+
+  # Paper-trades every strategy that passed `aitrader learn test`, with the calendar, market
+  # context and AI filters. Never sends exchange orders.
+  paper:
+    <<: *app
+    depends_on: [collector]
+    command: ["learn", "paper", "--interval", "60"]
+    mem_limit: 2g
+
+  # Dashboard. Published on the server's localhost only: reach it through the `caddy` HTTPS
+  # proxy (profile https) or an SSH tunnel. Needs AITRADER_WEB_PASSWORD in .env.
+  web:
+    <<: *app
+    command: ["web", "--host", "0.0.0.0", "--port", "8080"]
     environment:
       AITRADER_DB_PATH: /app/data/aitrader.db
+      # Only Caddy and the server itself can reach port 8080, and Caddy overwrites
+      # X-Forwarded-For, so the real client address can be trusted (login lockout per visitor).
+      AITRADER_WEB_TRUST_PROXY: "true"
+    ports:
+      - "127.0.0.1:8080:8080"
+    mem_limit: 2g  # book jobs (kb build, learn read) run inside this container
+
+  # HTTPS in front of the dashboard: on your local network by IP (own certificate), or on a
+  # domain (Let's Encrypt). Set AITRADER_SITE and AITRADER_TLS in .env (deploy/Caddyfile).
+  #   docker compose --profile https up -d caddy
+  caddy:
+    image: caddy:2.8.4-alpine
+    profiles: ["https"]
+    depends_on: [web]
+    environment:  # only these two; the app secrets in .env stay out of this container
+      AITRADER_SITE: ${AITRADER_SITE:-}
+      AITRADER_TLS: ${AITRADER_TLS:-internal}
+    ports:  # AITRADER_HTTPS_BIND: the address to listen on (default all; the installer sets the LAN IP)
+      - "${AITRADER_HTTPS_BIND:-0.0.0.0}:80:80"
+      - "${AITRADER_HTTPS_BIND:-0.0.0.0}:443:443"
+      - "${AITRADER_HTTPS_BIND:-0.0.0.0}:443:443/udp"
     volumes:
-      - ./data:/app/data
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
     restart: unless-stopped
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    mem_limit: 256m
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "5" }
 
   # Phase 5: mirrors the paper trades with real orders on the Binance Spot testnet (fake money).
-  # Needs BINANCE_TESTNET_API_KEY/SECRET. Start it with:
-  #   docker compose --profile testnet up -d executor-testnet
+  # Needs BINANCE_TESTNET_API_KEY/SECRET.   docker compose --profile testnet up -d executor-testnet
   executor-testnet:
-    build: .
-    image: aitrader:latest
+    <<: *app
     profiles: ["testnet"]
     depends_on: [paper]
     command: ["trade", "run", "--mode", "testnet", "--exchange", "binance"]
-    env_file: .env
     environment:
       AITRADER_DB_PATH: /app/data/aitrader.db
       AITRADER_MODE: testnet
-    volumes:
-      - ./data:/app/data
-    restart: unless-stopped
-    logging:
-      driver: json-file
-      options: { max-size: "10m", max-file: "5" }
 
-  # Phase 5: Telegram alerts and /status /pause /resume /kill. Needs TELEGRAM_BOT_TOKEN and
-  # TELEGRAM_CHAT_ID. Start it with: docker compose --profile telegram up -d telegram
+  # Telegram alerts and /status /pause /resume /kill. Needs TELEGRAM_BOT_TOKEN and
+  # TELEGRAM_CHAT_ID.   docker compose --profile telegram up -d telegram
   telegram:
-    build: .
-    image: aitrader:latest
+    <<: *app
     profiles: ["telegram"]
     command: ["telegram"]
-    env_file: .env
-    volumes:
-      - ./data:/app/data
-    restart: unless-stopped
-    logging:
-      driver: json-file
-      options: { max-size: "10m", max-file: "5" }
-
-  # Phase 6 live pilot: REAL MONEY. It refuses to send an order unless the go/no-go gate passed,
-  # you ran `golive approve`, AITRADER_PILOT_MAX_USDT is set and you opened the live lock in .env
-  # yourself. See docs/go-live.md before starting it:
-  #   docker compose --profile live up -d executor-live
-  executor-live:
-    build: .
-    image: aitrader:latest
-    profiles: ["live"]
-    depends_on: [paper]
-    command: ["trade", "run", "--mode", "live", "--exchange", "binance"]
-    env_file: .env
-    environment:
-      AITRADER_DB_PATH: /app/data/aitrader.db
-    volumes:
-      - ./data:/app/data
-    restart: "no"
-    logging:
-      driver: json-file
-      options: { max-size: "10m", max-file: "5" }
+    mem_limit: 512m
 
   # User accounts: trades for every approved user on their own exchange account (testnet unless
-  # you allowed live for them and the live lock is open). Needs AITRADER_KEYS_SECRET in .env.
-  # Start it with: docker compose --profile users up -d users
+  # live is on for them). Needs AITRADER_KEYS_SECRET.   docker compose --profile users up -d users
   users:
-    build: .
-    image: aitrader:latest
+    <<: *app
     profiles: ["users"]
     depends_on: [paper]
     command: ["users", "run"]
-    env_file: .env
-    environment:
-      AITRADER_DB_PATH: /app/data/aitrader.db
-    volumes:
-      - ./data:/app/data
-    restart: unless-stopped
-    logging:
-      driver: json-file
-      options: { max-size: "10m", max-file: "5" }
+
+  # Phase 6 live pilot: REAL MONEY. Refuses every order unless the go/no-go gate passed, you ran
+  # `golive approve`, AITRADER_PILOT_MAX_USDT is set and you opened the live lock in .env.
+  # See docs/live-trading.md.   docker compose --profile live up -d executor-live
+  executor-live:
+    <<: *app
+    profiles: ["live"]
+    depends_on: [paper]
+    command: ["trade", "run", "--mode", "live", "--exchange", "binance"]
+    restart: "no"
+
+volumes:
+  caddy_data:
+  caddy_config:

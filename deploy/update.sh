@@ -32,6 +32,9 @@ log() { printf '%s update: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 die() { log "$*"; exit 1; }
 
 mkdir -p data
+for d in data data/backups; do
+  [ ! -e "$d" ] || [ -w "$d" ] || die "can't write to $d as $(id -un): run sudo chown -R $(id -u):$(id -g) data and set AITRADER_UID=$(id -u) in .env"
+done
 exec 9>data/.update.lock
 flock -n 9 || die "another update is already running"
 
@@ -75,7 +78,7 @@ log "updating $(git rev-parse --short "$PREV") -> $(git rev-parse --short "$NEXT
 mkdir -p "$BACKUP"
 if ! docker compose run --rm -T collector backup "$BACKUP" >/dev/null 2>&1; then
   # older images have no `backup` command: copy the files instead
-  for f in data/aitrader.db data/learn/registry.json data/learn/paper_state.json data/ai/models/registry.json; do
+  for f in data/aitrader.db data/accounts.db data/learn/registry.json data/learn/paper_state.json data/ai/models/registry.json; do
     [ -f "$f" ] && cp -p "$f" "$BACKUP/$( [ "$f" = data/aitrader.db ] && echo aitrader.db || echo "${f//\//__}")"
   done
 fi

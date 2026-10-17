@@ -39,6 +39,7 @@ class CcxtAdapter(ExchangeAdapter):
     ccxt_id: str = ""
     supports_testnet: bool = False
     client_id_param: str = "clientOrderId"  # ccxt's unified name; exchanges may override
+    find_id_param: str = "clientOrderId"  # the name fetch_order reads to look an order up by it
 
     def __init__(
         self,
@@ -126,9 +127,11 @@ class CcxtAdapter(ExchangeAdapter):
     async def find_order(self, client_id, symbol):
         await self.throttle.acquire()
         try:
-            raw = await self.client.fetch_order(None, symbol, {self.client_id_param: client_id})
-        except Exception as exc:  # ccxt raises OrderNotFound (or similar) for unknown ids
-            if type(exc).__name__ in ("OrderNotFound", "InvalidOrder", "BadRequest"):
+            raw = await self.client.fetch_order(None, symbol, {self.find_id_param: client_id})
+        except Exception as exc:
+            # Only "no such order" means it never arrived. Anything else (a bad request, a network
+            # error) must not be read as "not placed": that would buy or sell twice.
+            if type(exc).__name__ == "OrderNotFound":
                 return None
             raise
         return self._to_order(raw, symbol) if raw else None
@@ -194,6 +197,7 @@ class BinanceAdapter(CcxtAdapter):
     ccxt_id = "binance"
     supports_testnet = True
     client_id_param = "newClientOrderId"
+    find_id_param = "origClientOrderId"
 
 
 class HtxAdapter(CcxtAdapter):

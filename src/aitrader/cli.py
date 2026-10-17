@@ -620,6 +620,7 @@ def cmd_migrate(s: Settings, _args) -> int:
 
 def cmd_backup(s: Settings, args) -> int:
     """Copy the database and the strategy/model registries into a folder."""
+    import glob
     import shutil
 
     os.makedirs(args.dest, exist_ok=True)
@@ -634,6 +635,8 @@ def cmd_backup(s: Settings, args) -> int:
         if os.path.exists(path):
             target = os.path.join(args.dest, path.replace("/", "__"))
             shutil.copy2(path, target)
+    for path in sorted(glob.glob("data/users/*/*.json")):  # each user's positions and switches
+        shutil.copy2(path, os.path.join(args.dest, path.replace("/", "__")))
     if os.path.exists(ACCOUNTS_DB):  # user accounts (keys inside stay encrypted)
         from .accounts import UserStore
 
@@ -668,7 +671,11 @@ def cmd_web(s: Settings, args) -> int:
     signup = e("AITRADER_WEB_SIGNUP", "closed").strip().lower() in ("open", "true", "1", "yes")
     app = create_app(s, auth, JobRunner(env_file=args.env_file), secure_cookie=secure,
                      users=UserStore(ACCOUNTS_DB), keys_secret=e("AITRADER_KEYS_SECRET", ""), signup=signup)
-    uvicorn.run(app, host=args.host, port=args.port, proxy_headers=False, server_header=False)
+    # Behind the caddy proxy the client address comes from X-Forwarded-For (Caddy overwrites it),
+    # so the login lockout and sign-up limits count each visitor, not the proxy.
+    trust = e("AITRADER_WEB_TRUST_PROXY", "false").strip().lower() in ("1", "true", "yes")
+    uvicorn.run(app, host=args.host, port=args.port, proxy_headers=trust,
+                forwarded_allow_ips="*" if trust else None, server_header=False)
     return 0
 
 
@@ -916,6 +923,15 @@ async def _users_run(s: Settings, store, args) -> int:
     return 0
 
 
+
+def cmd_doctor(s: Settings, args) -> int:
+    """Health check of this installation: settings, secrets, live lock, data, services, disk, backups."""
+    from .ops.doctor import report, run_checks
+
+    text, code = report(run_checks(s, env_file=args.env_file))
+    print(text)
+    return code
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="aitrader", description=__doc__)
     p.add_argument("--env-file", default=".env")
@@ -923,6 +939,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("status", help="show mode, live-gate state and which keys are set")
+    sub.add_parser("doctor", help="health check: settings, secrets, live lock, data, services, disk, backups")
 
     d = sub.add_parser("download", help="download historical candles into the database")
     d.add_argument("--since", required=True, help="UTC date, e.g. 2024-01-01")
@@ -1157,6 +1174,7 @@ def main(argv: list[str] | None = None) -> int:
         "telegram": cmd_telegram,
         "report": cmd_report,
         "users": cmd_users,
+        "doctor": cmd_doctor,
     }[args.cmd]
     result = handler(settings, args)
     if asyncio.iscoroutine(result):

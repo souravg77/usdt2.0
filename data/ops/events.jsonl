@@ -1,2 +1,0 @@
-{"ts": 1791754798480, "service": "users", "kind": "live_switch", "level": "warning", "text": "a@example.com: live trading OFF by a@example.com (switched off); selling live positions", "data": {"user_id": 1}}
-{"ts": 1791754813114, "service": "users", "kind": "live_switch", "level": "warning", "text": "a@example.com: live trading OFF by a@example.com (switched off); selling live positions", "data": {"user_id": 1}}

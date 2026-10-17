@@ -257,6 +257,7 @@ class Executor:
         row.update(self._twin(p, avg))
         self.state["closed"].append(row)
         del self.state["positions"][key]
+        self.state["skipped"][f"{key}|{p['signal_ts']}"] = "closed"  # never buy the same signal twice
         out["closed"].append(key)
         self.events.emit("trade_close", f"{self.mode} SELL {p['symbol']} @ {avg:g}: {pnl:+.2f} "
                          f"{self.quote} ({row['r']:+.2f}R, {p['exit_reason']})", key=key, mode=self.mode,

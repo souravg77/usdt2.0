@@ -204,6 +204,10 @@ def test_executor_exits_at_stop_from_live_price(ex):
     adapter.bid = 94.0
     out = run(e.tick())
     assert out["closed"] == [KEY] and e.state["closed"][0]["r"] < 0
+    # the ask is still above the stop and the paper twin is still open: never buy that signal again
+    assert not e.state["positions"] and len(adapter.sent) == 2
+    run(e.tick())
+    assert not e.state["positions"] and len(adapter.sent) == 2
 
 
 def test_executor_rejected_and_partial_fills(ex):
@@ -511,6 +515,9 @@ def test_ccxt_adapter_client_ids_and_lock(monkeypatch):
     class OrderNotFound(Exception):
         pass
 
+    class BadRequest(Exception):
+        pass
+
     class Client:
         markets = {"BTC/USDT": {}}
 
@@ -526,6 +533,9 @@ def test_ccxt_adapter_client_ids_and_lock(monkeypatch):
                     "status": "closed", "filled": args[3], "average": 100.0, "timestamp": 1}
 
         async def fetch_order(self, oid, symbol, params):
+            self.looked_up = params
+            if params.get("origClientOrderId") == "bad":
+                raise BadRequest()
             raise OrderNotFound()
 
     client = Client()
@@ -533,6 +543,9 @@ def test_ccxt_adapter_client_ids_and_lock(monkeypatch):
     run(ad.place_order("BTC/USDT", Side.BUY, 0.1234567, client_id="ait123"))
     assert client.calls[0][3] == pytest.approx(0.12346) and client.calls[0][5] == {"newClientOrderId": "ait123"}
     assert run(ad.find_order("ait123", "BTC/USDT")) is None
+    assert client.looked_up == {"origClientOrderId": "ait123"}  # the name Binance's lookup reads
+    with pytest.raises(BadRequest):  # an error is not "the order never arrived"
+        run(ad.find_order("bad", "BTC/USDT"))
     live = BinanceAdapter(Settings(), client=Client())  # paper mode, live lock closed
     with pytest.raises(Exception):
         run(live.place_order("BTC/USDT", Side.BUY, 1, client_id="x"))

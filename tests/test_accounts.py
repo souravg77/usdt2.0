@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from aitrader.accounts import AccountError, KeyRejected, UserStore, Vault, verify_keys
 from aitrader.accounts.runner import CombinedControl, UsersRunner, user_control
 from aitrader.config import LIVE_CONFIRM_PHRASE, Mode, Settings
+from aitrader.ops import EventLog
 from aitrader.trade import Control
 from aitrader.web import Auth, JobRunner, Paths, create_app
 from aitrader.web.auth import COOKIE
@@ -364,7 +365,7 @@ def test_switching_live_off_sells_live_positions(tmp_path):
     run(runner.tick())
     real = adapters["L" + "R" * 20]
     assert len(real.sent) == 1 and real.sent[0].filled * 100.1 <= 300 * 0.25 + 1e-6  # budget cap
-    turn_off(st, root, u.id, actor="a@example.com")
+    turn_off(st, root, u.id, actor="a@example.com", events=EventLog(str(tmp_path / "ev.jsonl")))
     assert st.get(u.id).mode == "testnet" and live_stop_control(root, u.id).killed
     run(runner.tick())  # the live executor keeps running only to sell
     assert len(real.sent) == 2 and real.sent[1].side.value == "sell"

@@ -1,5 +1,8 @@
 # Ubuntu VPS setup (Docker Compose)
 
+> **New install? Use [install-ubuntu.md](install-ubuntu.md)** instead: one script does all of
+> this plus HTTPS, the firewall and backups. This page is the manual reference.
+
 Tested target: the latest Ubuntu LTS server. We use **Docker Compose** rather than systemd units
 because it pins the Python version, restarts the service automatically, and keeps every later
 service (dashboard, database, alerts) in one file.
@@ -41,7 +44,8 @@ cd AI_crypto_trader
 cp .env.example .env
 chmod 600 .env
 nano .env            # leave AITRADER_MODE=paper and AITRADER_LIVE_UNLOCKED=false
-mkdir -p data && sudo chown 1000:1000 data   # container runs as uid 1000
+mkdir -p data
+echo "AITRADER_UID=$(id -u)" >> .env   # the containers run with your uid, so both can write data/
 ```
 
 ## 4. Build and check

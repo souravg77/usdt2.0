@@ -1,0 +1,22 @@
+# HTTPS proxy for the dashboard (docker compose service `caddy`, profile https).
+#
+# AITRADER_SITE is what you type in the browser:
+#   - local server, no domain:  https://192.168.1.50   (the server's LAN IP)  with AITRADER_TLS=internal
+#     Caddy makes its own certificate; the browser warns once until you trust it (see the guide).
+#   - with a domain:             trader.example.com    with AITRADER_TLS=you@example.com
+#     Let's Encrypt certificate, automatic; the domain's DNS must point at this server.
+{$AITRADER_SITE} {
+	tls {$AITRADER_TLS}
+	encode zstd gzip
+	request_body {
+		max_size 60MB
+	}
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		-Server
+	}
+	reverse_proxy web:8080 {
+		header_up X-Forwarded-For {remote_host}
+	}
+}
