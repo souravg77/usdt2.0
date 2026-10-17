@@ -17,7 +17,7 @@ from .lab import MIN_BARS
 from .registry import Entry, make_strategy
 
 WARMUP_BARS = 300
-MAX_BARS = 20_000
+MAX_BARS = 27_000  # 3 years of 1h candles
 
 
 def replay(entries: list[Entry], store: CandleStore, exchange: str, symbol: str, timeframe: str,
@@ -27,12 +27,13 @@ def replay(entries: list[Entry], store: CandleStore, exchange: str, symbol: str,
     that list that trade ``timeframe`` (so "the best 10" means 10 that can trade this chart).
     ``tf_picks`` (``learn.picks``): on a picked timeframe only the strategies kept for it trade."""
     step = TIMEFRAME_MS[timeframe]
+    capped = end_ms > start_ms + MAX_BARS * step  # a long period of short candles: the first MAX_BARS
     end_ms = min(end_ms, start_ms + MAX_BARS * step)
     rows = store.load(exchange, symbol, timeframe, start=start_ms - WARMUP_BARS * step, end=end_ms)
     shown = [c for c in rows if c.ts >= start_ms]
     out = {"symbol": symbol, "timeframe": timeframe, "start": start_ms, "end": end_ms,
            "candles": [[c.ts, c.open, c.high, c.low, c.close, c.volume] for c in shown],
-           "trades": [], "strategies": [], "skipped": [], "fee_skipped": 0,
+           "capped": capped, "max_bars": MAX_BARS, "trades": [], "strategies": [], "skipped": [], "fee_skipped": 0,
            "max_cost_r": (cfg or BacktestConfig()).max_cost_r, "min_rr": (cfg or BacktestConfig()).min_rr,
            "split_tp": (cfg or BacktestConfig()).split_tp, "maker_entry": (cfg or BacktestConfig()).maker_entry}
     if not shown:

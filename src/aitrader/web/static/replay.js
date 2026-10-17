@@ -62,6 +62,12 @@
     if (ev) ev.preventDefault();
     stop();
     var p = params();
+    var pick = document.getElementById("tf-pick");
+    if (pick && pick.dataset.tf && pick.dataset.tf !== p.get("tf")) {
+      // another timeframe: reload so "Keep only the winners" and its pick show that timeframe too
+      location.href = "/replay?" + p.toString();
+      return;
+    }
     history.replaceState(null, "", "/replay?" + p.toString());
     msgEl.textContent = "Running the strategies over that period…";
     usedEl.textContent = "";
@@ -95,7 +101,12 @@
         (d.min_rr ? " Only trades whose target is at least " + d.min_rr + "R away (the engine's minimum reward)." : "") +
         (d.split_tp ? " Half of each trade is taken halfway to its target (split take-profit)." : "") +
         (d.maker_entry ? " Entries are limit orders (maker fee); signals whose entry candle never came back to the price are missed." : "") +
-        (d.strategies.length ? "" : d.picked ? " The " + d.timeframe + " pick kept none of these strategies." :
+        (d.capped ? " That period has more than " + d.max_bars + " " + d.timeframe + " candles, so the first " +
+          d.max_bars + " are shown: pick a shorter length or a longer timeframe to see the rest." : "") +
+        (d.win_only ? (d.strategies.length ? " Only the WIN strategies kept for " + d.timeframe + " on this engine." :
+          " This engine has no WIN strategies for " + d.timeframe + " yet: press Keep only the winners with " +
+          d.timeframe + " first.") : "") +
+        (d.strategies.length || d.win_only ? "" : d.picked ? " The " + d.timeframe + " pick kept none of these strategies." :
           " No strategy uses this timeframe: try 1h or 4h.") +
         (d.picked ? " Only the strategies kept by the " + d.timeframe + " pick trade this timeframe." : "") +
         (d.none_kept ? " The " + d.timeframe + " pick kept none of them, so none trades " + d.timeframe +

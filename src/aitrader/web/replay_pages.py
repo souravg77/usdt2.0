@@ -32,7 +32,7 @@ from ..data.perp import db_for
 from ..data.store import CandleStore
 from ..learn import keep, picks
 from ..learn.registry import Registry
-from ..learn.replay import WARMUP_BARS, replay
+from ..learn.replay import MAX_BARS, WARMUP_BARS, replay
 from ..learn.report import known_entries
 from ..models import TIMEFRAME_MS
 from . import studies
@@ -44,6 +44,9 @@ PICK_ALL_ORDER = ["1d", "4h", "1h", "30m", "15m", "5m"]  # "every timeframe": th
 SPEEDS = [1, 2, 5, 10, 50, 200]
 CACHE_SIZE = 6
 TOPS = [10, 20, 30]
+MAX_MONTHS = 36  # Replay's longest period: 3 years
+LENGTHS = [("1", "1 month"), ("2", "2 months"), ("3", "3 months"), ("6", "6 months"), ("12", "1 year"),
+           ("24", "2 years"), ("36", "3 years")]
 PICK_YEARS = 2  # history a timeframe pick tests (learn.picks)
 
 
@@ -197,7 +200,9 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
             end_ms = int(_add_months(start, months).timestamp() * 1000)
             n = _top(strategy)
             on_tf = 0
-            if n:
+            if strategy == "win":  # only this engine's WIN strategies for this timeframe
+                only = [e.id for e in entries if picks.picked_for(e) == tf]
+            elif n:
                 only, on_tf = best_ids(entries, tf)
             else:
                 only = "" if strategy.startswith("top:") else strategy
@@ -210,6 +215,7 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
             res["picked"] = tf in tf_picks and not none_kept
             res["none_kept"] = none_kept
             res["top"] = n
+            res["win_only"] = strategy == "win"
             ranked = set(only[:on_tf]) if n else set()
             res["ranked_on_tf"] = sum(1 for s in res["strategies"] if s["id"] in ranked)
             res["studies"] = replay_studies(store, exchange, res)
@@ -242,7 +248,7 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
             return JSONResponse({"error": "pick a pair, a timeframe and a month"}, status_code=400)
         if start > datetime.now(timezone.utc):
             return JSONResponse({"error": "that month hasn't happened yet"}, status_code=400)
-        months = min(max(int(months or 1), 1), 3)
+        months = min(max(int(months or 1), 1), MAX_MONTHS)
         res = await asyncio.to_thread(compute, symbol, tf, start, months, strategy)
         return JSONResponse(res)
 
@@ -262,9 +268,11 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
         start = _month(month)
         if symbol not in pairs() or tf not in REPLAY_TIMEFRAMES or start is None:
             return RedirectResponse("/replay?error=" + _q("pick a pair, a timeframe and a month"), status_code=303)
-        months = min(max(int(months or 1), 1), 3)
+        months = min(max(int(months or 1), 1), MAX_MONTHS)
         since = (start - timedelta(milliseconds=WARMUP_BARS * TIMEFRAME_MS[tf])).strftime("%Y-%m-%d")
-        until = min(_add_months(start, months), datetime.now(timezone.utc)).strftime("%Y-%m-%d")
+        # no more than Replay can show (MAX_BARS candles): 3 years of 5m candles would be wasted
+        until = min(_add_months(start, months), datetime.now(timezone.utc),
+                    start + timedelta(milliseconds=MAX_BARS * TIMEFRAME_MS[tf])).strftime("%Y-%m-%d")
         job_id = jobs.submit(f"Download {symbol} {tf} for {month}",
                              [["download", "--since", since, "--until", until, "--market", ws(),
                                "--exchange", exchange, "--symbol", symbol, "--timeframe", tf]],
@@ -364,7 +372,7 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
         opts = "".join(f'<option value="{t}"{" selected" if t == tf else ""}>{t}</option>' for t in REPLAY_TIMEFRAMES)
         head = (f'{_e(tf)} pick on: {len(cur.get("picked", []))} strategies kept' if cur
                 else "Keep only the winners on one timeframe")
-        out = (f'<details class="card" id="tf-pick"><summary><b>{head}</b></summary>'
+        out = (f'<details class="card" id="tf-pick" data-tf="{_e(tf)}"><summary><b>{head}</b></summary>'
                '<p class="small muted">Tests every strategy that trades the chosen timeframe on '
                f'{PICK_YEARS:g} years of its prices for this workspace\'s pairs only (in the Futures view the Futures AI '
                'pairs, in the Spot view the Spot AI pairs), after fees. A strategy is kept when its '
@@ -414,14 +422,16 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
         tf = tf if tf in REPLAY_TIMEFRAMES else "1h"
         now = datetime.now(timezone.utc)
         month = month if _month(month) else f"{now.year - 1}-{now.month:02d}"
-        months = min(max(int(months or 1), 1), 3)
+        months = min(max(int(months or 1), 1), MAX_MONTHS)
 
         def options(items, current):
             return "".join(f'<option value="{_e(v)}"{" selected" if v == current else ""}>{_e(label)}</option>'
                            for v, label in items)
 
         tops = [(f"top:{n}", f"Top {n} strategies (best ranked)") for n in TOPS]
-        strat_opts = options([("", "All strategies (books and built-in)"), *tops, *ranked_strategies()], strategy)
+        strat_opts = options([("", "All strategies (books and built-in)"),
+                              ("win", "WIN strategies only (kept by Keep only the winners)"), *tops,
+                              *ranked_strategies()], strategy)
         speeds = "".join(f'<button type="button" class="seg{" active" if s == 1 else ""}" data-speed="{s}">{s}x</button>'
                          for s in SPEEDS)
         body = (f'<p class="good">{_e(msg)}</p>' if msg else "") + (f'<p class="bad">{_e(error)}</p>' if error else "")
@@ -436,7 +446,7 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
             f'<label>Timeframe <select name="tf">{options([(t, t) for t in REPLAY_TIMEFRAMES], tf)}</select></label>'
             f'<label>From month <input type="month" name="month" value="{_e(month)}" '
             f'max="{now.year}-{now.month:02d}"></label>'
-            f'<label>Length <select name="months">{options([("1", "1 month"), ("2", "2 months"), ("3", "3 months")], str(months))}'
+            f'<label>Length <select name="months">{options(LENGTHS, str(months))}'
             '</select></label>'
             f'<label class="wide">Strategy <select name="strategy">{strat_opts}</select></label>'
             '<button type="submit">Load</button></form>'
