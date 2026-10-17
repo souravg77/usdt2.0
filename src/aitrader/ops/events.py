@@ -21,7 +21,7 @@ import time
 DEFAULT_PATH = "data/ops/events.jsonl"
 MAX_BYTES = 20 * 1024 * 1024  # rotate to events.jsonl.1 past this
 ALERT_KINDS = {"trade_open", "trade_close", "error", "crash", "disconnect", "reconnect",
-               "risk_pause", "resume", "kill", "daily_summary", "weekly_report", "gate"}
+               "risk_pause", "resume", "kill", "daily_summary", "weekly_report", "gate", "live_switch"}
 
 
 class EventLog:

@@ -120,3 +120,22 @@ services:
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "5" }
+
+  # User accounts: trades for every approved user on their own exchange account (testnet unless
+  # you allowed live for them and the live lock is open). Needs AITRADER_KEYS_SECRET in .env.
+  # Start it with: docker compose --profile users up -d users
+  users:
+    build: .
+    image: aitrader:latest
+    profiles: ["users"]
+    depends_on: [paper]
+    command: ["users", "run"]
+    env_file: .env
+    environment:
+      AITRADER_DB_PATH: /app/data/aitrader.db
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }

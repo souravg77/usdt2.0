@@ -25,6 +25,7 @@ API keys are read from environment variables (a `.env` file), never from the rep
 - [x] **Phase 3: backtest lab**: next-open fills, fees, slippage, funding, stop-first ambiguity, R metrics, in/out/final splits, walk-forward, parameter sensitivity, results calendar ([docs/backtesting.md](docs/backtesting.md))
 - [x] **Phase 4: AI trade filter and model registry**: gradient boosting predicts whether each signal reaches 1R before its stop, skips weak signals and scales size by confidence within the risk cap. Chronological train/validation/test, used only if it beats the unfiltered rules out of sample, versioned registry with human promotion and instant rollback, monthly `ai retrain` ([docs/ai-filter.md](docs/ai-filter.md)). Needs real backtest data on the VPS to train; funding/open-interest features and the news LLM layer wait on their data feeds
 - [x] **Phase 5: paper/testnet loop, dashboard, Telegram alerts**: login-protected dashboard where you submit an e-book for the agent to read, turn into strategies and test, with a Trading page (positions, equity curve, trade log with AI probability, event feed, pause/resume/kill switch). Testnet executor that mirrors paper trades with idempotent orders, partial-fill and restart handling, and slippage measured against paper. Risk engine (0.5% per trade, hard cap 1%, daily/weekly loss caps, exposure limits). Telegram alerts, daily summary and `/status /pause /resume /kill`. Weekly paper-vs-backtest report ([docs/live-trading.md](docs/live-trading.md), [docs/dashboard.md](docs/dashboard.md))
+- [x] **User accounts**: sign-up with email and password (admin approves each account), each user connects their own Binance key (encrypted at rest; real-account keys with withdrawal, transfer, margin or futures rights are refused), and a `users` service trades for each account on its own balance, testnet by default ([docs/user-accounts.md](docs/user-accounts.md)). Check the legal side before inviting other people
 - [x] **Phase 6: go/no-go gate and live pilot**: `golive check` scores every roadmap criterion (100+ paper trades, positive expectancy in paper and out-of-sample backtest, drawdown, paper-vs-backtest gap, 14 days stable, key and kill-switch checks). Live orders need the gate, your `golive approve` for 1-2 strategies (tied to their rules and the AI model), a pilot budget and the live lock you open in `.env`. Live results are monitored against paper and trading pauses when they drift ([docs/live-trading.md](docs/live-trading.md)). The pilot itself starts only when you decide
 
 ## Layout
@@ -46,6 +47,7 @@ src/aitrader/
   ai/                Phase 4 trade filter: features, training set, model, registry
   trade/             Phases 5-6: risk engine, pause/kill, executor, go-live gate, reports
   ops/               event log, heartbeats, Telegram service
+  accounts/          user accounts, encrypted exchange keys, per-user trading
   web/               dashboard: login, book uploads, background jobs, overview
   data/
     store.py         SQLite candle store

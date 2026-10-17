@@ -87,7 +87,9 @@ class Executor:
                 await self._check_holdings()
             await self._reconcile_pending(out)
             if ctl["killed"]:
-                if not self.state["flattened"]:
+                # flatten once per kill: a new kill (new "since") flattens again
+                if not self.state["flattened"] or self.state.get("flattened_for") != ctl.get("since"):
+                    self._kill_since = ctl.get("since")
                     await self._flatten(out)
             else:
                 self.state["flattened"] = False
@@ -278,6 +280,7 @@ class Executor:
         left = [k for k, p in self.state["positions"].items() if p["status"] in ("open", "pending_exit")]
         if not left:
             self.state["flattened"] = True
+            self.state["flattened_for"] = getattr(self, "_kill_since", None)
             self.control.mark_flattened()
             self.events.emit("kill", f"{self.mode}: kill switch done, {len(targets)} position(s) sold",
                              level="warning")

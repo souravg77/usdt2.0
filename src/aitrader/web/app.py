@@ -47,10 +47,14 @@ class Paths:
     trade_dir: str = "data/trade"
     golive_dir: str = "data/golive"
     events: str = "data/ops/events.jsonl"
+    users_dir: str = "data/users"
 
 
 def create_app(settings: Settings, auth: Auth, jobs: JobRunner, paths: Paths | None = None,
-               secure_cookie: bool = False) -> FastAPI:
+               secure_cookie: bool = False, users=None, keys_secret: str = "", signup: bool = False,
+               verifier=None) -> FastAPI:
+    """``users`` (an ``accounts.UserStore``) turns on user accounts: sign-up when ``signup`` is
+    true, each user's own page, and the admin's Users page. Without it only the admin can log in."""
     paths = paths or Paths()
     app = FastAPI(title="aitrader dashboard", docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -70,16 +74,22 @@ def create_app(settings: Settings, auth: Auth, jobs: JobRunner, paths: Paths | N
         return auth.verify(token), token
 
     def guard(request: Request):
+        """Admin pages. A signed-in user account is sent to its own page instead."""
         user, token = session(request)
         if not user:
             return None, None, RedirectResponse("/login", status_code=303)
+        if not auth.is_admin(user):
+            return None, None, RedirectResponse("/me", status_code=303)
         return user, token, None
 
     def page(title: str, body: str, user: str | None = None, token: str | None = None,
-             refresh: int | None = None) -> HTMLResponse:
+             refresh: int | None = None, nav_links: str | None = None) -> HTMLResponse:
         nav = ""
         if user:
-            nav = (f'<nav><a href="/">Overview</a><a href="/trading">Trading</a><a href="/books">Submit a book</a>'
+            links = nav_links if nav_links is not None else (
+                '<a href="/">Overview</a><a href="/trading">Trading</a><a href="/books">Submit a book</a>'
+                + ('<a href="/admin/users">Users</a>' if users is not None else ""))
+            nav = (f'<nav>{links}'
                    f'<form method="post" action="/logout" class="inline">{_csrf(auth, token)}'
                    f'<button>Log out {_e(user)}</button></form></nav>')
         meta = f'<meta http-equiv="refresh" content="{refresh}">' if refresh else ""
@@ -96,27 +106,47 @@ def create_app(settings: Settings, auth: Auth, jobs: JobRunner, paths: Paths | N
         return PlainTextResponse("ok")
 
     @app.get("/login")
-    def login_form(error: str = ""):
-        msg = {"1": "Wrong user name or password.",
+    def login_form(error: str = "", msg: str = ""):
+        err = {"1": "Wrong email, user name or password.",
                "locked": "Too many wrong attempts. Try again in 15 minutes."}.get(error, "")
-        return page("Log in", f"""{f'<p class="bad">{_e(msg)}</p>' if msg else ''}
+        note = {"signed_up": "Account created. You can log in now; the admin approves new accounts "
+                             "before they can connect an exchange."}.get(msg, "")
+        who = "Email (or admin user name)" if users is not None else "User"
+        join = ('<p>New here? <a href="/signup">Create an account</a></p>'
+                if users is not None and signup else "")
+        return page("Log in", f"""{f'<p class="bad">{_e(err)}</p>' if err else ''}{f'<p class="good">{_e(note)}</p>' if note else ''}
 <form method="post" action="/login" class="card narrow">
-<label>User <input name="user" autocomplete="username" required></label>
+<label>{who} <input name="user" autocomplete="username" required></label>
 <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
-<button>Log in</button></form>""")
+<button>Log in</button></form>{join}""")
 
     @app.post("/login")
     def login(request: Request, user: str = Form(...), password: str = Form(...)):
         ip = request.client.host if request.client else "?"
         if auth.locked_out(ip):
             return RedirectResponse("/login?error=locked", status_code=303)
-        token = auth.login(ip, user, password)
+        token, dest = None, "/"
+        if "@" in user and users is not None:
+            account = users.authenticate(user, password)
+            if account is None:
+                auth.record_failure(ip)
+            else:
+                token, dest = auth.issue(ip, account.subject), "/me"
+        else:
+            token = auth.login(ip, user, password)
         if not token:
             return RedirectResponse("/login?error=1", status_code=303)
-        resp = RedirectResponse("/", status_code=303)
+        resp = RedirectResponse(dest, status_code=303)
         resp.set_cookie(COOKIE, token, max_age=int(auth.session_s), httponly=True,
                         samesite="strict", secure=secure_cookie)
         return resp
+
+    if users is not None:
+        from .user_pages import add_user_routes
+
+        add_user_routes(app, settings=settings, auth=auth, paths=paths, users=users,
+                        keys_secret=keys_secret, signup=signup, verifier=verifier, page=page,
+                        session=session, guard=guard)
 
     @app.post("/logout")
     def logout(request: Request, csrf: str = Form("")):
@@ -596,7 +626,7 @@ nav{display:flex;gap:14px;align-items:center;margin-left:auto;flex-wrap:wrap}a{c
 main{max-width:1100px;margin:0 auto;padding:16px}h1{font-size:1.4em}h2{font-size:1.15em;margin-top:28px}h3{margin:0 0 6px;font-size:1em}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:14px}.narrow{max-width:380px}
-label{display:block;margin:10px 0}label.row{display:flex;gap:8px;align-items:center}input[type=text],input[type=password],input:not([type]),input[type=number]{display:block;width:100%;max-width:360px;padding:7px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)}
+label{display:block;margin:10px 0}label.row{display:flex;gap:8px;align-items:center}input[type=text],input[type=password],input:not([type]),input[type=number],input[type=email],select{display:block;width:100%;max-width:360px;padding:7px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)}
 button{padding:7px 14px;border:1px solid var(--accent);background:var(--accent);color:#fff;border-radius:6px;cursor:pointer}
 form.inline{display:inline}form.inline button{background:none;color:var(--accent);border:none;padding:0}
 table{width:100%;border-collapse:collapse;display:block;overflow-x:auto}th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}
@@ -604,5 +634,6 @@ pre{background:var(--card);border:1px solid var(--line);padding:12px;border-radi
 .row{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0}button.ghost{background:none;color:var(--accent)}button.danger{background:var(--bad);border-color:var(--bad)}
 form.kill{margin-top:12px;border-top:1px solid var(--line);padding-top:8px}ul.gate{padding-left:0;list-style:none;margin:6px 0}
 .chart svg{width:100%;height:180px;display:block}
+.switch{font-size:1.1em}.switch.on b{color:var(--bad)}
 .good{color:var(--good)}.bad{color:var(--bad)}.muted{color:var(--muted)}.small{font-size:.85em}.pill{border:1px solid var(--line);border-radius:99px;padding:1px 8px;font-size:.85em}
 """

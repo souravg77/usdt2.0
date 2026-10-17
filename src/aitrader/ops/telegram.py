@@ -31,7 +31,7 @@ API = "https://api.telegram.org/bot{token}/{method}"
 MAX_PER_MINUTE = 18  # Telegram allows about 20 messages a minute to one chat
 ICON = {"trade_open": "🟢", "trade_close": "🔵", "error": "⚠️", "crash": "🛑", "disconnect": "📡",
         "reconnect": "✅", "risk_pause": "⏸", "resume": "▶️", "kill": "🛑", "daily_summary": "📊",
-        "weekly_report": "📈", "gate": "🚦"}
+        "weekly_report": "📈", "gate": "🚦", "live_switch": "💰"}
 
 
 class Telegram:
