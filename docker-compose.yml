@@ -35,6 +35,9 @@ services:
     <<: *app
     build:
       context: .
+      # download the libraries over the server's own network: on some VPSes Docker's bridge
+      # network stalls large downloads (files.pythonhosted.org "Read timed out")
+      network: host
       args:
         UID: ${AITRADER_UID:-1000}  # the server user's uid (id -u), so it can write ./data too
     pull_policy: missing  # build the image if it isn't there yet
