@@ -23,7 +23,7 @@ API keys are read from environment variables (a `.env` file), never from the rep
 - [x] **Knowledge base**: notes on blockchain, Bitcoin, money, the crypto ecosystem, risks and trading basics from the supplied books ([docs/knowledge](docs/knowledge/README.md)), plus `aitrader kb build` / `aitrader kb search` over your own copies of the PDFs
 - [x] **Learning from books**: `aitrader learn` has Claude read a book and write its strategies as checked rules, backtests them, paper-trades the ones that pass and retires the ones that stop working ([docs/learning.md](docs/learning.md)). 41 strategies from six strategy books plus Carli's CCI divergence are ready to test. Never trades real money
 - [x] **Phase 3: backtest lab**: next-open fills, fees, slippage, funding, stop-first ambiguity, R metrics, in/out/final splits, walk-forward, parameter sensitivity, results calendar ([docs/backtesting.md](docs/backtesting.md))
-- [ ] Phase 4: AI signal filter and model registry
+- [x] **Phase 4: AI trade filter and model registry**: gradient boosting predicts whether each signal reaches 1R before its stop, skips weak signals and scales size by confidence within the risk cap. Chronological train/validation/test, used only if it beats the unfiltered rules out of sample, versioned registry with human promotion and instant rollback, monthly `ai retrain` ([docs/ai-filter.md](docs/ai-filter.md)). Needs real backtest data on the VPS to train; funding/open-interest features and the news LLM layer wait on their data feeds
 - [ ] Phase 5: paper/testnet loop, dashboard, Telegram alerts
 - [ ] Phase 6: go/no-go gate and live pilot
 
@@ -43,6 +43,7 @@ src/aitrader/
   strategies/        rule cards + signal generators for the ebook strategies
   events/            economic-calendar no-trade windows
   backtest/          engine, metrics, walk-forward, sensitivity
+  ai/                Phase 4 trade filter: features, training set, model, registry
   data/
     store.py         SQLite candle store
     downloader.py    paginated, resumable history download
@@ -66,6 +67,7 @@ aitrader strategies
 aitrader signals --strategy trend_pullback --symbol BTC/USDT --timeframe 1h
 aitrader calendar
 aitrader backtest --strategy trend_pullback --symbol BTC/USDT --timeframe 1h
+aitrader ai retrain && aitrader ai list
 aitrader stream --exchange binance --symbol BTC/USDT --seconds 20
 ```
 

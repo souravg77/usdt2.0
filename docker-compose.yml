@@ -14,6 +14,7 @@ services:
       options: { max-size: "10m", max-file: "5" }
 
   # Paper-trades every strategy that passed `aitrader learn test`, using the collector's candles.
+  # Applies the AI trade filter once you have promoted a model (`aitrader ai promote`).
   # Never sends exchange orders.
   paper:
     build: .
