@@ -93,7 +93,36 @@ def test_the_position_shows_its_leverage_margin_and_why_it_is_less(tmp_path):
     [o] = ok.state["open"].values()
     cell = _lev_cell(o, "buy")
     assert o["leverage"] == 5 and "lev_why" not in o
-    assert "<b>5x</b>" in cell and "margin 10.00 · size 50.00 USDT" in cell and "setting" not in cell
+    assert "<b>5x</b>" in cell and "margin 10.00 × 5 = 50.00 USDT position" in cell and "setting" not in cell
+
+
+def test_small_coins_are_liquidated_sooner_so_their_leverage_is_cut_sooner(tmp_path):
+    # Bybit: maintenance margin = half the initial margin of the lowest tier (1 / the coin's maximum)
+    assert futures.maintenance_rate(100) == 0.005 and futures.maintenance_rate(25) == 0.02
+    assert futures.maintenance_rate(None) == futures.MAINTENANCE_MARGIN
+    assert futures.long_liquidation_price(100, 20, 0.02) == 100 * (1 - 0.05 + 0.02)
+    assert futures.safe_leverage(100, 98, False, 20, 0.02) < futures.safe_leverage(100, 98, False, 20)
+    import json
+
+    lp = tmp_path / "limits.json"
+    lp.write_text(json.dumps({"generated": 1, "max_leverage": {"BTC/USDT": 25}}))
+    tr = _run(tmp_path / "r", [(100, 100.5, 99.9, 100.2), (100.2, 100.6, 100, 100.4)], lev=20.0)
+    tr.perp_limits_path = str(lp)
+    assert tr._mmr("BTC/USDT") == 0.02 and tr._mmr("XRP/USDT") == 0.005
+    [pos] = tr.state["open"].values()
+    assert pos["mmr"] == 0.005  # the limits file of this run was not there yet: the BTC tier
+
+
+def test_automatic_size_caps_the_margin_not_the_position(tmp_path):
+    # a tight 0.2% stop: 1% risk of 1000 would be a 5,000 USDT position; at 20x its margin is 250,
+    # within half the wallet, so it opens at that size (at 1x it is cut to half the wallet)
+    bars = [(100, 100.5, 99.9, 100.2), (100.2, 100.6, 100.1, 100.4)]
+    lev = _run(tmp_path / "l", bars, stop=99.8, lev=20.0)
+    [p] = lev.state["open"].values()
+    assert p["leverage"] == 20 and abs(p["units"] - 1000 * 0.01 / 0.2) < 1e-6
+    one = _run(tmp_path / "o", bars, stop=99.8, lev=1.0)
+    [o] = one.state["open"].values()
+    assert abs(o["units"] * o["entry"] - 500) < 1e-6
 
 
 def test_safe_leverage():

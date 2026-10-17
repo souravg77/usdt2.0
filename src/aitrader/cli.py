@@ -97,7 +97,7 @@ async def cmd_collect(s: Settings, args) -> int:
         while True:
             since = int(time.time() * 1000) - args.backfill_days * 86_400_000
             # the ranked pairs when AITRADER_PAIRS=ranked, plus any with an open paper position
-            from .market import gainers
+            from .market import gainers, perp_limits
 
             for gm in gainers.MARKETS:  # each scanner switched on: its list, about once an hour
                 gpath = gainers.path_for(gm)
@@ -105,7 +105,7 @@ async def cmd_collect(s: Settings, args) -> int:
                     continue
                 client = gainers.client_for(gm)
                 try:
-                    await gainers.refresh(client, gpath, market=gm)
+                    await gainers.refresh(client, gpath, market=gm, limits_path=perp_limits.DEFAULT_PATH)
                     log.info("%s top gainers: %s", gm, ", ".join(gainers.symbols(gpath)) or "none")
                 except Exception as exc:
                     log.warning("%s top gainers refresh failed: %s", gm, exc)
@@ -123,7 +123,6 @@ async def cmd_collect(s: Settings, args) -> int:
                 finally:
                     await client.close()
             from .learn import wallet
-            from .market import perp_limits
 
             if wallet.engines(wallet.engines_path(PAPER_STATE))["futures"] and perp_limits.due():
                 client = gainers.perp_client()  # Futures AI on: each coin's maximum leverage, once a day
@@ -1446,7 +1445,7 @@ def cmd_pairs(s: Settings, args) -> int:
         print(f"ranking saved to {args.out}")
         return 0
     if args.pairs_cmd == "gainers":
-        from .market import gainers
+        from .market import gainers, perp_limits
 
         gm = args.market
         gpath = gainers.path_for(gm)
@@ -1459,7 +1458,8 @@ def cmd_pairs(s: Settings, args) -> int:
         async def fetch():
             client = gainers.client_for(gm, args.exchange)
             try:
-                return await gainers.refresh(client, gpath, top=args.count, market=gm, window=args.window)
+                return await gainers.refresh(client, gpath, top=args.count, market=gm, window=args.window,
+                                             limits_path=perp_limits.DEFAULT_PATH)
             finally:
                 await client.close()
 

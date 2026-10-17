@@ -1206,8 +1206,8 @@ def _lev_cell(p: dict, side) -> str:
     why = p.get("lev_why")
     less = (f'<br><span class="small muted">setting {p.get("lev_setting", lev):g}x; {_e(why)}</span>'
             if why else "")
-    return (f'<td><b>{lev:g}x</b><br><span class="small">margin {size / lev:,.2f} · size {size:,.2f} USDT</span>'
-            f"{less}</td>")
+    return (f'<td><b>{lev:g}x</b><br><span class="small">margin {size / lev:,.2f} × {lev:g} = '
+            f'{size:,.2f} USDT position</span>{less}</td>')
 
 
 def _liq_cell(p: dict, side) -> str:
@@ -1217,8 +1217,9 @@ def _liq_cell(p: dict, side) -> str:
     lev, entry = p.get("leverage"), p.get("entry")
     if not lev or not entry or not (p.get("perp") or side == "sell"):
         return "<td>-</td>"
-    liq = (futures.short_liquidation_price(entry, lev) if side == "sell"
-           else futures.long_liquidation_price(entry, lev))
+    mmr = p.get("mmr", futures.MAINTENANCE_MARGIN)
+    liq = (futures.short_liquidation_price(entry, lev, mmr) if side == "sell"
+           else futures.long_liquidation_price(entry, lev, mmr))
     if lev <= 1 and side != "sell":
         return '<td><span class="small muted">none at 1x</span></td>'
     mark = p.get("mark")
@@ -1742,6 +1743,10 @@ def _amount_form(paths: Paths, csrf: str, ws: str) -> str:
     amt = guards.load(guards.path_for(paths.paper_state))[ws]["trade_usdt"]
     lo, hi = guards.RANGES["trade_usdt"]
     now = f"now {amt:,.2f} USDT per trade" if amt else "now automatic"
+    if ws == "futures" and amt:  # the amount is the margin: the position is that times the leverage
+        on, lev = _futures_state(paths)
+        now = (f"now {amt:,.2f} USDT margin × {lev:g}x = {amt * lev:,.2f} USDT position per trade "
+               "(less when a wide stop needs lower leverage)")
     return (f'<form method="post" action="/trading/paper/amount" class="row">{csrf}'
             f'<input type="hidden" name="market" value="{ws}">'
             f'<label class="small">Amount per trade USDT (0 auto) <input name="trade_usdt" type="number" '

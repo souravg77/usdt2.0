@@ -378,6 +378,12 @@ def test_the_amount_per_trade_has_its_own_save_button(tmp_path, monkeypatch):
                 follow_redirects=False)
     assert guards.load(path)["futures"]["trade_usdt"] == 10 and guards.load(path)["futures"]["min_rr"] == 2
     assert "10.00 USDT per trade" in client.get("/trading").text
+    from aitrader.learn import wallet
+
+    wallet.set_market(wallet.market_path(paths.paper_state), True)
+    wallet.set_leverage(wallet.market_path(paths.paper_state), 20)
+    assert "now 10.00 USDT margin × 20x = 200.00 USDT position per trade" in client.get("/trading").text
+    wallet.set_market(wallet.market_path(paths.paper_state), False)
     r = client.post("/trading/paper/amount", data={"csrf": csrf, "market": "futures", "trade_usdt": "ten"},
                     follow_redirects=False)
     assert "bad=1" in r.headers["location"]

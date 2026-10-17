@@ -412,7 +412,7 @@ class PaperTrader:
                 self._log_signal(k, sig, "exposure cap", why)
                 events["filtered"].append(k)
                 continue
-            if perp and not futures.safe_leverage(sig.entry, sig.stop, short, self._lev(sym)):
+            if perp and not futures.safe_leverage(sig.entry, sig.stop, short, self._lev(sym), self._mmr(sym)):
                 # a stop too wide for the setting trades at lower leverage (at the fill); only one
                 # that even 1x can't hold before liquidation is skipped
                 self._log_signal(k, sig, "stop too close to liquidation", "even at 1x")
@@ -503,6 +503,10 @@ class PaperTrader:
         if not chosen:
             return futures.leverage()
         return futures.clamp_paper_leverage(chosen, perp_limits.max_leverage(symbol, self.perp_limits_path))
+
+    def _mmr(self, symbol: str) -> float:
+        """``symbol``'s maintenance margin rate on Bybit (from its maximum leverage)."""
+        return futures.maintenance_rate(perp_limits.max_leverage(symbol, self.perp_limits_path))
 
     def _ai_check(self, sig: Signal, entry_id: str, df) -> dict:
         if self.ai_filter is None:
@@ -622,8 +626,8 @@ class PaperTrader:
                 if mkt == "futures":
                     # the chosen leverage, or less when the stop (from the fill price) is too wide for
                     # it: the stop must close the trade well before liquidation
-                    chosen = self._lev(sym)
-                    lev = futures.safe_leverage(t.entry, sig.stop, short, chosen)
+                    chosen, mmr = self._lev(sym), self._mmr(sym)
+                    lev = futures.safe_leverage(t.entry, sig.stop, short, chosen, mmr)
                     if not lev:
                         del self.state["open"][key]
                         self._mark_signal(key, sig.ts, "stop too close to liquidation",
@@ -637,14 +641,15 @@ class PaperTrader:
                                  key, lev, chosen)
                     elif chosen < setting:
                         pos["lev_why"] = f"Bybit's maximum for {sym}"
-                    pos["lev_setting"] = setting
+                    pos["lev_setting"], pos["mmr"] = setting, mmr
                 amount = self._guards[mkt]["trade_usdt"]
                 if amount > 0:  # a fixed amount per trade: the cost on Spot, the margin on Futures
                     units = amount * pos.get("size_mult", 1.0) * lev / t.entry
                 else:  # sized from the strategy's risk, at most half the wallet
                     risk_usdt = bal * sig.risk_pct * pos.get("size_mult", 1.0)
                     units = risk_usdt / abs(sig.entry - sig.stop)
-                    units = min(units, bal * self.cfg.max_position_frac / t.entry)
+                    # at most half the wallet put into it: the cost on Spot, the margin on Futures
+                    units = min(units, bal * self.cfg.max_position_frac * lev / t.entry)
                 # all open positions together may not tie up more than the wallet
                 # (a spot position ties up what it cost; a perp position only its margin)
                 units = min(units, max(0.0, bal - wallet.in_use(self.state, skip=key, market=mkt)) * lev / t.entry)
@@ -666,7 +671,7 @@ class PaperTrader:
                 per_r = abs(sig.entry - sig.stop) * pos["units"]
                 if per_r > 0 and t.r * per_r < -margin:
                     liq = (futures.short_liquidation_price if short else futures.long_liquidation_price)(
-                        pos["entry"], lev)
+                        pos["entry"], lev, pos.get("mmr", futures.MAINTENANCE_MARGIN))
                     t.r, t.exit, t.exit_reason = -margin / per_r, float(liq), "liquidated"
                     log.warning("paper %s liquidated at %.6g (%gx): lost its margin of %.2f USDT",
                                 key, liq, lev, margin)

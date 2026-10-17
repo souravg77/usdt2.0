@@ -52,35 +52,42 @@ def perp_symbol(symbol: str) -> str:
     return symbol if ":" in symbol else f"{symbol}:{symbol.split('/')[1]}"
 
 
-def short_liquidation_price(entry: float, lev: float) -> float:
+def maintenance_rate(coin_max: float | None = None) -> float:
+    """The maintenance margin rate of a coin's lowest risk tier. Bybit sets it at half the initial
+    margin (1 / the coin's maximum leverage): 0.5% on a 100x coin, 1% on 50x, 2% on 25x. Smaller
+    coins are liquidated sooner, so this matters for the top gainers."""
+    return max(MAINTENANCE_MARGIN, 0.5 / coin_max) if coin_max and coin_max > 0 else MAINTENANCE_MARGIN
+
+
+def short_liquidation_price(entry: float, lev: float, mmr: float = MAINTENANCE_MARGIN) -> float:
     """Roughly where Bybit liquidates an isolated short opened at ``entry`` with ``lev``."""
-    return entry * (1 + 1 / lev - MAINTENANCE_MARGIN)
+    return entry * (1 + 1 / lev - mmr)
 
 
-def short_stop_ok(entry: float, stop: float, lev: float) -> bool:
+def short_stop_ok(entry: float, stop: float, lev: float, mmr: float = MAINTENANCE_MARGIN) -> bool:
     """True when the stop is above the entry and at most ``STOP_BUFFER`` of the way to the
     liquidation price."""
     if not (entry > 0 and stop > entry):
         return False
-    room = short_liquidation_price(entry, lev) - entry
+    room = short_liquidation_price(entry, lev, mmr) - entry
     return stop - entry <= room * STOP_BUFFER
 
 
-def long_liquidation_price(entry: float, lev: float) -> float:
+def long_liquidation_price(entry: float, lev: float, mmr: float = MAINTENANCE_MARGIN) -> float:
     """Roughly where Bybit liquidates an isolated long opened at ``entry`` with ``lev``."""
-    return entry * (1 - 1 / lev + MAINTENANCE_MARGIN)
+    return entry * (1 - 1 / lev + mmr)
 
 
-def long_stop_ok(entry: float, stop: float, lev: float) -> bool:
+def long_stop_ok(entry: float, stop: float, lev: float, mmr: float = MAINTENANCE_MARGIN) -> bool:
     """True when the stop is below the entry and at most ``STOP_BUFFER`` of the way down to the
     liquidation price."""
     if not (entry > stop > 0):
         return False
-    room = entry - long_liquidation_price(entry, lev)
+    room = entry - long_liquidation_price(entry, lev, mmr)
     return entry - stop <= room * STOP_BUFFER
 
 
-def safe_leverage(entry: float, stop: float, short: bool, lev: float) -> float:
+def safe_leverage(entry: float, stop: float, short: bool, lev: float, mmr: float = MAINTENANCE_MARGIN) -> float:
     """The highest leverage, up to ``lev``, at which the stop sits at most ``STOP_BUFFER`` of the
     way to the liquidation price (rounded down to 0.1x); 0 when even 1x is too much. A wide stop
     then trades at lower leverage instead of not at all; the risk in USDT doesn't change, only
@@ -88,10 +95,10 @@ def safe_leverage(entry: float, stop: float, short: bool, lev: float) -> float:
     dist = (stop - entry if short else entry - stop) / entry if entry > 0 else 0
     if dist <= 0:
         return 0.0
-    most = 1.0 / (dist / STOP_BUFFER + MAINTENANCE_MARGIN)
+    most = 1.0 / (dist / STOP_BUFFER + mmr)
     fit = min(lev, math.floor(most * 10 + 1e-9) / 10)
     ok = short_stop_ok if short else long_stop_ok
-    while fit >= 1.0 and not ok(entry, stop, fit):  # rounding at the edge
+    while fit >= 1.0 and not ok(entry, stop, fit, mmr):  # rounding at the edge
         fit = round(fit - 0.1, 1)
     return fit if fit >= 1.0 else 0.0
 

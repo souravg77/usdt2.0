@@ -210,8 +210,10 @@ def client_for(market: str, exchange_id: str = "bybit"):
 
 
 async def refresh(client, path: str = DEFAULT_PATH, top: int | None = None, now_ms: int | None = None,
-                  market: str | None = None, window: str | None = None) -> dict:
-    """Scan, score and save one market's gainers (the switch stays as it is)."""
+                  market: str | None = None, window: str | None = None, limits_path: str | None = None) -> dict:
+    """Scan, score and save one market's gainers (the switch stays as it is). On Futures with
+    ``limits_path``, each coin's maximum leverage is saved too, so a new gainer is never traded
+    above Bybit's limit for it."""
     import logging
 
     market = market or ("spot" if os.path.abspath(path) == os.path.abspath(SPOT_PATH) else "futures")
@@ -219,6 +221,10 @@ async def refresh(client, path: str = DEFAULT_PATH, top: int | None = None, now_
     top = clamp_top(top if top is not None else data.get("top", DEFAULT_TOP))
     window = window if window in WINDOWS else window_of(data)
     markets = await client.load_markets()
+    if market == "futures" and limits_path:
+        from . import perp_limits
+
+        perp_limits.save(perp_limits.from_markets(markets), limits_path, now_ms)
     tickers = await client.fetch_tickers()
     rows = []
     for r in pick(markets, tickers, top=CANDIDATES, market=market):
