@@ -12,3 +12,20 @@ services:
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "5" }
+
+  # Paper-trades every strategy that passed `aitrader learn test`, using the collector's candles.
+  # Never sends exchange orders.
+  paper:
+    build: .
+    image: aitrader:latest
+    depends_on: [collector]
+    command: ["learn", "paper", "--interval", "60"]
+    env_file: .env
+    environment:
+      AITRADER_DB_PATH: /app/data/aitrader.db
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }

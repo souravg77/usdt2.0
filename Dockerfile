@@ -5,7 +5,8 @@ WORKDIR /app
 
 COPY pyproject.toml README.md ./
 COPY src ./src
-RUN pip install . && useradd --create-home --uid 1000 trader && mkdir -p /app/data && chown trader /app/data
+COPY docs ./docs
+RUN pip install . && useradd --create-home --uid 1000 trader && mkdir -p /app/data/books /app/data/kb && chown -R trader /app/data
 
 USER trader
 ENTRYPOINT ["aitrader"]

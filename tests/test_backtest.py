@@ -131,3 +131,13 @@ def test_walk_forward_and_sensitivity():
     assert len(wf) == 3 and set(wf["params"].iloc[0]) == {"target_r"}
     sens = sensitivity(STRATEGIES["momentum_breakout"], df.iloc[:1500], "binance", "BTC/USDT", "15m")
     assert "(base)" in sens["param"].tolist() and len(sens) > 5
+
+
+def test_parabolic_sar_trailing_exit():
+    up = [(100 + i, 101.5 + i, 99.5 + i, 101 + i) for i in range(20)]
+    down = [(120 - 2 * i, 120.5 - 2 * i, 117 - 2 * i, 118 - 2 * i) for i in range(6)]
+    df = bars(up + down)
+    strat = Fixed(at=[3], stop=50.0, target=1000.0, trailing="close<psar")
+    (t,) = run_backtest(strat, df, "binance", "BTC/USDT", "1h", FREE)
+    assert t.exit_reason == "trail"
+    assert t.exit_ts > int(df.ts.iloc[19]) and t.r > 0

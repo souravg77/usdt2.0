@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
-from ..indicators import ema, rsi
+from ..indicators import ema, parabolic_sar, rsi
 from ..models import TIMEFRAME_MS
 from ..strategies.base import Signal, Strategy
 
@@ -49,20 +49,34 @@ class Trade:
 
 
 def _trailing_exit(rule: str | None, df: pd.DataFrame):
-    """Return a boolean Series: True on bars whose close triggers the trailing exit."""
+    """Return a boolean Series: True on bars whose close triggers the trailing exit. Several
+    rules can be joined with "|" (any of them exits); "time_stop=N" parts are handled separately."""
     if not rule:
         return None
+    out = None
+    for part in rule.split("|"):
+        hit = _one_trailing_exit(part.strip(), df)
+        if hit is not None:
+            out = hit if out is None else (out | hit)
+    return out
+
+
+def _one_trailing_exit(rule: str, df: pd.DataFrame):
     if rule.startswith("close<ema"):
         n = int(rule.split("ema")[1])
         return df["close"] < ema(df["close"], n)
     if rule.startswith("rsi>"):
         return rsi(df["close"]) > float(rule[4:])
+    if rule == "close<psar":
+        return df["close"] < parabolic_sar(df)["sar"]
     return None
 
 
 def _time_stop(rule: str | None) -> int | None:
-    if rule and rule.startswith("time_stop="):
-        return int(rule.split("=")[1])
+    for part in (rule or "").split("|"):
+        part = part.strip()
+        if part.startswith("time_stop="):
+            return int(part.split("=")[1])
     return None
 
 

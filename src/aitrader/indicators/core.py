@@ -63,6 +63,17 @@ def rsi(close: pd.Series, n: int = 14) -> pd.Series:
     return out.where(loss != 0, 100.0).where(gain.notna())
 
 
+def stoch_rsi(close: pd.Series, n: int = 14, k: int = 3, d: int = 3) -> pd.DataFrame:
+    """Stochastic RSI (0-1): where RSI sits within its own ``n``-bar range. Binance Academy:
+    above 0.8 is overbought, below 0.2 oversold. ``k`` and ``d`` are the usual smoothings."""
+    r = rsi(close, n)
+    lo = r.rolling(n, min_periods=n).min()
+    hi = r.rolling(n, min_periods=n).max()
+    raw = ((r - lo) / (hi - lo).replace(0, np.nan)).clip(0, 1)
+    k_line = raw.rolling(k, min_periods=k).mean()
+    return pd.DataFrame({"stoch_rsi": raw, "k": k_line, "d": k_line.rolling(d, min_periods=d).mean()})
+
+
 def macd(close: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> pd.DataFrame:
     line = ema(close, fast) - ema(close, slow)
     sig = line.ewm(span=signal, adjust=False, min_periods=signal).mean()
@@ -94,6 +105,74 @@ def bollinger(close: pd.Series, n: int = 20, k: float = 2.0) -> pd.DataFrame:
     sd = close.rolling(n, min_periods=n).std(ddof=0)
     upper, lower = mid + k * sd, mid - k * sd
     return pd.DataFrame({"mid": mid, "upper": upper, "lower": lower, "width": (upper - lower) / mid})
+
+
+def parabolic_sar(df: pd.DataFrame, step: float = 0.02, max_step: float = 0.2) -> pd.DataFrame:
+    """Wilder's Parabolic SAR. ``sar`` is the stop level for bar t, built from bars before t and
+    flipped when bar t crosses it; ``trend`` is +1 (dots below price) or -1 (dots above)."""
+    high, low = df["high"].to_numpy(float), df["low"].to_numpy(float)
+    n = len(df)
+    sar = np.full(n, np.nan)
+    trend = np.zeros(n, dtype=int)
+    if n < 2:
+        return pd.DataFrame({"sar": sar, "trend": trend}, index=df.index)
+    up = high[1] + low[1] >= high[0] + low[0]
+    ep = high[0] if up else low[0]
+    cur = low[0] if up else high[0]
+    af = step
+    for i in range(1, n):
+        cur = cur + af * (ep - cur)
+        if up:
+            cur = min(cur, low[i - 1], low[i - 2] if i >= 2 else low[i - 1])
+            if low[i] < cur:  # reversal: the stop was hit
+                up, cur, ep, af = False, ep, low[i], step
+            elif high[i] > ep:
+                ep, af = high[i], min(af + step, max_step)
+        else:
+            cur = max(cur, high[i - 1], high[i - 2] if i >= 2 else high[i - 1])
+            if high[i] > cur:
+                up, cur, ep, af = True, ep, high[i], step
+            elif low[i] < ep:
+                ep, af = low[i], min(af + step, max_step)
+        sar[i] = cur
+        trend[i] = 1 if up else -1
+    return pd.DataFrame({"sar": sar, "trend": trend}, index=df.index)
+
+
+def ichimoku(df: pd.DataFrame, conversion: int = 9, base: int = 26, span: int = 52) -> pd.DataFrame:
+    """Ichimoku Cloud. The leading spans are shifted forward ``base`` bars, so the cloud at bar t
+    uses data up to t - base (no look-ahead). The lagging span (chikou) is left out because it
+    plots today's close in the past and would leak future data into a model."""
+    def mid(n):
+        return (df["high"].rolling(n, min_periods=n).max() + df["low"].rolling(n, min_periods=n).min()) / 2
+
+    tenkan, kijun = mid(conversion), mid(base)
+    span_a = ((tenkan + kijun) / 2).shift(base)
+    span_b = mid(span).shift(base)
+    top = pd.concat([span_a, span_b], axis=1).max(axis=1, skipna=False)
+    bottom = pd.concat([span_a, span_b], axis=1).min(axis=1, skipna=False)
+    pos = np.where(df["close"] > top, 1, np.where(df["close"] < bottom, -1, 0))
+    return pd.DataFrame({"tenkan": tenkan, "kijun": kijun, "span_a": span_a, "span_b": span_b,
+                         "above_cloud": pd.Series(pos, index=df.index).where(top.notna(), 0)})
+
+
+# ---- volume -------------------------------------------------------------------------------------
+
+
+def vwap(df: pd.DataFrame, n: int | None = 20, anchor: str | None = None) -> pd.Series:
+    """Volume-weighted average price of the typical price. Rolling over ``n`` bars, or reset
+    at each ``anchor`` period instead (``anchor="D"`` gives the usual daily VWAP, UTC)."""
+    typical = (df["high"] + df["low"] + df["close"]) / 3
+    pv = typical * df["volume"]
+    if anchor:
+        key = pd.to_datetime(df["ts"], unit="ms", utc=True).dt.floor(anchor).to_numpy()
+        return pv.groupby(key).cumsum() / df["volume"].groupby(key).cumsum().replace(0, np.nan)
+    return pv.rolling(n, min_periods=n).sum() / df["volume"].rolling(n, min_periods=n).sum().replace(0, np.nan)
+
+
+def relative_volume(df: pd.DataFrame, n: int = 20) -> pd.Series:
+    """This bar's volume divided by the average of the previous ``n`` bars."""
+    return df["volume"] / df["volume"].shift(1).rolling(n, min_periods=n).mean()
 
 
 # ---- structure and levels -----------------------------------------------------------------------
@@ -145,6 +224,16 @@ def support_resistance(
     return [
         {"price": float(np.mean(g)), "touches": len(g)} for g in levels if len(g) >= min_touches
     ]
+
+
+FIB_RATIOS = (0.236, 0.382, 0.5, 0.618, 0.786)
+
+
+def fib_levels(swing_low: float, swing_high: float, ratios=FIB_RATIOS) -> dict[float, float]:
+    """Fibonacci retracement prices for a move from ``swing_low`` up to ``swing_high``: how far
+    a pullback would go at each ratio (Binance Academy: 23.6, 38.2, 50, 61.8, 78.6%)."""
+    span = swing_high - swing_low
+    return {r: swing_high - r * span for r in ratios}
 
 
 def volume_profile(df: pd.DataFrame, bins: int = 24) -> pd.DataFrame:

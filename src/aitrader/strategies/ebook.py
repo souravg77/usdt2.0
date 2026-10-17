@@ -1,5 +1,5 @@
-"""Strategies from "Crypto Trading For Beginner Traders" (Finance Illustrated, 2021), written as
-explicit rules.
+"""Strategies from "Crypto Trading For Beginner Traders" (Finance Illustrated, 2021) and the
+Binance Academy trading eBook, written as explicit rules.
 
 The ebook describes its strategies in general terms only: no indicators, levels or exits. Each
 class below records the written decision that turns that wording into a testable rule, so the
@@ -12,7 +12,20 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from ..indicators import adx, atr, atr_percentile, ema, ema_stack, market_structure, rsi, sma
+from ..indicators import (
+    adx,
+    atr,
+    atr_percentile,
+    bollinger,
+    ema,
+    ema_stack,
+    market_structure,
+    parabolic_sar,
+    rsi,
+    sma,
+    stoch_rsi,
+    vwap,
+)
 from ..models import TIMEFRAME_MS, Side
 from .base import Signal, Strategy, StrategySpec
 
@@ -59,6 +72,7 @@ class TrendPullback(Strategy):
         r = rsi(close)
         a = atr(df)
         a_pct = atr_percentile(df)
+        srsi = stoch_rsi(close)["stoch_rsi"]
         swing_low = df["low"].rolling(10, min_periods=1).min()  # recent swing low proxy
 
         cond = (
@@ -84,6 +98,7 @@ class TrendPullback(Strategy):
                 target=entry + p["target_r"] * (entry - stop), trailing="close<ema50",
                 risk_pct=p["risk_pct"], reason="EMA stack up, HH/HL, pullback to EMA20 held",
                 features={"adx": float(strength.iloc[i]), "rsi": float(r.iloc[i]),
+                          "stoch_rsi": float(srsi.iloc[i]),
                           "atr_pct": float(a_pct.iloc[i]) if pd.notna(a_pct.iloc[i]) else float("nan")},
             ))
         return out
@@ -185,6 +200,7 @@ class BuyTheDip(Strategy):
         trend = sma(close, p["trend_sma"])
         hi = df["high"].rolling(p["dip_lookback"], min_periods=p["dip_lookback"]).max()
         r = rsi(close)
+        srsi = stoch_rsi(close)["stoch_rsi"]
         a = atr(df)
         setup = (close > trend) & (close <= hi * (1 - p["dip_pct"])) & (r < p["rsi_max"])
         recent_setup = setup.astype(int).rolling(p["setup_valid_bars"], min_periods=1).max() > 0
@@ -201,12 +217,80 @@ class BuyTheDip(Strategy):
                 symbol=symbol, timeframe=timeframe, side=Side.BUY, entry=entry, stop=stop,
                 target=entry + p["target_r"] * (entry - stop), trailing=f"rsi>{p['exit_rsi']:g}",
                 risk_pct=p["risk_pct"], reason="dip in long-term uptrend, bullish reversal bar",
-                features={"rsi": float(r.iloc[i]),
+                features={"rsi": float(r.iloc[i]), "stoch_rsi": float(srsi.iloc[i]),
                           "dip": float(1 - close.iloc[i] / hi.iloc[i])},
             ))
         return out
 
 
+class BollingerSqueeze(Strategy):
+    spec = StrategySpec(
+        name="bollinger_squeeze",
+        source='Binance Academy trading eBook: "Bollinger Bands Squeeze", "Trading volume", '
+        '"VWAP", "Parabolic SAR"',
+        timeframes=("1h", "4h"),
+        setup="Squeeze: Bollinger(20, 2) band width in the lowest 20% of its last 120 bars, at "
+        "some point in the last 5 bars.",
+        entry="Close above the upper band (the breakout) on volume >= 1.5 x its 20-bar average, "
+        "with close above the 50-bar VWAP. Market order at the next bar's open.",
+        stop="Lower of the middle band and entry - 1 x ATR(14). Exits are stop-market orders.",
+        target="2R fixed; the backtest also scores a Parabolic SAR trailing stop (close below SAR).",
+        filter="Skip if the breakout bar's range is > 3 x ATR (news spike). Long breakouts only "
+        "in the pilot (the book's squeeze is direction-neutral).",
+        size="0.5% of equity at risk.",
+        decisions=(
+            '"Bands come really close to each other" = width in the bottom 20% of the last 120 bars.',
+            '"Volume precedes price" / Dow Theory volume confirmation = volume >= 1.5 x average.',
+            '"Above the VWAP may be considered bullish" = close > 50-bar rolling VWAP.',
+            '"Parabolic SAR as a trailing stop-loss" = exit on a close below the SAR.',
+            "Downside breakouts are ignored until shorting is allowed after the pilot.",
+        ),
+    )
+
+    @classmethod
+    def default_params(cls):
+        return {"bb_n": 20, "bb_k": 2.0, "squeeze_lookback": 120, "squeeze_q": 0.2,
+                "squeeze_recent": 5, "vol_n": 20, "vol_mult": 1.5, "vwap_n": 50, "stop_atr": 1.0,
+                "target_r": 2.0, "max_bar_atr": 3.0, "risk_pct": 0.005}
+
+    def generate(self, df, exchange, symbol, timeframe):
+        p = self.params
+        close = df["close"]
+        bb = bollinger(close, p["bb_n"], p["bb_k"])
+        width_floor = bb["width"].rolling(p["squeeze_lookback"], min_periods=p["squeeze_lookback"]) \
+            .quantile(p["squeeze_q"])
+        squeeze = (bb["width"] <= width_floor).astype(int)
+        recent_squeeze = squeeze.rolling(p["squeeze_recent"], min_periods=1).max() > 0
+        vol_avg = df["volume"].shift(1).rolling(p["vol_n"], min_periods=p["vol_n"]).mean()
+        vw = vwap(df, p["vwap_n"])
+        a = atr(df)
+        cond = (
+            recent_squeeze.shift(1, fill_value=False)
+            & (close > bb["upper"])
+            & (df["volume"] >= p["vol_mult"] * vol_avg)
+            & (close > vw)
+            & ((df["high"] - df["low"]) <= p["max_bar_atr"] * a)
+        )
+        sar = parabolic_sar(df)["sar"]
+        out = []
+        for i in np.flatnonzero(cond.to_numpy()):
+            entry = float(close.iloc[i])
+            stop = min(float(bb["mid"].iloc[i]), entry - p["stop_atr"] * float(a.iloc[i]))
+            if not np.isfinite(stop) or stop >= entry:
+                continue
+            out.append(Signal(
+                ts=_close_ts(df, i, timeframe), strategy=self.spec.name, exchange=exchange,
+                symbol=symbol, timeframe=timeframe, side=Side.BUY, entry=entry, stop=stop,
+                target=entry + p["target_r"] * (entry - stop), trailing="close<psar",
+                risk_pct=p["risk_pct"],
+                reason=f"squeeze breakout on {df['volume'].iloc[i] / vol_avg.iloc[i]:.1f}x volume",
+                features={"bb_width": float(bb["width"].iloc[i]),
+                          "vol_ratio": float(df["volume"].iloc[i] / vol_avg.iloc[i]),
+                          "sar": float(sar.iloc[i])},
+            ))
+        return out
+
+
 STRATEGIES: dict[str, type[Strategy]] = {
-    s.spec.name: s for s in (TrendPullback, MomentumBreakout, BuyTheDip)
+    s.spec.name: s for s in (TrendPullback, MomentumBreakout, BuyTheDip, BollingerSqueeze)
 }
