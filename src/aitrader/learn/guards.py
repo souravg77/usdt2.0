@@ -21,6 +21,9 @@
 - **Limit entries** (``maker_entry``): enter with a post-only limit order at the signal price or
   the open, paying the maker fee instead of taker fee and slippage; when the entry candle never
   trades through that price the order is cancelled and the trade is missed (``engine.maker_fill``).
+- **Timeframes** (``timeframes``): the candle timeframes the engine opens new trades on (all of
+  them unless a person narrows it; an empty choice means all). Open trades on the others still run
+  to their exits.
 - **Amount per trade** (``trade_usdt``, 0 = automatic): each new position uses this many USDT, the
   purchase amount on Spot and the margin on Futures (so the position is that times the leverage),
   instead of being sized from the strategy's risk. Still never more than the wallet has free.
@@ -39,9 +42,11 @@ from datetime import datetime, timedelta
 
 from . import wallet
 
+TIMEFRAMES = ("5m", "15m", "30m", "1h", "4h", "1d")  # the ones paper trading can use
 DEFAULTS = {"breaker": True, "day_pause_pct": 3.0, "pause_hours": 24.0, "week_close_pct": 6.0,
             "min_rr": 0.0, "trend": False, "split_tp": False, "breakeven": False, "maker_entry": False,
-            "max_long": 8.0, "max_short": 8.0, "max_correlated": 3.0, "corr_min": 0.8, "trade_usdt": 0.0}
+            "max_long": 8.0, "max_short": 8.0, "max_correlated": 3.0, "corr_min": 0.8, "trade_usdt": 0.0,
+            "timeframes": list(TIMEFRAMES)}
 RANGES = {"day_pause_pct": (0.5, 50.0), "pause_hours": (1.0, 168.0), "week_close_pct": (1.0, 90.0),
           "min_rr": (0.0, 10.0), "max_long": (1.0, 200.0), "max_short": (1.0, 200.0),
           "max_correlated": (1.0, 50.0), "corr_min": (0.5, 0.99),
@@ -63,6 +68,12 @@ def _clean(d: dict) -> dict:
     out = {}
     for k, v in DEFAULTS.items():
         got = d.get(k, v)
+        if k == "timeframes":
+            if isinstance(got, str):
+                got = got.split(",")
+            chosen = [t for t in TIMEFRAMES if isinstance(got, (list, tuple)) and t in got]
+            out[k] = chosen or list(TIMEFRAMES)  # none chosen (or never set): every timeframe
+            continue
         if k in SWITCHES:
             out[k] = got is not False and got not in (0, "0", "")
             continue

@@ -180,6 +180,14 @@ def test_trading_page_sets_the_rules(tmp_path, monkeypatch):
                     follow_redirects=False)
     assert "bad=1" in r.headers["location"]
     assert "Amount per trade USDT" in client.get("/trading").text
+    page = client.get("/trading").text
+    assert 'action="/trading/paper/timeframes"' in page and 'name="tf" value="1h" checked' in page
+    r = client.post("/trading/paper/timeframes", data={"csrf": csrf, "market": "futures", "tf": ["1h", "4h", "1d"]},
+                    follow_redirects=False)
+    assert "bad=1" not in r.headers["location"] and "1h%2C%204h%2C%201d" in r.headers["location"]
+    g = guards.load(guards.path_for(paths.paper_state))
+    assert g["futures"]["timeframes"] == ["1h", "4h", "1d"] and g["futures"]["min_rr"] == 2  # other rules kept
+    assert 'name="tf" value="5m" checked' in client.get("/trading").text  # the Spot view: Spot AI's, unchanged
     r = client.post("/trading/paper/guards", data={"csrf": csrf, "market": "spot", "trade_usdt": "25"},
                     follow_redirects=False)
     assert "bad=1" not in r.headers["location"]
@@ -411,3 +419,14 @@ def test_breakeven_after_the_first_half_means_the_rest_cannot_lose():
     half = simulate_signal(_sig(), df, 1, BacktestConfig(split_tp=True, max_cost_r=0), {})
     assert t.r > half.r and t.r > 0.4
     assert guards.DEFAULTS["breakeven"] is False  # off until a person turns it on
+
+
+def test_each_engine_trades_only_the_timeframes_chosen(tmp_path):
+    """Shawn: Futures AI takes 1h, 4h and 1d trades only."""
+    path = guards.path_for(str(tmp_path / "paper_state.json"))
+    assert guards.load(path)["futures"]["timeframes"] == list(guards.TIMEFRAMES)  # every one by default
+    got = guards.save(path, "futures", {"timeframes": ["1d", "1h", "4h", "2w"]})
+    assert got["timeframes"] == ["1h", "4h", "1d"]  # unknown ones dropped, in timeframe order
+    assert guards.load(path)["spot"]["timeframes"] == list(guards.TIMEFRAMES)  # the other engine unchanged
+    got = guards.save(path, "futures", {"min_rr": "2"})  # saving other rules keeps the timeframes
+    assert got["timeframes"] == ["1h", "4h", "1d"] and got["min_rr"] == 2

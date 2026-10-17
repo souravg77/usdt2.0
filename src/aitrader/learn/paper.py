@@ -181,7 +181,9 @@ class PaperTrader:
             for ex in self.exchanges:
                 for sym in symbols:
                     live = {m: engines[m] and trades[m] and sym in per_market[m] for m in wallet.MARKETS}
-                    tfs = {m: picks.allowed(entry, strat.spec.timeframes, tf_picks[m]) for m in wallet.MARKETS}
+                    # the timeframes each engine trades: its pick's, and only those chosen on the Trading page
+                    tfs = {m: [t for t in picks.allowed(entry, strat.spec.timeframes, tf_picks[m])
+                               if t in self._guards[m]["timeframes"]] for m in wallet.MARKETS}
                     for tf in [t for t in strat.spec.timeframes if any(t in tfs[m] for m in wallet.MARKETS)]:
                         on = {m: live[m] and tf in tfs[m] for m in wallet.MARKETS}
                         key = f"{entry.id}|{ex}|{sym}|{tf}"
