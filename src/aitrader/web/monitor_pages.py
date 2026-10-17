@@ -39,6 +39,7 @@ GAP_DAYS = 7
 SIGNAL_TF = "1h"
 SIGNAL_BARS = 600
 SIGNAL_PAIRS = 6  # the board runs every strategy, so only the first few pairs
+FUTURES_TOP = 10  # the Futures view: the top 10 perpetual gainers
 FEED_STALE_S = 30.0
 VAR_DAYS = 90
 
@@ -122,7 +123,10 @@ class PerpMarket:
             if self._hit and self._hit[1] == key and self._clock() - self._hit[0] < self.cache_s:
                 return self._hit[2]
             try:
-                raw = await asyncio.wait_for(self.client().fetch_tickers([perp_symbol(s) for s in symbols]), timeout=8)
+                # only pairs Bybit lists a USDT perpetual for: one without would fail the whole request
+                markets = await asyncio.wait_for(self.client().load_markets(), timeout=8)
+                listed = [perp_symbol(s) for s in symbols if perp_symbol(s) in markets]
+                raw = await asyncio.wait_for(self.client().fetch_tickers(listed), timeout=8) if listed else {}
                 rows = []
                 for s in symbols:
                     t = raw.get(perp_symbol(s))
@@ -278,14 +282,36 @@ def add_monitor_routes(app, *, settings, page, guard, auth, paths, csrf, control
     perp = perp or PerpMarket()
     boards = boards or SignalBoards(settings.db_path, exchange)
     feed_path = getattr(paths, "feed", feedstats.DEFAULT_PATH)
-    symbols = list(settings.symbols)
+    paper_state = getattr(paths, "paper_state", "")
+
+    def futures_view() -> bool:
+        from ..learn import wallet
+
+        try:
+            return bool(paper_state) and wallet.futures_on(wallet.market_path(paper_state))
+        except Exception:
+            return False
+
+    def workspace_symbols() -> list[str]:
+        """The Futures view: the top 10 perpetual gainers (none while that list is off). The Spot
+        view: Spot AI's pairs."""
+        from ..market import gainers
+        from ..market.pairs import configured_symbols
+
+        try:
+            if futures_view():
+                return gainers.symbols(os.environ.get("AITRADER_GAINERS_FILE") or gainers.DEFAULT_PATH)[:FUTURES_TOP]
+            return configured_symbols(list(settings.symbols), market="spot")
+        except Exception:
+            return [] if futures_view() else list(settings.symbols)
 
     def api_guard(request: Request):
         _u, _t, redirect = guard(request)
         return JSONResponse({"error": "sign in"}, status_code=401) if redirect else None
 
     def feed_data():
-        return feed_health(feed_path, settings.db_path, exchange, symbols, list(settings.timeframes), clock())
+        return feed_health(feed_path, settings.db_path, exchange, workspace_symbols(), list(settings.timeframes),
+                           clock())
 
     def risk_data():
         from ..trade.risk import RiskLimits
@@ -295,7 +321,8 @@ def add_monitor_routes(app, *, settings, page, guard, auth, paths, csrf, control
 
     def signal_data():
         now_ms = int(clock() * 1000)
-        return [boards.board(s, now_ms) for s in symbols[:SIGNAL_PAIRS]]
+        syms = workspace_symbols()
+        return [boards.board(s, now_ms) for s in syms[:FUTURES_TOP if futures_view() else SIGNAL_PAIRS]]
 
     @app.get("/api/monitor/feed")
     def api_feed(request: Request):
@@ -303,7 +330,7 @@ def add_monitor_routes(app, *, settings, page, guard, auth, paths, csrf, control
 
     @app.get("/api/monitor/derivatives")
     async def api_derivs(request: Request):
-        return api_guard(request) or JSONResponse(await perp.snapshot(symbols))
+        return api_guard(request) or JSONResponse(await perp.snapshot(workspace_symbols()))
 
     @app.get("/api/monitor/signals")
     async def api_signals(request: Request):
@@ -319,9 +346,16 @@ def add_monitor_routes(app, *, settings, page, guard, auth, paths, csrf, control
         user, token, redirect = guard(request)
         if redirect:
             return redirect
-        feed, derivs, risk = feed_data(), await perp.snapshot(symbols), risk_data()
+        syms = workspace_symbols()
+        feed, derivs, risk = feed_data(), await perp.snapshot(syms), risk_data()
         sig = await asyncio.to_thread(signal_data)
-        body = ['<div class="grid">', _feed_card(feed, _e), _risk_card(risk, control().state(), csrf(token), _e),
+        if futures_view():
+            which = (f"Futures AI view: the top {len(syms)} perpetual gainers ({', '.join(syms)})." if syms else
+                     "Futures AI view: the Futures top gainers list is off or out of date, so there are no "
+                     "pairs to show. Turn it on on the Pairs page.")
+        else:
+            which = f"Spot AI view: Spot AI's pairs ({len(syms)})."
+        body = [f'<p class="small muted">{_e(which)}</p>', '<div class="grid">', _feed_card(feed, _e), _risk_card(risk, control().state(), csrf(token), _e),
                 "</div>", "<h2>Derivatives</h2>", _derivs_table(derivs, _e),
                 "<h2>Signals and abstentions</h2>", _signals_html(sig, _e),
                 '<p class="muted small">JSON: /api/monitor/feed · /api/monitor/derivatives · '
