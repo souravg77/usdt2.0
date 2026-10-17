@@ -24,6 +24,14 @@ CREATE TABLE IF NOT EXISTS candles (
 """
 
 
+# Schema changes after the first release go here, in order: (version, SQL). ``migrate`` applies
+# the ones newer than the database's ``PRAGMA user_version``. Never edit a released entry.
+MIGRATIONS: list[tuple[int, str]] = [
+    (1, SCHEMA),  # the original candles table
+]
+SCHEMA_VERSION = MIGRATIONS[-1][0]
+
+
 class CandleStore:
     def __init__(self, path: str):
         if path != ":memory:":
@@ -74,6 +82,33 @@ class CandleStore:
             "SELECT exchange, symbol, timeframe, COUNT(*), MIN(ts), MAX(ts) FROM candles "
             "GROUP BY exchange, symbol, timeframe ORDER BY 1,2,3"
         ).fetchall()
+
+    def schema_version(self) -> int:
+        return self.conn.execute("PRAGMA user_version").fetchone()[0]
+
+    def migrate(self) -> list[int]:
+        """Bring the database to ``SCHEMA_VERSION``. Returns the versions applied."""
+        current = self.schema_version()
+        if current > SCHEMA_VERSION:
+            raise RuntimeError(f"database schema v{current} is newer than this code (v{SCHEMA_VERSION}); "
+                               "update the code instead of downgrading the database")
+        applied = []
+        for version, sql in MIGRATIONS:
+            if version > current:
+                with self.conn:
+                    self.conn.executescript(sql)
+                    self.conn.execute(f"PRAGMA user_version = {int(version)}")
+                applied.append(version)
+        return applied
+
+    def backup(self, path: str) -> None:
+        """Consistent copy of the database, safe while other services write to it."""
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        dest = sqlite3.connect(path)
+        try:
+            self.conn.backup(dest)
+        finally:
+            dest.close()
 
     def close(self) -> None:
         self.conn.close()

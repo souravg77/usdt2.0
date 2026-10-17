@@ -106,3 +106,31 @@ async def test_feed_reconnects_after_error():
     await asyncio.wait_for(feed_task, 5)
     assert FlakyClient.instances >= 2
     assert not feed.is_stale("BTC/USDT")
+
+
+def test_migrate_and_backup(tmp_path, monkeypatch):
+    from aitrader.cli import main
+    from aitrader.data import store as store_mod
+
+    db = tmp_path / "a.db"
+    s = store_mod.CandleStore(str(db))
+    assert s.schema_version() == 0 and s.migrate() == [1] and s.migrate() == []
+    s.upsert([Candle("binance", "BTC/USDT", "1h", 0, 1, 2, 0.5, 1.5, 10)])
+    monkeypatch.setattr(store_mod, "MIGRATIONS", store_mod.MIGRATIONS + [
+        (2, "CREATE TABLE IF NOT EXISTS extra (x INTEGER);")])
+    monkeypatch.setattr(store_mod, "SCHEMA_VERSION", 2)
+    assert s.migrate() == [2] and s.schema_version() == 2
+    s.backup(str(tmp_path / "bk" / "a.db"))
+    s.close()
+    copy = store_mod.CandleStore(str(tmp_path / "bk" / "a.db"))
+    assert len(copy.load("binance", "BTC/USDT", "1h")) == 1 and copy.schema_version() == 2
+    copy.close()
+    monkeypatch.setattr(store_mod, "SCHEMA_VERSION", 1)
+    with pytest.raises(RuntimeError, match="newer"):
+        store_mod.CandleStore(str(db)).migrate()
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AITRADER_DB_PATH", str(tmp_path / "b.db"))
+    assert main(["--env-file", "none", "migrate"]) == 0
+    assert main(["--env-file", "none", "backup", "data/backups/x"]) == 0
+    assert (tmp_path / "data" / "backups" / "x" / "b.db").exists()

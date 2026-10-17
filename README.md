@@ -74,4 +74,7 @@ aitrader stream --exchange binance --symbol BTC/USDT --seconds 20
 
 ## Deploying on an Ubuntu VPS
 
+Updates: `./deploy/update.sh` pulls the latest `main`, rebuilds, migrates the database, restarts
+the services and rolls back on its own if the health check fails.
+
 We deploy with **Docker Compose**. See [docs/ubuntu-setup.md](docs/ubuntu-setup.md).

@@ -36,7 +36,7 @@ docker compose version
 ## 3. Get the code and configure
 
 ```bash
-git clone https://github.com/souravg77/AI_crypto_trader.git
+git clone https://github.com/souravg77/usdt2.0.git AI_crypto_trader
 cd AI_crypto_trader
 cp .env.example .env
 chmod 600 .env
@@ -130,10 +130,43 @@ There you can upload a book for the agent to read, turn into strategies and test
 
 ## 9. Updating
 
+One command brings the server to the latest code on GitHub (the `main` branch, which only
+changes when a pull request is merged):
+
 ```bash
-git pull
-docker compose build && docker compose up -d
+cd ~/AI_crypto_trader
+./deploy/update.sh --check    # is there anything new? (changes nothing)
+./deploy/update.sh            # update
 ```
+
+What it does, in order:
+
+1. Refuses to run if files tracked by git were edited on the server. Your `.env` and `data/`
+   are not tracked and are never touched.
+2. Backs up the database, the strategy registry, the paper state and the model registry to
+   `data/backups/<time>/` (the last 5 are kept). It also keeps the current Docker image as
+   `aitrader:rollback`.
+3. Pulls the new code, rebuilds the image and migrates the database (`aitrader migrate`).
+4. Restarts only the services that were running before.
+5. Health check after 30 seconds: every service must be running (not crash-looping),
+   `aitrader status` must work, live trading must still be locked if it was locked before, and
+   the dashboard must answer if it was running.
+6. If any step fails, it **rolls back**: previous code, previous image, database restored from
+   the backup, and the services restarted. It exits with code 1 and says what failed.
+
+An update can't unlock live trading. Unlocking only happens through `.env`, which the script
+never edits, and the health check rolls back any update after which live trading isn't locked
+anymore.
+
+To update automatically, add a weekly cron job (`crontab -e` as your user; Sundays at 04:00 UTC):
+
+```
+0 4 * * 0 cd ~/AI_crypto_trader && ./deploy/update.sh >> data/update.log 2>&1
+```
+
+Check `data/update.log` afterwards, or run `./deploy/update.sh --check` by hand. If you'd
+rather approve each update, leave the cron job out and run the script yourself after a pull
+request is merged.
 
 ## Useful commands
 
