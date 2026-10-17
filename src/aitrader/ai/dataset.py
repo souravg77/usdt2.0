@@ -69,7 +69,7 @@ def signal_rows(strategy: Strategy, strategy_id: str, df: pd.DataFrame, exchange
         return signal_rows(strategy.base, strategy_id, flip(df), exchange, symbol, timeframe,
                            as_perp(cfg), None, source)
     feats = market_features(df) if feats is None else feats
-    frecords = feats.to_dict("records")
+    fcols, fvals = list(feats.columns), feats.to_numpy()  # a row is made only for a signal bar
     index_of = {int(t): i for i, t in enumerate(df["ts"].to_numpy())}
     rows, cache = [], {}
     for sig in strategy.generate(df, exchange, symbol, timeframe):
@@ -79,7 +79,7 @@ def signal_rows(strategy: Strategy, strategy_id: str, df: pd.DataFrame, exchange
         t = simulate_signal(sig, df, i + 1, cfg, cache)
         if t is None:
             continue
-        row = signal_features(sig, strategy_id, frecords[i], [])
+        row = signal_features(sig, strategy_id, dict(zip(fcols, fvals[i])), [])
         row.update(source=source, exchange=exchange, symbol=symbol, signal_ts=sig.ts,
                    entry_ts=t.entry_ts, exit_ts=t.exit_ts, exit_reason=t.exit_reason, r=t.r,
                    hit_1r=reached_1r(df, i + 1, t.entry, sig.stop, sig.entry - sig.stop))
@@ -129,45 +129,65 @@ def add_history(frame: pd.DataFrame) -> pd.DataFrame:
 def build_dataset(store, strategies: list[tuple[str, Strategy]], exchanges: list[str],
                   symbols: list[str], cfg: BacktestConfig | None = None,
                   include_final: bool = False, paper_state: str | None = None) -> pd.DataFrame:
-    """Backtest every (strategy id, strategy) on every stored market and return the rows."""
-    rows: list[dict] = []
-    markets: dict[tuple, tuple] = {}
-    context = ContextStore(store) if has_context(store) else None  # funding / open interest
+    """Backtest every (strategy id, strategy) on every stored market and return the rows.
+
+    One market's candles are in memory at a time: each is loaded, every strategy that trades its
+    timeframe runs on it, its rows become a compact table and the candles are let go before the
+    next market. (Keeping every market loaded while going strategy by strategy ran the server out
+    of memory with a few years of 5-minute candles on a few dozen pairs.)"""
+    by_tf: dict[str, list[tuple[str, Strategy]]] = {}
     for sid, strat in strategies:
+        for tf in strat.spec.timeframes:
+            by_tf.setdefault(tf, []).append((sid, strat))
+    context = ContextStore(store) if has_context(store) else None  # funding / open interest
+    chunks: list[pd.DataFrame] = []
+    for tf, strats in by_tf.items():
         for ex in exchanges:
             for sym in symbols:
-                for tf in strat.spec.timeframes:
-                    key = (ex, sym, tf)
-                    if key not in markets:
-                        candles = store.load(ex, sym, tf)
-                        if len(candles) < MIN_BARS:
-                            markets[key] = (None, None)
-                        else:
-                            df = candles_to_frame(candles)
-                            if context is not None:
-                                df = attach_context(df, context, ex, sym, tf)
-                            if not include_final:
-                                ins, oos, _final = split_periods(df)
-                                df = pd.concat([ins, oos])
-                            markets[key] = (df, market_features(df))
-                    df, feats = markets[key]
-                    if df is None:
-                        continue
+                candles = store.load(ex, sym, tf)
+                if len(candles) < MIN_BARS:
+                    continue
+                df = candles_to_frame(candles)
+                del candles
+                if context is not None:
+                    df = attach_context(df, context, ex, sym, tf)
+                if not include_final:
+                    ins, oos, _final = split_periods(df)
+                    df = pd.concat([ins, oos])
+                feats = market_features(df)
+                rows: list[dict] = []
+                for sid, strat in strats:
                     rows += signal_rows(strat, sid, df, ex, sym, tf, cfg, feats)
+                del df, feats
+                if rows:
+                    chunks.append(_compact(pd.DataFrame(rows)))
     if paper_state:
-        rows += paper_rows(store, paper_state, cfg)
-    return finish(rows)
+        rows = paper_rows(store, paper_state, cfg)
+        if rows:
+            chunks.append(_compact(pd.DataFrame(rows)))
+    return finish(chunks)
 
 
-def finish(rows: list[dict]) -> pd.DataFrame:
-    if not rows:
+def _compact(frame: pd.DataFrame) -> pd.DataFrame:
+    """The features as 32-bit floats: half the memory, far more precision than they carry."""
+    floats = [c for c in frame.columns if frame[c].dtype == np.float64 and c not in ("r",)]
+    frame[floats] = frame[floats].astype(np.float32)
+    return frame
+
+
+def finish(rows) -> pd.DataFrame:
+    """The training set from row dicts or from tables of rows."""
+    if rows and isinstance(rows[0], pd.DataFrame):
+        frame = pd.concat(rows, ignore_index=True)
+    elif rows:
+        frame = pd.DataFrame(rows)
+    else:
         return pd.DataFrame(columns=INFO + ALL)
-    frame = pd.DataFrame(rows)
     # a paper trade replaces the backtest row for the same signal
     frame["_paper"] = frame["source"].eq("paper")
-    frame = (frame.sort_values("_paper")
+    frame = (frame.sort_values("_paper", kind="stable")
              .drop_duplicates(["strategy", "exchange", "symbol", "timeframe", "signal_ts"], keep="last")
-             .drop(columns="_paper").sort_values("signal_ts"))
+             .drop(columns="_paper").sort_values("signal_ts", kind="stable"))
     frame = add_history(frame)
     return frame[INFO + ALL]
 

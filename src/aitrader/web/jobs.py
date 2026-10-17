@@ -121,11 +121,13 @@ class JobRunner:
                                         timeout=STEP_TIMEOUT_S, check=False).returncode
                 except subprocess.TimeoutExpired:
                     rc = "timeout"
-                out.write(f"[exit {rc}]\n\n")
+                why = (" (stopped by the system: the server ran out of memory)" if rc == -9 else
+                       " (took longer than the time limit)" if rc == "timeout" else "")
+                out.write(f"[exit {rc}]{why}\n\n")
                 out.flush()
                 if rc != 0:
                     self._update(job_id, status="failed", finished=time.time(),
-                                 error=f"step `{step[0]} {step[1] if len(step) > 1 else ''}` ended with {rc}")
+                                 error=f"step `{step[0]} {step[1] if len(step) > 1 else ''}` ended with {rc}{why}")
                     return
         self._update(job_id, status="done", finished=time.time())
 
