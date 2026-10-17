@@ -65,7 +65,7 @@ class Paths:
 def create_app(settings: Settings, auth: Auth, jobs: JobRunner, paths: Paths | None = None,
                secure_cookie: bool = False, users=None, keys_secret: str = "", signup: bool = False,
                verifier=None, checkers: dict | None = None, live=None, account=None,
-               monitor: dict | None = None) -> FastAPI:
+               monitor: dict | None = None, perp_live=None) -> FastAPI:
     """``users`` (an ``accounts.UserStore``) turns on user accounts: sign-up when ``signup`` is
     true, each user's own page, and the admin's Users page. Without it only the admin can log in."""
     paths = paths or Paths()
@@ -186,6 +186,17 @@ data-tz-label="{_e(tz_label(now))}"{f' data-reload-ms="{int(refresh * 1000)}"' i
         from .live import LiveMarket
 
         live = LiveMarket(settings.db_path, EXCHANGE)
+    perp_feed: list = [perp_live] if perp_live is not None else []  # Futures AI's positions: perpetual prices
+
+    def feed_for(ws: str):
+        if ws != "futures":
+            return live
+        if not perp_feed:  # made on first use
+            from ..data.perp import futures_db_path
+            from .live import LiveMarket
+
+            perp_feed.append(LiveMarket(futures_db_path(settings.db_path), EXCHANGE, perp=True))
+        return perp_feed[0]
 
     @app.get("/api/positions")
     async def api_positions(request: Request):
@@ -200,7 +211,7 @@ data-tz-label="{_e(tz_label(now))}"{f' data-reload-ms="{int(refresh * 1000)}"' i
         symbols = sorted(set(_open_symbols(paper, execs)))
         if not symbols:
             return JSONResponse({"source": "", "rows": {}, "total": None})
-        prices = await live.tickers(symbols)
+        prices = await feed_for(ws).tickers(symbols)
         return JSONResponse(live_position_usdt(paper, execs, {t["symbol"]: t.get("price") for t in prices.get("tickers", [])},
                                                source=prices.get("source", "")))
 
@@ -1206,8 +1217,8 @@ def _lev_cell(p: dict, side) -> str:
     why = p.get("lev_why")
     less = (f'<br><span class="small muted">setting {p.get("lev_setting", lev):g}x; {_e(why)}</span>'
             if why else "")
-    return (f'<td><b>{lev:g}x</b><br><span class="small">margin {size / lev:,.2f} · size {size:,.2f} USDT</span>'
-            f"{less}</td>")
+    return (f'<td><b>{lev:g}x</b><br><span class="small">margin {size / lev:,.2f} × {lev:g} = '
+            f'{size:,.2f} USDT position</span>{less}</td>')
 
 
 def _liq_cell(p: dict, side) -> str:
@@ -1217,8 +1228,9 @@ def _liq_cell(p: dict, side) -> str:
     lev, entry = p.get("leverage"), p.get("entry")
     if not lev or not entry or not (p.get("perp") or side == "sell"):
         return "<td>-</td>"
-    liq = (futures.short_liquidation_price(entry, lev) if side == "sell"
-           else futures.long_liquidation_price(entry, lev))
+    mmr = p.get("mmr", futures.MAINTENANCE_MARGIN)
+    liq = (futures.short_liquidation_price(entry, lev, mmr) if side == "sell"
+           else futures.long_liquidation_price(entry, lev, mmr))
     if lev <= 1 and side != "sell":
         return '<td><span class="small muted">none at 1x</span></td>'
     mark = p.get("mark")
@@ -1742,6 +1754,10 @@ def _amount_form(paths: Paths, csrf: str, ws: str) -> str:
     amt = guards.load(guards.path_for(paths.paper_state))[ws]["trade_usdt"]
     lo, hi = guards.RANGES["trade_usdt"]
     now = f"now {amt:,.2f} USDT per trade" if amt else "now automatic"
+    if ws == "futures" and amt:  # the amount is the margin: the position is that times the leverage
+        on, lev = _futures_state(paths)
+        now = (f"now {amt:,.2f} USDT margin × {lev:g}x = {amt * lev:,.2f} USDT position per trade "
+               "(less when a wide stop needs lower leverage)")
     return (f'<form method="post" action="/trading/paper/amount" class="row">{csrf}'
             f'<input type="hidden" name="market" value="{ws}">'
             f'<label class="small">Amount per trade USDT (0 auto) <input name="trade_usdt" type="number" '

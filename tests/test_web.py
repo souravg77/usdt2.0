@@ -566,7 +566,8 @@ def test_open_positions_follow_the_live_price(tmp_path, monkeypatch):
     fake = FakeLive()
     paths = Paths(paper_state="data/learn/paper_state.json")
     client = TestClient(create_app(Settings(), Auth("admin", PW, "k"),
-                                   JobRunner(str(tmp_path / "jobs"), env_file="none"), paths, live=fake))
+                                   JobRunner(str(tmp_path / "jobs"), env_file="none"), paths, live=fake,
+                                   perp_live=fake))
     assert client.get("/api/positions").status_code == 401
     login(client)
     assert client.get("/api/positions").json()["rows"] == {}  # nothing open: Bybit isn't asked

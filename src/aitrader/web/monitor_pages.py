@@ -154,8 +154,11 @@ class PerpMarket:
 class SignalBoards:
     """``agents.analyse`` per pair on the newest closed candles, recomputed when a candle closes."""
 
-    def __init__(self, db_path: str, exchange: str = EXCHANGE, strategies=None):
+    def __init__(self, db_path: str, exchange: str = EXCHANGE, strategies=None, context_db: str | None = None):
+        # ``db_path``: the candles (Futures view: the perpetuals' database); funding and open
+        # interest stay in the main database (``context_db``)
         self.db_path, self.exchange, self.strategies = db_path, exchange, strategies
+        self.context_db = context_db or db_path
         self._memo: dict[str, tuple[int, dict]] = {}
 
     def frame(self, symbol: str, now_ms: int) -> pd.DataFrame:
@@ -168,8 +171,14 @@ class SignalBoards:
             step = TIMEFRAME_MS[SIGNAL_TF]
             candles = store.load(self.exchange, symbol, SIGNAL_TF, now_ms - SIGNAL_BARS * step)
             df = closed_only(candles_to_frame(candles), now_ms, step) if candles else pd.DataFrame()
-            if len(df) and has_context(store):
-                ctx = ContextStore(self.db_path)
+            ctx_db = CandleStore(self.context_db) if self.context_db != self.db_path else store
+            try:
+                with_ctx = len(df) and has_context(ctx_db)
+            finally:
+                if ctx_db is not store:
+                    ctx_db.close()
+            if with_ctx:
+                ctx = ContextStore(self.context_db)
                 try:
                     df = attach_context(df, ctx, self.exchange, symbol, SIGNAL_TF)
                 finally:
@@ -280,6 +289,10 @@ def add_monitor_routes(app, *, settings, page, guard, auth, paths, csrf, control
     from .app import _e, _load_json
 
     perp = perp or PerpMarket()
+    from ..data.perp import db_for, futures_db_path
+
+    # each view its own candles: the Futures view reads only the perpetuals' database
+    fboards = boards or SignalBoards(futures_db_path(settings.db_path), exchange, context_db=settings.db_path)
     boards = boards or SignalBoards(settings.db_path, exchange)
     feed_path = getattr(paths, "feed", feedstats.DEFAULT_PATH)
     paper_state = getattr(paths, "paper_state", "")
@@ -310,8 +323,8 @@ def add_monitor_routes(app, *, settings, page, guard, auth, paths, csrf, control
         return JSONResponse({"error": "sign in"}, status_code=401) if redirect else None
 
     def feed_data():
-        return feed_health(feed_path, settings.db_path, exchange, workspace_symbols(), list(settings.timeframes),
-                           clock())
+        db = db_for(settings.db_path, "futures" if futures_view() else "spot")
+        return feed_health(feed_path, db, exchange, workspace_symbols(), list(settings.timeframes), clock())
 
     def risk_data():
         from ..trade.risk import RiskLimits
@@ -322,7 +335,9 @@ def add_monitor_routes(app, *, settings, page, guard, auth, paths, csrf, control
     def signal_data():
         now_ms = int(clock() * 1000)
         syms = workspace_symbols()
-        return [boards.board(s, now_ms) for s in syms[:FUTURES_TOP if futures_view() else SIGNAL_PAIRS]]
+        if futures_view():
+            return [fboards.board(s, now_ms) for s in syms[:FUTURES_TOP]]
+        return [boards.board(s, now_ms) for s in syms[:SIGNAL_PAIRS]]
 
     @app.get("/api/monitor/feed")
     def api_feed(request: Request):

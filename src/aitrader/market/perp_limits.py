@@ -52,7 +52,13 @@ def from_markets(markets: dict) -> dict:
 
 
 async def refresh(client, path: str = DEFAULT_PATH, now_ms: int | None = None) -> dict:
-    data = {"generated": now_ms or int(time.time() * 1000), "max_leverage": from_markets(await client.load_markets())}
+    return save(from_markets(await client.load_markets()), path, now_ms)
+
+
+def save(max_lev: dict, path: str = DEFAULT_PATH, now_ms: int | None = None) -> dict:
+    data = {"generated": now_ms or int(time.time() * 1000), "max_leverage": max_lev}
+    if not max_lev:  # an empty answer must not wipe the known limits
+        return load(path)
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:

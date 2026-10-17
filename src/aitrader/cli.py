@@ -53,14 +53,19 @@ def cmd_status(s: Settings, _args) -> int:
 
 
 async def cmd_download(s: Settings, args) -> int:
-    store = CandleStore(s.db_path)
+    from .data.perp import PerpCandles, db_for
+
+    mkt = getattr(args, "market", "spot") or "spot"
+    store = CandleStore(db_for(s.db_path, mkt))  # Futures AI: perpetual candles in its own database
     since = _ms(args.since)
     until = _ms(args.until) if args.until else None
     exchanges = args.exchange or EXCHANGES
     for ex in exchanges:
         adapter = make_adapter(ex, s)
+        if mkt == "futures":
+            adapter = PerpCandles(adapter)
         try:
-            for sym in args.symbol or configured_symbols(s.symbols):
+            for sym in args.symbol or configured_symbols(s.symbols, market=mkt):
                 for tf in args.timeframe or s.timeframes:
                     try:
                         n = await download(adapter, store, sym, tf, since, until)
@@ -90,14 +95,17 @@ async def cmd_collect(s: Settings, args) -> int:
     import time
 
     log = logging.getLogger("aitrader.collect")
+    from .data.perp import PerpCandles, futures_db_path
+
     store = CandleStore(s.db_path)
+    fstore = CandleStore(futures_db_path(s.db_path))  # Futures AI's perpetual candles, apart from spot
     exchanges = args.exchange or EXCHANGES
     adapters = {ex: make_adapter(ex, s) for ex in exchanges}
     try:
         while True:
             since = int(time.time() * 1000) - args.backfill_days * 86_400_000
             # the ranked pairs when AITRADER_PAIRS=ranked, plus any with an open paper position
-            from .market import gainers
+            from .market import gainers, perp_limits
 
             for gm in gainers.MARKETS:  # each scanner switched on: its list, about once an hour
                 gpath = gainers.path_for(gm)
@@ -105,7 +113,7 @@ async def cmd_collect(s: Settings, args) -> int:
                     continue
                 client = gainers.client_for(gm)
                 try:
-                    await gainers.refresh(client, gpath, market=gm)
+                    await gainers.refresh(client, gpath, market=gm, limits_path=perp_limits.DEFAULT_PATH)
                     log.info("%s top gainers: %s", gm, ", ".join(gainers.symbols(gpath)) or "none")
                 except Exception as exc:
                     log.warning("%s top gainers refresh failed: %s", gm, exc)
@@ -123,7 +131,6 @@ async def cmd_collect(s: Settings, args) -> int:
                 finally:
                     await client.close()
             from .learn import wallet
-            from .market import perp_limits
 
             if wallet.engines(wallet.engines_path(PAPER_STATE))["futures"] and perp_limits.due():
                 client = gainers.perp_client()  # Futures AI on: each coin's maximum leverage, once a day
@@ -133,21 +140,28 @@ async def cmd_collect(s: Settings, args) -> int:
                     log.warning("perpetual leverage limits refresh failed: %s", exc)
                 finally:
                     await client.close()
-            symbols = configured_symbols(s.symbols, keep=open_paper_symbols(PAPER_STATE))
+            # each engine its own market: Spot AI's pairs from spot, Futures AI's from the perpetuals
+            jobs = [("spot", store, configured_symbols(s.symbols, market="spot",
+                                                       keep=open_paper_symbols(PAPER_STATE, "spot"))),
+                    ("futures", fstore, configured_symbols(s.symbols, market="futures",
+                                                           keep=open_paper_symbols(PAPER_STATE, "futures")))]
             for ex, adapter in adapters.items():
-                for sym in symbols:
-                    for tf in s.timeframes:
-                        try:
-                            n = await download(adapter, store, sym, tf, since)
-                            if n:
-                                log.info("%s %s %s +%d", ex, sym, tf, n)
-                        except Exception as exc:
-                            log.warning("%s %s %s failed: %s", ex, sym, tf, exc)
+                for mkt, db, symbols in jobs:
+                    source = adapter if mkt == "spot" else PerpCandles(adapter)
+                    for sym in symbols:
+                        for tf in s.timeframes:
+                            try:
+                                n = await download(source, db, sym, tf, since)
+                                if n:
+                                    log.info("%s %s %s %s +%d", ex, mkt, sym, tf, n)
+                            except Exception as exc:
+                                log.warning("%s %s %s %s failed: %s", ex, mkt, sym, tf, exc)
             await asyncio.sleep(args.interval)
     finally:
         for a in adapters.values():
             await a.close()
         store.close()
+        fstore.close()
 
 
 async def cmd_stream(s: Settings, args) -> int:
@@ -657,7 +671,9 @@ def cmd_learn(s: Settings, args) -> int:
         entries = known_entries(reg.entries)
         if mkt == "spot":  # Spot AI never sells short: its picks don't test the short twins
             entries = [e for e in entries if e.kind != "short"]
-        store = CandleStore(s.db_path)
+        from .data.perp import db_for
+
+        store = CandleStore(db_for(s.db_path, mkt))  # Futures AI's pick is tested on perpetual candles
         try:
             if mkt == "futures":  # Futures AI's pick: longs costed as perpetuals too
                 from .backtest.engine import as_perp
@@ -819,6 +835,8 @@ def cmd_learn(s: Settings, args) -> int:
         pairs = symbols if args.symbol else (lambda: configured_symbols(s.symbols))  # re-read each tick
         # Spot AI trades the Spot scanner's gainers, Futures AI the Futures scanner's
         per_market = None if args.symbol else (lambda m: configured_symbols(s.symbols, market=m))
+        from .data.perp import futures_db_path
+
         trader = PaperTrader(store, args.registry, exchanges, pairs,
                              PaperConfig(start_equity=s.paper_start_usdt, backtest=cfg),
                              calendar=None if args.no_calendar else CalendarFilter(),
@@ -827,7 +845,8 @@ def cmd_learn(s: Settings, args) -> int:
                              context=context, events=EventLog(service="paper"),
                              news=None if args.no_news else NewsFilter(),
                              teacher=None if args.no_teacher else TeacherFilter(args.teacher_dir),
-                             market_symbols=per_market)
+                             market_symbols=per_market,
+                             futures_store=CandleStore(futures_db_path(s.db_path)))
         try:
             if args.once:
                 print(trader.tick())
@@ -935,13 +954,16 @@ def cmd_ai(s: Settings, args) -> int:
             return None
         cfg = BacktestConfig(taker_fee=s.paper_taker_fee, maker_fee=s.paper_maker_fee,
                              slippage_bps=s.paper_slippage_bps, max_cost_r=s.max_cost_r)
-        store = CandleStore(s.db_path)
+        from .data.perp import futures_db_path
+
+        store, fstore = CandleStore(s.db_path), CandleStore(futures_db_path(s.db_path))
         try:
             frame = build_dataset(store, strategies, args.exchange or EXCHANGES,
                                   args.symbol or s.symbols, cfg, args.include_final,
-                                  None if args.no_paper else args.paper_state)
+                                  None if args.no_paper else args.paper_state, futures_store=fstore)
         finally:
             store.close()
+            fstore.close()
         save_dataset(frame, args.dataset)
         print(f"{len(frame)} signals from {len(strategies)} strategies -> {args.dataset}")
         if len(frame):
@@ -1063,13 +1085,16 @@ def cmd_ai(s: Settings, args) -> int:
 
 def cmd_migrate(s: Settings, _args) -> int:
     """Bring the database schema up to date (run by deploy/update.sh after each update)."""
-    store = CandleStore(s.db_path)
-    try:
-        applied = store.migrate()
-        print(f"database {s.db_path}: schema v{store.schema_version()}"
-              + (f" (applied {', '.join(f'v{v}' for v in applied)})" if applied else " (up to date)"))
-    finally:
-        store.close()
+    from .data.perp import futures_db_path
+
+    for path in (s.db_path, futures_db_path(s.db_path)):  # spot, then Futures AI's perpetual candles
+        store = CandleStore(path)
+        try:
+            applied = store.migrate()
+            print(f"database {path}: schema v{store.schema_version()}"
+                  + (f" (applied {', '.join(f'v{v}' for v in applied)})" if applied else " (up to date)"))
+        finally:
+            store.close()
     return 0
 
 
@@ -1084,6 +1109,15 @@ def cmd_backup(s: Settings, args) -> int:
         store.backup(os.path.join(args.dest, os.path.basename(s.db_path)), candles=not getattr(args, "no_candles", False))
     finally:
         store.close()
+    from .data.perp import futures_db_path
+
+    fdb = futures_db_path(s.db_path)
+    if os.path.exists(fdb) and not getattr(args, "no_candles", False):  # Futures AI's perpetual candles
+        fstore = CandleStore(fdb)
+        try:
+            fstore.backup(os.path.join(args.dest, os.path.basename(fdb)))
+        finally:
+            fstore.close()
     for path in ("data/learn/registry.json", "data/learn/paper_state.json", "data/ai/models/registry.json",
                  "data/trade/live_state.json", "data/trade/control.json",
                  "data/golive/approval.json", "data/golive/attestations.json", "data/settings/keys.enc"):
@@ -1446,7 +1480,7 @@ def cmd_pairs(s: Settings, args) -> int:
         print(f"ranking saved to {args.out}")
         return 0
     if args.pairs_cmd == "gainers":
-        from .market import gainers
+        from .market import gainers, perp_limits
 
         gm = args.market
         gpath = gainers.path_for(gm)
@@ -1459,7 +1493,8 @@ def cmd_pairs(s: Settings, args) -> int:
         async def fetch():
             client = gainers.client_for(gm, args.exchange)
             try:
-                return await gainers.refresh(client, gpath, top=args.count, market=gm, window=args.window)
+                return await gainers.refresh(client, gpath, top=args.count, market=gm, window=args.window,
+                                             limits_path=perp_limits.DEFAULT_PATH)
             finally:
                 await client.close()
 
@@ -1540,6 +1575,8 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--exchange", action="append", choices=EXCHANGES)
     d.add_argument("--symbol", action="append")
     d.add_argument("--timeframe", action="append")
+    d.add_argument("--market", choices=("spot", "futures"), default="spot",
+                   help="spot candles (Spot AI) or USDT perpetual candles in the futures database (Futures AI)")
 
     c = sub.add_parser("check-data", help="run data-quality checks on stored candles")
     c.add_argument("--strict", action="store_true", help="exit 1 if any series has problems")

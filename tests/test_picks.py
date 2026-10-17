@@ -364,6 +364,32 @@ def test_paper_leverage_is_cut_to_each_coins_bybit_maximum(tmp_path):
     store.close()
 
 
+def test_the_futures_gainer_scan_also_saves_each_coins_maximum_leverage(tmp_path):
+    import asyncio
+
+    from aitrader.market import gainers, perp_limits
+
+    markets = {"NEW/USDT:USDT": {"symbol": "NEW/USDT:USDT", "swap": True, "linear": True, "quote": "USDT",
+                                "settle": "USDT", "base": "NEW", "limits": {"leverage": {"max": 12.5}}},
+               "NEW/USDT": {"symbol": "NEW/USDT", "spot": True, "base": "NEW", "quote": "USDT"}}
+
+    class Client:
+        async def load_markets(self):
+            return markets
+
+        async def fetch_tickers(self):
+            return {"NEW/USDT:USDT": {"percentage": 30.0, "quoteVolume": 5e7, "last": 1.0, "bid": 0.999, "ask": 1.0}}
+
+        async def fetch_ohlcv(self, sym, tf, limit):
+            return [[i, 1, 1, 1, 1, 1] for i in range(26)]
+
+    lp, gp = str(tmp_path / "limits.json"), str(tmp_path / "g.json")
+    asyncio.run(gainers.refresh(Client(), gp, market="futures", limits_path=lp, now_ms=5))
+    assert perp_limits.max_leverage("NEW/USDT", lp) == 12.5
+    perp_limits.save({}, lp)  # an empty answer keeps what is known
+    assert perp_limits.max_leverage("NEW/USDT", lp) == 12.5
+
+
 def test_the_futures_view_keeps_the_winners_on_futures_pairs_only(tmp_path, monkeypatch):
     """Shawn: on Futures, Keep only the winners tests and downloads only the Futures AI pairs."""
     import time

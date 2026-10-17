@@ -125,7 +125,9 @@ def add_pair_routes(app, *, settings, auth, jobs, page, guard, ranking_path: str
             body += _run_card(auth, token, rk, job, now, settings.symbols, ranking_path)
             symbols = [p["symbol"] for p in rk.get("pairs", [])[:20]] or list(settings.symbols)
         try:
-            db = CandleStore(settings.db_path)
+            from ..data.perp import db_for
+
+            db = CandleStore(db_for(settings.db_path, ws))  # Futures view: the perpetuals' candles
             try:
                 regimes = current_regimes(db, symbols, REGIME_TIMEFRAMES, REGIME_EXCHANGES, now_ms=now)
             finally:
@@ -260,8 +262,8 @@ def _gainers_card(auth, token, now: int, job, market: str = "futures") -> str:
     table = ('<table><tr><th>Pair</th><th>Score</th><th>1h</th><th>4h</th><th>24h</th><th>Rel. volume</th>'
              f'<th>Spread</th><th>Turnover</th><th>Paper</th></tr>{rows}</table>' if rows else "")
     what = ("Bybit USDT spot pairs. Spot AI buys them." if market == "spot" else
-            "Bybit USDT perpetual futures (also listed on spot, where the candles come from). Futures AI trades "
-            "them long and short.")
+            "Bybit USDT perpetual futures. Futures AI trades them long and short, on the perpetuals' own candles "
+            "(never spot prices).")
     return (f'<div class="card"><h3>{name} top gainers</h3><p>{state}. Window <b>{_e(window)}</b>. {_e(when)}</p>'
             f'<p class="small muted">{what} Kept: over {gainers.MIN_TURNOVER / 1e6:.0f}M USDT of 24h turnover, spread '
             f'at most {gainers.MAX_SPREAD_PCT:g}%. Score = rise over the window (%) + 2 x (relative volume - 1), at most '
