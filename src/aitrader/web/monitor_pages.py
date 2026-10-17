@@ -256,7 +256,8 @@ def risk_view(live_state: dict, paper_state: dict, db_path: str, exchange: str, 
             continue
         short = p.get("side") == "short"
         notional = float(p.get("notional") or p.get("cost") or 0.0)
-        positions.append({"symbol": p.get("symbol"), "short": short, "notional": round(notional, 2),
+        positions.append({"symbol": p.get("symbol"), "short": short, "perp": short or ":" in (p.get("market") or ""),
+                          "notional": round(notional, 2),
                           "leverage": float(p.get("leverage") or 1.0), "risk_usdt": p.get("risk_usdt"),
                           "stop": p.get("stop"), "stop_armed": bool(p.get("stop_armed"))})
     equity = float(live_state.get("last_equity") or 0.0)
@@ -264,7 +265,7 @@ def risk_view(live_state: dict, paper_state: dict, db_path: str, exchange: str, 
     today = sum(float(t.get("pnl_usdt") or 0) for t in live_state.get("closed") or [] if (t.get("exit_ts") or 0) >= day0)
     start = equity - today
     cap = limits.daily_loss_pct * start if start > 0 else None
-    margin = sum(futures.margin(p["notional"], p["leverage"]) for p in positions if p["short"])
+    margin = sum(futures.margin(p["notional"], p["leverage"]) for p in positions if p["perp"])
     exposure = sum(p["notional"] for p in positions)
     var = value_at_risk(positions, db_path, exchange, int(now * 1000)) if positions else 0.0
     return {
@@ -404,7 +405,7 @@ def _risk_card(r: dict, c: dict, csrf: str, e) -> str:
            f'{e(r["daily_cap_usdt"] if r["daily_cap_usdt"] is not None else "-")} USDT cap ({used:.0%} used)</p>')
     state = ("KILL SWITCH ON" if c.get("killed") else "SAFETY HALT" if c.get("halted")
              else "PAUSED" if c.get("paused") else "running")
-    pos = "".join(f"<tr><td>{e(p['symbol'])}</td><td>{'short' if p['short'] else 'long'}</td>"
+    pos = "".join(f"<tr><td>{e(p['symbol'])}</td><td>{'short' if p['short'] else 'long (futures)' if p.get('perp') else 'long'}</td>"
                   f"<td>{p['notional']:,.2f}</td><td>{'yes' if p['stop_armed'] else '<b class=bad>no</b>'}</td></tr>"
                   for p in r["positions"]) or '<tr><td colspan="4" class="muted">no open live positions</td></tr>'
     return (f'<div class="card"><h3>Risk and exposure</h3><p>Trading: <b>{e(state)}</b>'

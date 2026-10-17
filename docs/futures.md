@@ -75,7 +75,7 @@ On the live executor:
 | Backtests, reports, replay | short twins included |
 | Paper trading | shorts paper-traded with perp costs, isolated margin and the liquidation check |
 | AI trade filter | learned from long trades, so it doesn't judge shorts |
-| Live executor | sells the coin's USDT perpetual short (one-way mode, `AITRADER_LEVERAGE`), puts a reduce-only stop on Bybit above the entry, and buys back with reduce-only orders. Same live lock, go-live approval and kill switch as spot |
+| Live executor | sells the coin's USDT perpetual short (one-way mode, `AITRADER_LEVERAGE`), puts a reduce-only stop on Bybit above the entry, and buys back with reduce-only orders. The Futures AI's long signals are bought on the perpetual the same way (reduce-only stop below the entry, sold reduce-only). A perpetual never holds a long and a short at once (one-way mode): the later entry is skipped. Same live lock, go-live approval, 3x leverage cap and kill switch as spot |
 | API key | Contracts / Derivatives / Options permissions are now accepted; withdrawal and transfer rights are still refused, and the key must be bound to the server's IP |
 
 ## Before the first real short

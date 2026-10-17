@@ -152,7 +152,7 @@ def test_short_near_liquidation_halts_once(px):
     make, adapter, paper, events = px
     info = {"mark": 100.0, "liq_price": 140.0}
 
-    async def perp_position_info(symbol):
+    async def perp_position_info(symbol, side="short"):
         return dict(info)
 
     adapter.perp_position_info = perp_position_info
@@ -173,7 +173,7 @@ def test_short_near_liquidation_halts_once(px):
 def test_stop_beyond_half_the_real_liquidation_room_halts(px):
     make, adapter, *_ = px
 
-    async def perp_position_info(symbol):
+    async def perp_position_info(symbol, side="short"):
         return {"mark": 100.0, "liq_price": 108.0}  # Bybit's liquidation is nearer than estimated
 
     adapter.perp_position_info = perp_position_info

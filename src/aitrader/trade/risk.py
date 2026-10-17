@@ -79,8 +79,9 @@ class RiskEngine:
 
     def size(self, symbol: str, equity: float, free_cash: float, entry: float, stop: float,
              signal_risk: float, size_mult: float, open_positions: list[dict], short: bool = False,
-             leverage: float = 1.0) -> Sizing:
-        """Units to buy (or, ``short``, to sell on a perpetual at ``leverage``). ``open_positions``
+             leverage: float = 1.0, perp: bool | None = None) -> Sizing:
+        """Units to buy (or, ``short``, to sell on a perpetual at ``leverage``; ``perp`` a long
+        bought on the perpetual at ``leverage``, which a short always is). ``open_positions``
         are dicts with ``symbol`` and ``notional``."""
         lim = self.limits
         why = []
@@ -90,7 +91,7 @@ class RiskEngine:
             return Sizing(0, 0, 0, ["stop is not above the entry"])
         if not short and entry <= stop:
             return Sizing(0, 0, 0, ["stop is not below the entry"])
-        lev = max(1.0, leverage) if short else 1.0
+        lev = max(1.0, leverage) if short or perp else 1.0
         if len(open_positions) >= lim.max_open_positions:
             return Sizing(0, 0, 0, [f"{len(open_positions)} positions open (max {lim.max_open_positions})"])
         group = self.group(symbol)
@@ -105,7 +106,7 @@ class RiskEngine:
             "correlated group exposure": (lim.max_group_exposure_pct * equity - sum(p["notional"] for p in in_group)
                                           if group else float("inf")),
             "total exposure": lim.max_total_exposure_pct * equity - sum(p["notional"] for p in open_positions),
-            "free cash": free_cash * 0.995 * lev,  # leave room for the fee; a short needs only margin
+            "free cash": free_cash * 0.995 * lev,  # leave room for the fee; a perpetual needs only margin
         }
         for name, room in caps.items():
             if units * entry > room:
