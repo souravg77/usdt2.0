@@ -20,6 +20,7 @@ log = logging.getLogger(__name__)
 
 CACHE_S = 1.0
 LIMIT = 500  # enough history for the 200-bar EMA on the chart
+HISTORY_LIMIT = 1000  # older candles per request when the chart is scrolled back (Bybit's page size)
 
 
 class LiveMarket:
@@ -65,6 +66,34 @@ class LiveMarket:
                 return {"source": "database", "note": _why(exc),
                         "candles": self._saved(symbol, timeframe, limit)}
         return await self._cached(("c", symbol, timeframe, limit), fetch)
+
+    async def history(self, symbol: str, timeframe: str, before: int, step_ms: int, limit: int = HISTORY_LIMIT) -> dict:
+        """Up to ``limit`` closed candles that opened before ``before`` (ms), oldest first, for
+        scrolling the chart back in time; the collector's saved candles when Bybit can't be reached.
+        An empty list means there is no older history."""
+        limit = max(1, min(int(limit), HISTORY_LIMIT))
+        since = before - limit * step_ms
+
+        async def fetch():
+            try:
+                rows = await asyncio.wait_for(
+                    self.client().fetch_ohlcv(self._name(symbol), timeframe, since=since, limit=limit), timeout=10)
+                return {"source": "live", "candles": [r[:6] for r in rows if since <= r[0] < before]}
+            except Exception as exc:
+                return {"source": "database", "note": _why(exc),
+                        "candles": [r for r in self._saved_range(symbol, timeframe, since, before)]}
+        return await self._cached(("h", symbol, timeframe, before, limit), fetch)
+
+    def _saved_range(self, symbol: str, timeframe: str, start: int, end: int) -> list[list]:
+        try:
+            store = CandleStore(self.db_path)
+        except Exception:
+            return []
+        try:
+            rows = [c for c in store.load(self.exchange, symbol, timeframe, start) if c.ts < end]
+        finally:
+            store.close()
+        return [[c.ts, c.open, c.high, c.low, c.close, c.volume] for c in rows]
 
     async def tickers(self, symbols: list[str]) -> dict:
         async def fetch():

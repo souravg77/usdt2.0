@@ -424,10 +424,10 @@ paper trading. Nothing trades real money.</p>
         full = paper
         paper, execs = _workspace(paper, ws), {m: _workspace(st, ws) for m, st in execs.items()}
         body = [note, _workspace_note(ws), _trading_stats(c, settings, paths, paper, events, acct, ws),
-                '<div class="grid">', _market_card(paths, full, csrf, ws), _wallet_card(paths, paper, csrf, ws),
+                '<div class="grid pack">', _market_card(paths, full, csrf, ws), _wallet_card(paths, paper, csrf, ws),
                 "" if fut_view else _account_card(acct, csrf), _paper_switch_card(c, paths, events, jobs.list(), csrf, ws),
-                _ai_card(paths, jobs.list(), csrf, ws), _live_card(settings, paths, events), "</div>",
-                '<div class="grid">', controls, _gate_card(paths, csrf), "</div>",
+                _ai_card(paths, jobs.list(), csrf, ws), _live_card(settings, paths, events),
+                controls, _gate_card(paths, csrf), "</div>",
                 "<h2>Equity</h2>", _equity_svg(paper, execs),
                 "<h2>Open positions</h2>",
                 (close_ws + "</form>" if (paper.get("open") if isinstance(paper, dict) else None) else ""),
@@ -2046,6 +2046,9 @@ footer{text-align:center;padding:18px;border-top:1px solid var(--line)}
 .page-head{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:4px 0 16px}
 h1{font-size:1.5em;margin:0;letter-spacing:-.2px}h2{font-size:1.12em;margin:28px 0 10px}h3{margin:0 0 8px;font-size:.98em}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px}
+/* cards of different heights stack in columns, so no empty space is left under the short ones */
+.grid.pack{display:block;columns:300px;column-gap:14px}
+.grid.pack>*{break-inside:avoid;margin:0 0 14px;display:inline-block;width:100%;box-sizing:border-box}
 .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:16px;box-shadow:var(--shadow)}
 .narrow{max-width:400px}
 .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:14px}
@@ -2118,7 +2121,9 @@ padding:10px 12px;border-radius:var(--radius);font-weight:400;transition:border-
 .seg{background:none;border:none;color:var(--muted);padding:5px 10px;border-radius:7px;font-weight:600;font-size:.85em}
 .seg:hover{background:var(--card2);color:var(--fg)}.seg.active{background:var(--accent);color:var(--on-accent)}
 .ohlc{min-height:1.6em;margin:8px 0 6px;display:flex;flex-wrap:wrap;gap:4px 8px}
-#chart{display:block;width:100%;height:440px;touch-action:pan-y}
+#chart{display:block;width:100%;height:440px;touch-action:pan-y;cursor:grab}#chart.dragging{cursor:grabbing}
+.chart-nav{display:flex;gap:6px;justify-content:flex-end;margin-top:6px}
+.chart-btn{min-width:44px;min-height:40px;display:inline-flex;align-items:center;justify-content:center;padding:0 10px}.chart-btn[hidden]{display:none}
 #market:not(.js) .js-only{display:none}
 .studies{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0 2px}
 .chip{display:inline-flex;align-items:center;gap:6px;background:var(--bg2);border:1px solid var(--line);color:var(--muted);
