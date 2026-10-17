@@ -226,3 +226,31 @@ def test_build_dataset_skips_short_markets(tmp_path):
     strat = STRATEGIES["momentum_breakout"]()
     frame = build_dataset(store, [("mb", strat)], ["bybit"], ["BTC/USDT"])
     assert frame.empty and "hit_1r" in frame.columns
+
+
+def test_the_training_set_is_built_one_market_at_a_time(tmp_path, monkeypatch):
+    """Each market's candles are loaded once and let go before the next (not all kept at once), and
+    the rows match running each strategy on its own."""
+    import pandas as pd
+
+    from aitrader.ai import dataset
+    from aitrader.data.store import CandleStore
+    from aitrader.strategies import STRATEGIES
+    from test_learn import fill_store, synthetic
+
+    store = CandleStore(str(tmp_path / "c.db"))
+    df = synthetic(n=900)
+    for sym in ("BTC/USDT", "ETH/USDT"):
+        fill_store(store, df, sym=sym)
+    names = [n for n in STRATEGIES if "1h" in STRATEGIES[n]().spec.timeframes][:4]
+    strats = [(f"builtin-{n}", STRATEGIES[n]()) for n in names]
+    loads = []
+    real = store.load
+    monkeypatch.setattr(store, "load", lambda *a, **k: loads.append(a[:3]) or real(*a, **k))
+    frame = dataset.build_dataset(store, strats, ["bybit"], ["BTC/USDT", "ETH/USDT"])
+    assert sorted(loads) == sorted(set(loads))  # every market read once
+    alone = pd.concat([dataset.build_dataset(store, [s], ["bybit"], ["BTC/USDT", "ETH/USDT"]) for s in strats])
+    assert len(frame) > 0 and len(frame) == len(alone) and frame["strategy"].value_counts().to_dict() == \
+        alone["strategy"].value_counts().to_dict()
+    assert frame["atr_pct"].dtype == "float32"
+    store.close()
