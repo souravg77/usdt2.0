@@ -242,3 +242,31 @@ def test_chart_starts_with_the_indicators_the_strategies_use(world):
     assert 'data-study="atr" data-on="1"' in r.text and 'data-study="cci" data-on="0"' in r.text  # stops use ATR
     assert "EMA 20/50/200 (2)" in r.text and 'id="studies-reset"' in r.text
     assert "studies-reset" in client.get("/static/market.js").text
+
+
+def test_chart_scrolls_back_through_older_candles(world):
+    """Dragging or swiping the chart sideways asks for the candles before the oldest one shown."""
+    client, fake, _ = world
+    assert client.get(f"/api/market/history?symbol=BTC/USDT&tf=1h&before={NOW}").status_code == 401
+    login(client)
+    page = client.get("/markets?symbol=BTC/USDT&tf=1h").text
+    for act in ("back", "out", "in", "fwd", "latest"):
+        assert f'data-chart="{act}"' in page
+    assert "swipe it sideways" in page
+    assert client.get("/api/market/history?symbol=BTC/USDT&tf=1h&before=0").status_code == 400
+    asked = []
+
+    async def ohlcv(symbol, timeframe, since=None, limit=200):
+        asked.append((symbol, timeframe, since, limit))
+        return [[since + i * HOUR, 1, 2, 0.5, 1.5, 3] for i in range(limit + 2)]  # a little past `before`
+    fake.fetch_ohlcv = ohlcv
+    before = NOW - 10 * HOUR
+    r = client.get(f"/api/market/history?symbol=BTC/USDT&tf=1h&before={before}").json()
+    assert r["source"] == "live" and asked == [("BTC/USDT", "1h", before - 1000 * HOUR, 1000)]
+    assert len(r["candles"]) == 1000 and r["candles"][-1][0] == before - HOUR  # nothing at or after `before`
+    fake.fetch_ohlcv = FakeBybit.fetch_ohlcv.__get__(fake)
+    fake.down = True  # Bybit unreachable: the collector's saved candles instead
+    cut = NOW - 11 * HOUR
+    r = client.get(f"/api/market/history?symbol=BTC/USDT&tf=1h&before={cut}").json()
+    assert r["source"] == "database" and r["candles"] and all(c[0] < cut for c in r["candles"])
+    assert len(r["candles"]) == 20
