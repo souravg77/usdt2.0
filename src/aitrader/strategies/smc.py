@@ -116,4 +116,39 @@ class LiquiditySweepReversal(_Family):
                              f"time_stop={p['time_stop']}", "swept the 20-bar low and closed back above it")
 
 
-SMC_STRATEGIES = (FvgRetest, OrderBlockRetest, LiquiditySweepReversal)
+class SweepThenGap(_Family):
+    spec = StrategySpec(
+        name="sweep_then_gap",
+        source="Gemini \"institutional upgrades\" file Shawn shared (2026-10-17), rules written for this project: "
+        "liquidity sweep followed by a fair value gap",
+        timeframes=("1h", "4h", "15m"),
+        regime="Any: the sweep itself is the setup.",
+        setup="Two bars ago a candle swept the previous 15 bars' low and closed back above it; this bar's low "
+        "is above that sweep candle's high, leaving a bullish fair value gap (a fast move up after the stop hunt).",
+        entry="Market order at the next bar's open.",
+        stop="The sweep candle's low minus 0.25 x ATR(14).",
+        target="2.5R fixed; time stop after 30 bars.",
+        filter=NO_TRADE,
+        size="0.5% of equity at risk.",
+        decisions=("Gemini's version enters with a limit order at the top of the gap; here it is a market order "
+                   "at the next open like the other strategies (the limit-entry switch on the Trading page can "
+                   "turn it into a limit order).",),
+    )
+    eligible_regimes = ("trend-up", "range", "uncertain")
+
+    @classmethod
+    def default_params(cls):
+        return {**BASE, "lookback": 15, "stop_atr": 0.25, "target_r": 2.5, "time_stop": 30}
+
+    def generate(self, df, exchange, symbol, timeframe):
+        p = self.params
+        sw = liquidity_sweeps(df, p["lookback"])
+        gap = df["low"] > df["high"].shift(2)  # the 3-bar bullish gap that starts at the sweep candle
+        cond = (sw["low"].shift(2) > 0) & gap & _tradeable(df, timeframe, p)
+        stops = df["low"].shift(2) - p["stop_atr"] * atr(df)
+        stops = stops.where(np.isfinite(stops))
+        return self._signals(df, cond, stops, self._fixed_r(), exchange, symbol, timeframe,
+                             f"time_stop={p['time_stop']}", "swept the lows, then left a fair value gap going up")
+
+
+SMC_STRATEGIES = (FvgRetest, OrderBlockRetest, LiquiditySweepReversal, SweepThenGap)

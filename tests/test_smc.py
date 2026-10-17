@@ -71,7 +71,7 @@ def test_the_three_strategies_are_built_in_and_run():
     from test_strategies import synthetic
 
     df = synthetic(n=1500)
-    for name in ("fvg_retest", "order_block_retest", "liquidity_sweep_reversal"):
+    for name in ("fvg_retest", "order_block_retest", "liquidity_sweep_reversal", "sweep_then_gap"):
         strat = STRATEGIES[name]()
         sigs = strat.generate(df, "bybit", "BTC/USDT", "1h")
         assert all(s.stop < s.entry < s.target for s in sigs), name
@@ -89,3 +89,19 @@ def test_the_chart_draws_the_zones_and_the_strategies_count_them():
         assert "smc" in indicators(Entry(id=f"builtin-{name}", kind="builtin", name=name))
     rule = Entry(id="r", kind="rule", name="r", spec={"entry": [{"left": "sweep_low(20)", "op": ">", "right": 0}]})
     assert "smc" in indicators(rule)
+
+
+def test_sweep_then_gap_needs_both_the_sweep_and_the_gap():
+    from aitrader.strategies.smc import SweepThenGap
+
+    flat = [(10, 10.5, 9.5, 10)] * 200
+    rows = flat + [(10, 10.2, 9.2, 10.1),  # sweeps the 15-bar low (9.5), closes back above
+                   (10.1, 11.5, 10.0, 11.4),  # the fast move up
+                   (11.4, 12.0, 10.4, 11.8)]  # low 10.4 > sweep candle high 10.2: the gap
+    s = SweepThenGap()
+    s.params["atr_pct_max"] = 1.0  # only the setup is under test, not the calm-market filter
+    sigs = s.generate(bars(rows), "bybit", "BTC/USDT", "1h")
+    assert [x.ts for x in sigs] == [203 * H] and sigs[0].stop < 9.2 and sigs[0].stop < sigs[0].entry < sigs[0].target
+    no_gap = rows[:-1] + [(11.4, 12.0, 10.1, 11.8)]  # low 10.1 is below the sweep candle high: no gap
+    assert s.generate(bars(no_gap), "bybit", "BTC/USDT", "1h") == []
+    assert "sweep_then_gap" in STRATEGIES
