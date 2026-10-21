@@ -96,6 +96,7 @@ async def cmd_collect(s: Settings, args) -> int:
 
     log = logging.getLogger("aitrader.collect")
     from .data.perp import PerpCandles, futures_db_path
+    from .learn.paper import history_start
 
     store = CandleStore(s.db_path)
     fstore = CandleStore(futures_db_path(s.db_path))  # Futures AI's perpetual candles, apart from spot
@@ -151,7 +152,9 @@ async def cmd_collect(s: Settings, args) -> int:
                     for sym in symbols:
                         for tf in s.timeframes:
                             try:
-                                n = await download(source, db, sym, tf, since)
+                                # at least the candles a strategy needs on this timeframe (250 daily
+                                # candles are far more than --backfill-days)
+                                n = await download(source, db, sym, tf, min(since, history_start(tf)))
                                 if n:
                                     log.info("%s %s %s %s +%d", ex, mkt, sym, tf, n)
                             except Exception as exc:

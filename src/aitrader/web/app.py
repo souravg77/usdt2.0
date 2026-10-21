@@ -1545,6 +1545,24 @@ def _scan_now_form(csrf: str, paths, back: str = "/scan-log") -> str:
             + "</span></form>")
 
 
+def _idle_text(e: dict) -> str:
+    """Why an engine read no chart in a scan, from the paper trader's counts."""
+    idle = e.get("idle")
+    if not isinstance(idle, dict) or not idle:
+        return "no new candle for this engine"
+    parts = []
+    for why, n in sorted(idle.items(), key=lambda kv: -kv[1]):
+        if why.startswith("fewer than") and e.get("thin"):
+            parts.append(f"{why} on {n} charts (e.g. {', '.join(e['thin'][:4])})")
+        elif why in ("no new candle", "no candles collected") or why.startswith("fewer than"):
+            parts.append(f"{why} on {n} charts")
+        elif why == "a position is already open":
+            parts.append(f"{why} for {n} strategy charts")
+        else:
+            parts.append(why)
+    return "; ".join(parts)
+
+
 def _scans_table(paper: dict, ws: str, now_ms: int, limit: int = 60) -> str:
     scans = [s for s in paper.get("scans", []) if isinstance(s, dict)]
     lp = paper.get("last_pass") or {}
@@ -1561,7 +1579,7 @@ def _scans_table(paper: dict, ws: str, now_ms: int, limit: int = 60) -> str:
         if s.get("blocked") and not e.get("charts"):
             what = f'<span class="bad">no new entries: {_e(s["blocked"])}</span>'
         elif not e.get("charts"):
-            what = '<span class="muted">no new candle for this engine</span>'
+            what = f'<span class="muted">no chart read: {_e(_idle_text(e))}</span>'
         else:
             what = (f'{e["charts"]} charts checked · '
                     + (f'<b class="good">{e.get("opened", 0)} opened</b>' if e.get("opened") else "0 opened")

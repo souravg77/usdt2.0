@@ -53,6 +53,13 @@ log = logging.getLogger(__name__)
 DEFAULT_STATE = "data/learn/paper_state.json"
 WINDOW_BARS = 1000  # history loaded per market, enough to warm up EMA200 and friends
 MIN_BARS = 250
+
+
+def history_start(tf: str, now_ms: int | None = None) -> int:
+    """How far back the collector keeps ``tf`` candles so a chart has the ``MIN_BARS`` the paper
+    trader needs (with a margin for gaps)."""
+    now_ms = now_ms or int(time.time() * 1000)
+    return now_ms - (MIN_BARS + 50) * TIMEFRAME_MS[tf]
 MAX_DATA_AGE_MS = 15 * 60_000  # a signal on a candle that closed longer ago than this (or a bar) is not taken
 
 
@@ -145,6 +152,8 @@ class PaperTrader:
         self._guards, self._trends, self._returns = guards.load(self.guards_path), {}, {}
         # this pass's signals per engine, for the scan log: {market: {"opened": n, "skipped": n, "why": {...}}}
         self._pass_log = {m: {"opened": 0, "skipped": 0, "why": {}} for m in wallet.MARKETS}
+        # why an engine read no chart this pass, for the scan log: {market: {reason: set of what}}
+        idle: dict = {m: {} for m in wallet.MARKETS}
         for m in wallet.MARKETS:  # trip, hold or clear each engine's loss breaker
             br = guards.update_breaker(self.state, self._wallet(m), m, self._guards[m], now_ms)
             if br and br.get("at") == now_ms:
@@ -171,6 +180,13 @@ class PaperTrader:
         # each engine's own "Keep only the best" ranking: a strategy kept by one never trades the other
         kept = {m: keep.kept_ids(self.registry_path, m) for m in wallet.MARKETS}
         uses = wallet.filters(self.filters_path)
+        for m in wallet.MARKETS:
+            if not engines[m]:
+                idle[m]["it is turned off"] = {m}
+            elif not per_market[m]:
+                idle[m]["no pairs in its list" + (" (is the Futures top gainers scanner on?)" if m == "futures" else "")] = {m}
+        strategies_on = {m: 0 for m in wallet.MARKETS}  # strategies each engine may trade
+        tf_on = {m: 0 for m in wallet.MARKETS}  # ...that trade one of its ticked timeframes
         built, broken, checks = 0, 0, 0  # what this pass looked at, for the dashboard
         checks_by = {m: 0 for m in wallet.MARKETS}
         pending: list[tuple] = []  # (key, engine, signal, position) passing every check: opened after the pass
@@ -187,6 +203,9 @@ class PaperTrader:
                 broken += 1
                 continue
             built += 1
+            for m in wallet.MARKETS:
+                strategies_on[m] += trades[m]
+                tf_on[m] += trades[m] and any(t in self._guards[m]["timeframes"] for t in strat.spec.timeframes)
             for ex in self.exchanges:
                 for sym in symbols:
                     live = {m: engines[m] and trades[m] and sym in per_market[m] for m in wallet.MARKETS}
@@ -200,9 +219,12 @@ class PaperTrader:
                             # a long takes the plain key on Spot and key|futures on Futures; a short
                             # (Futures only) takes the plain key
                             slots = [key] if mkt == "spot" else [key, key + FUTURES_SUFFIX]
-                            if not allow or all(k in self.state["open"] for k in slots):
+                            market = (mkt, ex, sym, tf)
+                            if not allow:
                                 continue
-                            market = (mkt, ex, sym, tf)  # each engine its own candles: spot or perpetual
+                            if all(k in self.state["open"] for k in slots):
+                                idle[mkt].setdefault("a position is already open", set()).add(key)
+                                continue  # each engine its own candles: spot or perpetual
                             if market not in frames:
                                 df = self._frame(ex, sym, tf, now_ms - WINDOW_BARS * TIMEFRAME_MS[tf], now_ms, mkt)
                                 close = int(df["ts"].iloc[-1]) + TIMEFRAME_MS[tf] if df is not None and len(df) else None
@@ -210,7 +232,14 @@ class PaperTrader:
                                                   and (manual is not None or self._seen.get(market) != close))
                             df, newest_close, fresh = frames[market]
                             # signals only appear when a candle closes: skip markets with no new candle
-                            if not fresh or df is None or len(df) < MIN_BARS:
+                            if df is None:
+                                idle[mkt].setdefault("no candles collected", set()).add(market)
+                                continue
+                            if len(df) < MIN_BARS:
+                                idle[mkt].setdefault(f"fewer than {MIN_BARS} candles", set()).add(market)
+                                continue
+                            if not fresh:
+                                idle[mkt].setdefault("no new candle", set()).add(market)
                                 continue
                             checks += 1
                             checks_by[mkt] += 1
@@ -297,6 +326,13 @@ class PaperTrader:
         self.state["last_pass"] = {"at": now_ms, "strategies": built, "broken": broken, "pairs": len(symbols),
                                    "markets": len({m[1:] for m in frames}), "new_candles": sum(1 for *_x, f in frames.values() if f),
                                    "checks": checks, "newest_candle": newest}
+        for m in wallet.MARKETS:
+            if engines[m] and per_market[m] and not strategies_on[m]:
+                idle[m]["no strategy is set to trade on it (WIN only or Keep the best)"] = {m}
+            elif engines[m] and per_market[m] and not tf_on[m]:
+                idle[m]["no strategy trades its ticked timeframes"] = {m}
+            self._pass_log[m]["idle"] = {why: len(what) for why, what in idle[m].items()}
+            self._pass_log[m]["thin"] = sorted(f"{x[2]} {x[3]}" for x in idle[m].get(f"fewer than {MIN_BARS} candles", ()))[:8]
         if checks or blocked or manual is not None or not self._logged:
             self._log_scan(now_ms, built, len(symbols), checks_by, blocked, manual)
             self._logged = True
