@@ -126,13 +126,18 @@ class PaperTrader:
         self.teacher = teacher  # learn.teacher.TeacherFilter: follows the lessons a person turned on
         self.state = {"open": {}, "trades": [], "equity": {}, "last_signal": {}}
         self._seen: dict = {}  # market -> newest candle close already evaluated (this process)
+        self._logged = False  # the first pass after a start is always in the scan log
+        self.scan_path = wallet.scan_request_path(state_path)  # the Scan now button's request
         if os.path.exists(state_path):
             with open(state_path, encoding="utf-8") as fh:
                 self.state.update(json.load(fh))
 
     # ---- one pass -------------------------------------------------------------------------------
 
-    def tick(self, now_ms: int | None = None) -> dict:
+    def tick(self, now_ms: int | None = None, manual: dict | None = None) -> dict:
+        """One pass over the charts. ``manual`` (a Scan now request: who asked) re-reads every chart's
+        newest closed candle instead of only the ones that closed since the last pass; a signal
+        already handled is never taken twice."""
         now_ms = now_ms or int(time.time() * 1000)
         reg = Registry(self.registry_path)  # re-read: `learn` commands may have changed it
         events = {"opened": [], "closed": [], "retired": [], "filtered": []}
@@ -201,7 +206,8 @@ class PaperTrader:
                             if market not in frames:
                                 df = self._frame(ex, sym, tf, now_ms - WINDOW_BARS * TIMEFRAME_MS[tf], now_ms, mkt)
                                 close = int(df["ts"].iloc[-1]) + TIMEFRAME_MS[tf] if df is not None and len(df) else None
-                                frames[market] = (df, close, close is not None and self._seen.get(market) != close)
+                                frames[market] = (df, close, close is not None
+                                                  and (manual is not None or self._seen.get(market) != close))
                             df, newest_close, fresh = frames[market]
                             # signals only appear when a candle closes: skip markets with no new candle
                             if not fresh or df is None or len(df) < MIN_BARS:
@@ -221,7 +227,7 @@ class PaperTrader:
                             self.state["last_signal"][seen_key] = sig.ts
                             late = now_ms - newest_close
                             if late > max_data_age(tf):  # the candle arrived late: its prices are old now
-                                if market not in self._seen:
+                                if market not in self._seen or manual is not None:
                                     # the first look at this market since the trader started (a restart or
                                     # update) or since the pair joined the list: a candle that closed hours
                                     # ago is history, not a missed trade, so it isn't listed as one
@@ -291,8 +297,9 @@ class PaperTrader:
         self.state["last_pass"] = {"at": now_ms, "strategies": built, "broken": broken, "pairs": len(symbols),
                                    "markets": len({m[1:] for m in frames}), "new_candles": sum(1 for *_x, f in frames.values() if f),
                                    "checks": checks, "newest_candle": newest}
-        if checks or blocked:
-            self._log_scan(now_ms, built, len(symbols), checks_by, blocked)
+        if checks or blocked or manual is not None or not self._logged:
+            self._log_scan(now_ms, built, len(symbols), checks_by, blocked, manual)
+            self._logged = True
         if checks:
             log.info("paper pass: %d strategies checked %d new candles (%d markets), %d opened, %d skipped",
                      built, checks, len(frames), len(events["opened"]), len(events["filtered"]))
@@ -312,7 +319,7 @@ class PaperTrader:
         try:
             while stop_after is None or n < stop_after:
                 try:
-                    ev = self.tick()
+                    ev = self.tick(manual=wallet.take_scan_request(self.scan_path))
                     if any(ev.values()):
                         log.info("paper tick: %s", {k: len(v) for k, v in ev.items()})
                 except Exception as exc:  # keep the service alive; the next tick retries
@@ -323,11 +330,19 @@ class PaperTrader:
                     beat.beat(open=len(self.state["open"]))
                 n += 1
                 if stop_after is None or n < stop_after:
-                    time.sleep(interval)
+                    self._wait(interval)
         except BaseException as exc:
             if self.events is not None and not isinstance(exc, KeyboardInterrupt):
                 self.events.emit("crash", f"paper service stopped: {exc!r}", level="error")
             raise
+
+    def _wait(self, interval: float) -> None:
+        """Sleep until the next pass, waking early when someone presses Scan now."""
+        end = time.monotonic() + interval
+        while (left := end - time.monotonic()) > 0:
+            if os.path.exists(self.scan_path):
+                return
+            time.sleep(min(2.0, left))
 
     # ---- internals ------------------------------------------------------------------------------
 
@@ -545,15 +560,23 @@ class PaperTrader:
             log.exception("backtest teacher failed on %s; taking the signal as is", entry_id)
             return passthrough
 
-    def _log_scan(self, now_ms: int, strategies: int, pairs: int, checks_by: dict, blocked: str) -> None:
+    def _log_scan(self, now_ms: int, strategies: int, pairs: int, checks_by: dict, blocked: str,
+                  manual: dict | None = None) -> None:
         """One row per pass that read new candles (or was blocked), for the Scan log page: what each
         engine checked and what became of its signals. A blocked pass is logged once per reason."""
         scans = self.state.setdefault("scans", [])
-        if not any(checks_by.values()) and scans and scans[-1].get("blocked") == blocked:
+        if (not any(checks_by.values()) and manual is None and self._logged and scans
+                and scans[-1].get("blocked") == blocked):
             return
-        scans.append({"at": now_ms, "strategies": strategies, "pairs": pairs, "blocked": blocked,
-                      "engines": {m: {"charts": checks_by[m], **self._pass_log[m]} for m in wallet.MARKETS}})
+        row = {"at": now_ms, "strategies": strategies, "pairs": pairs, "blocked": blocked,
+               "engines": {m: {"charts": checks_by[m], **self._pass_log[m]} for m in wallet.MARKETS}}
+        if manual is not None:
+            row["manual"] = str(manual.get("by") or "")
+        elif not self._logged:
+            row["started"] = True
+        scans.append(row)
         del scans[:-300]
+
     def _open_agreed(self, pending: list[tuple], events: dict) -> None:
         """Open this pass's signals. With an engine's ``agree`` rule above 1, a coin is only traded
         when at least that many different strategies signal the same side on it in the same pass

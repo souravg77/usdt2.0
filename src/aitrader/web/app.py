@@ -376,7 +376,7 @@ paper trading. Nothing trades real money.</p>
                        csrf=lambda token: _csrf(auth, token), jobs=jobs, exchange=EXCHANGE)
 
     @app.get("/scan-log")
-    def scan_log(request: Request, show: str = "all"):
+    def scan_log(request: Request, show: str = "all", msg: str = "", bad: str = ""):
         """How trades are scanned and taken: every pass over the charts, every signal and what
         became of it, and what the real-money trader did with them (one workspace at a time)."""
         user, token, redirect = guard(request)
@@ -390,8 +390,10 @@ paper trading. Nothing trades real money.</p>
         live = [e for e in events if str(e.get("service") or "").startswith("executor")
                 and e.get("kind") != "heartbeat"]
         show = show if show in ("all", "opened", "skipped") else "all"
-        body = [_workspace_note(ws), _scan_steps(ws),
-                "<h2>Scans</h2>", _scans_table(paper, ws, int(time.time() * 1000)),
+        note = f'<p class="{"bad" if bad else "good"}">{_e(msg)}</p>' if msg else ""
+        body = [note, _workspace_note(ws), _scan_steps(ws),
+                "<h2>Scans</h2>", _scan_now_form(_csrf(auth, token), paths),
+                _scans_table(paper, ws, int(time.time() * 1000)),
                 "<h2>Signals</h2>", _signal_log(_workspace(paper, ws), show),
                 "<h2>Real-money trader</h2>",
                 '<p class="small muted">What the live trader did with the paper trades it copies (both engines). '
@@ -457,12 +459,13 @@ paper trading. Nothing trades real money.</p>
                 _positions_table(paper, execs, csrf, _control().close_requests(), futures_view=fut_view,
                                  why=_indicator_names(paths.registry)),
                 "<h2>Signals</h2>", _signals_section(paper, int(time.time() * 1000)),
+                _scan_now_form(csrf, paths, back="/trading"),
                 "<h2>Trade log</h2>", _trades_table(paper, execs),
                 "<h2>Events</h2>", _events_table(_workspace_events(events, ws))]
         body.append('<script src="/static/positions.js" defer></script>')
         return page("Trading", "".join(body), user, token, refresh=60)
 
-    def _control_post(request: Request, csrf: str, action) -> Response:
+    def _control_post(request: Request, csrf: str, action, back: str = "/trading") -> Response:
         user, token, redirect = guard(request)
         if redirect:
             return redirect
@@ -470,7 +473,18 @@ paper trading. Nothing trades real money.</p>
             return PlainTextResponse("bad form token; reload the page", status_code=403)
         out = action(user)
         text, ok = out if isinstance(out, tuple) else (out, True)
-        return RedirectResponse(f"/trading?msg={_q(text)}{'' if ok else '&bad=1'}", status_code=303)
+        return RedirectResponse(f"{back}?msg={_q(text)}{'' if ok else '&bad=1'}", status_code=303)
+
+    @app.post("/trading/paper/scan")
+    def trading_paper_scan(request: Request, csrf: str = Form(""), back: str = Form("/scan-log")):
+        def act(user):
+            from ..learn import wallet
+
+            wallet.request_scan(wallet.scan_request_path(paths.paper_state), by=user)
+            _event("paper_scan", f"manual scan of every chart asked for from the dashboard by {user}")
+            return ("Scanning every chart now (Spot AI and Futures AI). The result shows under Scans in a "
+                    "minute or less; this page refreshes by itself.")
+        return _control_post(request, csrf, act, back="/trading" if back == "/trading" else "/scan-log")
 
     def _event(kind: str, text: str, level: str = "info") -> None:
         from ..ops import EventLog
@@ -1511,18 +1525,34 @@ def _scan_steps(ws: str) -> str:
             "(if turned on), and how many strategies must agree (when that rule is set).</li>"
             "<li>A signal that passes opens a paper trade. The real-money trader copies it only for an approved "
             "strategy with live trading unlocked, after its own risk checks.</li></ol>"
-            '<p class="small muted">Scans below are the passes that read new candles, newest first. Signals show '
+            '<p class="small muted">Scans below are the passes that read new candles and every Scan now press, newest first. Signals show '
             "every one of the last 500 and the check that stopped it. The page refreshes every 30 seconds.</p></details>")
+
+
+def _scan_now_form(csrf: str, paths, back: str = "/scan-log") -> str:
+    """The Scan now button: the paper trader re-reads every chart's newest closed candle at once."""
+    from ..learn import wallet
+
+    waiting = os.path.exists(wallet.scan_request_path(paths.paper_state))
+    return (f'<form method="post" action="/trading/paper/scan" class="row">{csrf}'
+            f'<input type="hidden" name="back" value="{_e(back)}"><button>Scan now</button>'
+            '<span class="small muted">'
+            + ("A scan is waiting to start; the paper trader picks it up within a few seconds."
+               if waiting else
+               "Checks every strategy on every pair and ticked timeframe straight away, on the newest closed "
+               "candle, instead of waiting for the next candle to close. A signal already handled is not "
+               "taken twice.")
+            + "</span></form>")
 
 
 def _scans_table(paper: dict, ws: str, now_ms: int, limit: int = 60) -> str:
     scans = [s for s in paper.get("scans", []) if isinstance(s, dict)]
     lp = paper.get("last_pass") or {}
     head = (f'<p class="small muted">Last check {_ms(lp.get("at"))}: {lp.get("strategies", 0)} strategies on '
-            f'{lp.get("pairs", 0)} pairs.</p>' if lp else "")
+            f'{lp.get("pairs", 0)} pairs, {lp.get("checks", 0)} new charts read.</p>' if lp else "")
     if not scans:
-        return head + ('<p class="muted">No scan logged yet. Scans are logged from this update on, each time '
-                       "a candle closes.</p>")
+        return head + ('<p class="muted">No scan logged yet. A scan is logged each time a candle closes, when '
+                       "the paper trader starts, and when you press Scan now.</p>")
     rows = []
     for s in reversed(scans[-limit:]):
         e = (s.get("engines") or {}).get(ws) or {}
@@ -1537,6 +1567,10 @@ def _scans_table(paper: dict, ws: str, now_ms: int, limit: int = 60) -> str:
                     + (f'<b class="good">{e.get("opened", 0)} opened</b>' if e.get("opened") else "0 opened")
                     + (f' · <span class="warn">{e["skipped"]} skipped</span> ({_e(reasons)})' if e.get("skipped")
                        else "" if e.get("opened") else " · no signal"))
+        if "manual" in s:
+            what = f'<b>Scan now</b>{" by " + _e(s["manual"]) if s["manual"] else ""} · ' + what
+        elif s.get("started"):
+            what = "<b>paper trader started</b> · " + what
         rows.append(f'<tr><td>{_ms(s.get("at"))}</td><td class="small">{s.get("strategies", 0)} strategies, '
                     f'{s.get("pairs", 0)} pairs</td><td class="small">{what}</td></tr>')
     return head + f"<table><tr><th>Scan</th><th>Looked at</th><th>Result</th></tr>{''.join(rows)}</table>"

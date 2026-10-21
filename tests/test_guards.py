@@ -513,3 +513,70 @@ def test_a_trade_opens_only_when_enough_strategies_agree(tmp_path):
     agreed = [p for p in three.state["open"].values() if p.get("agreed")] + \
         [t for t in three.state["trades"] if t.get("agreed")]
     assert all(set(p["agreed"]) == {"up0", "up1", "up2"} for p in agreed)
+
+
+def test_scan_now_rereads_every_chart_without_taking_a_signal_twice(tmp_path, monkeypatch):
+    """Shawn: give a button to scan manually."""
+    import time as _time
+
+    from fastapi.testclient import TestClient
+    from test_learn import EVERY_UP_BAR, fill_store, synthetic
+    from test_web import PW, login
+
+    from aitrader.config import Settings
+    from aitrader.data.store import CandleStore
+    from aitrader.learn import Entry, PaperTrader, Registry
+    from aitrader.learn.rules import validate_spec
+    from aitrader.web import Auth, JobRunner, Paths, create_app
+
+    store = CandleStore(str(tmp_path / "c.db"))
+    df = synthetic(n=700)
+    fill_store(store, df, sym="BTC/USDT")
+    reg = Registry(str(tmp_path / "reg.json"))
+    reg.add(Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR), status="paper"))
+    reg.save()
+    state = str(tmp_path / "paper_state.json")
+    wallet.set_engine(wallet.engines_path(state), "futures", False)
+    trader = PaperTrader(store, str(tmp_path / "reg.json"), ["bybit"], ["BTC/USDT"], state_path=state)
+    now = int(df.ts.iloc[650]) + H
+    trader.tick(now_ms=now)
+    assert trader.state["scans"][-1].get("started")  # the first pass after a start is always logged
+    signals, scans = len(trader.state["signals"]), len(trader.state["scans"])
+    trader.tick(now_ms=now + 1000)  # no candle closed since: nothing to log
+    assert len(trader.state["scans"]) == scans
+    trader.state["open"].clear()  # as if its trade had closed: the coin is free again
+    trader.tick(now_ms=now + 2000, manual={"by": "shawn"})
+    row = trader.state["scans"][-1]
+    assert row["manual"] == "shawn" and row["engines"]["spot"]["charts"] > 0  # every chart read again
+    assert row["engines"]["spot"]["opened"] == 0 and len(trader.state["signals"]) == signals  # nothing twice
+    # the button: the dashboard leaves a request, the running paper trader wakes for it and takes it once
+    req = wallet.scan_request_path(state)
+    assert wallet.take_scan_request(req) is None
+    wallet.request_scan(req, by="shawn")
+    t0 = _time.monotonic()
+    trader._wait(30)
+    assert _time.monotonic() - t0 < 5
+    monkeypatch.setattr(trader, "tick", lambda now_ms=None, manual=None: seen.append(manual) or {})
+    seen: list = []
+    trader.run(interval=0, stop_after=1)
+    assert seen[0]["by"] == "shawn" and not os.path.exists(req)
+    store.close()
+
+    monkeypatch.chdir(tmp_path)
+    paths = Paths()
+    os.makedirs("data/learn")
+    json.dump(trader.state, open(paths.paper_state, "w"))
+    client = TestClient(create_app(Settings(), Auth("admin", PW, "k"), JobRunner(str(tmp_path / "jobs"), env_file="none"),
+                                   paths))
+    login(client)
+    page = client.get("/scan-log").text
+    assert "Scan now</button>" in page and "Scan now</b> by shawn" in page and "paper trader started" in page
+    assert "Scan now</button>" in client.get("/trading").text
+    csrf = page.split('name="csrf" value="')[1].split('"')[0]
+    r = client.post("/trading/paper/scan", data={"csrf": csrf}, follow_redirects=False)
+    assert r.headers["location"].startswith("/scan-log?msg=Scanning")
+    assert wallet.take_scan_request(wallet.scan_request_path(paths.paper_state))["by"] == "admin"
+    r = client.post("/trading/paper/scan", data={"csrf": csrf, "back": "/trading"}, follow_redirects=False)
+    assert r.headers["location"].startswith("/trading?msg=")
+    assert "A scan is waiting to start" in client.get("/scan-log").text
+    assert client.post("/trading/paper/scan", data={"csrf": "x"}).status_code == 403
