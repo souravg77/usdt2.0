@@ -193,6 +193,12 @@ def test_trading_page_sets_the_rules(tmp_path, monkeypatch):
     assert "bad=1" not in r.headers["location"]
     g = guards.load(guards.path_for(paths.paper_state))
     assert g["spot"]["trade_usdt"] == 25 and g["futures"]["trade_usdt"] == 0
+    assert "Strategies that must agree" in client.get("/trading").text
+    r = client.post("/trading/paper/guards", data={"csrf": csrf, "market": "futures", "agree": "3"},
+                    follow_redirects=False)
+    assert "bad=1" not in r.headers["location"] and "3%20strategies%20agree" in r.headers["location"]
+    g = guards.load(guards.path_for(paths.paper_state))
+    assert g["futures"]["agree"] == 3 and g["spot"]["agree"] == 1
 
 
 def test_the_amount_per_trade_is_0_for_automatic_or_at_least_5(tmp_path):
@@ -430,3 +436,80 @@ def test_each_engine_trades_only_the_timeframes_chosen(tmp_path):
     assert guards.load(path)["spot"]["timeframes"] == list(guards.TIMEFRAMES)  # the other engine unchanged
     got = guards.save(path, "futures", {"min_rr": "2"})  # saving other rules keeps the timeframes
     assert got["timeframes"] == ["1h", "4h", "1d"] and got["min_rr"] == 2
+
+
+def test_scan_log_records_each_pass_and_the_page_shows_it(tmp_path, monkeypatch):
+    """Shawn: show a log of how trades are scanned and taken."""
+    from fastapi.testclient import TestClient
+    from test_web import PW, login
+
+    from aitrader.config import Settings
+    from aitrader.web import Auth, JobRunner, Paths, create_app
+
+    os.makedirs(tmp_path / "t")
+    trader = _two_pair_trader(tmp_path / "t", {"max_long": 1, "max_correlated": 50})
+    scans = trader.state["scans"]
+    assert scans and all(set(s["engines"]) == {"spot", "futures"} for s in scans)
+    spot = [s["engines"]["spot"] for s in scans]
+    assert sum(e["charts"] for e in spot) > 0 and sum(e["opened"] for e in spot) > 0
+    assert sum(e["why"].get("exposure cap", 0) for e in spot) > 0
+    assert all(s["engines"]["futures"]["charts"] == 0 for s in scans)  # Futures AI is off here
+    monkeypatch.chdir(tmp_path)
+    paths = Paths()
+    os.makedirs("data/learn")
+    json.dump(trader.state, open(paths.paper_state, "w"))
+    client = TestClient(create_app(Settings(), Auth("admin", PW, "k"), JobRunner(str(tmp_path / "jobs"), env_file="none"),
+                                   paths))
+    login(client)
+    assert 'href="/scan-log"' in client.get("/trading").text
+    page = client.get("/scan-log").text
+    assert "How Spot AI scans and takes a trade" in page and "charts checked" in page
+    assert "exposure cap" in page and "already holds 1 long" in page and "Real-money trader" in page
+    assert "already holds 1 long" not in client.get("/scan-log?show=opened").text
+
+
+def _agree_trader(tmp_path, n_strategies, agree):
+    from test_learn import EVERY_UP_BAR, fill_store, synthetic
+
+    from aitrader.data.store import CandleStore
+    from aitrader.learn import Entry, PaperTrader, Registry
+    from aitrader.learn.rules import validate_spec
+
+    store = CandleStore(str(tmp_path / "c.db"))
+    df = synthetic(n=700)
+    fill_store(store, df)
+    reg = Registry(str(tmp_path / "reg.json"))
+    for i in range(n_strategies):
+        reg.add(Entry(id=f"up{i}", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR), status="paper"))
+    reg.save()
+    state = str(tmp_path / "paper_state.json")
+    wallet.set_engine(wallet.engines_path(state), "futures", False)
+    guards.save(guards.path_for(state), "spot", {"agree": agree})
+    trader = PaperTrader(store, str(tmp_path / "reg.json"), ["bybit"], ["BTC/USDT"], state_path=state)
+    for i in range(600, 640):
+        trader.tick(now_ms=int(df.ts.iloc[i]) + H)
+    store.close()
+    return trader
+
+
+def test_a_trade_opens_only_when_enough_strategies_agree(tmp_path):
+    """Shawn: a trade opens once 3 strategies agree on it."""
+    alone = _agree_trader(tmp_path / "a", 2, 1)
+    opened = [s for s in alone.state["signals"] if s["skipped"] == ""]
+    assert len({s["key"].split("|")[0] for s in opened}) == 2  # rule off: each strategy trades alone
+    two = _agree_trader(tmp_path / "b", 2, 3)
+    assert not [s for s in two.state["signals"] if s["skipped"] == ""]
+    no = [s for s in two.state["signals"] if s["skipped"] == "strategies don't agree"]
+    assert no and "2 of the 3 strategies needed" in no[0]["detail"]
+    three = _agree_trader(tmp_path / "c", 3, 3)
+    opened = [s for s in three.state["signals"] if s["skipped"] == ""]
+    assert opened and all(s["detail"] == "3 strategies agreed" for s in opened)
+    # one trade per agreement, not three: the others say who took it
+    by_ts = {}
+    for s in three.state["signals"]:
+        by_ts.setdefault(s["ts"], []).append(s["skipped"])
+    for ts in {s["ts"] for s in opened}:
+        assert sorted(by_ts[ts]) == ["", "another agreeing strategy took it", "another agreeing strategy took it"]
+    agreed = [p for p in three.state["open"].values() if p.get("agreed")] + \
+        [t for t in three.state["trades"] if t.get("agreed")]
+    assert all(set(p["agreed"]) == {"up0", "up1", "up2"} for p in agreed)

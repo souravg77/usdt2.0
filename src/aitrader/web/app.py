@@ -375,6 +375,29 @@ paper trading. Nothing trades real money.</p>
     add_teacher_routes(app, settings=settings, page=page, guard=guard, auth=auth, paths=paths,
                        csrf=lambda token: _csrf(auth, token), jobs=jobs, exchange=EXCHANGE)
 
+    @app.get("/scan-log")
+    def scan_log(request: Request, show: str = "all"):
+        """How trades are scanned and taken: every pass over the charts, every signal and what
+        became of it, and what the real-money trader did with them (one workspace at a time)."""
+        user, token, redirect = guard(request)
+        if redirect:
+            return redirect
+        from ..ops import EventLog
+
+        ws = "futures" if _futures_state(paths)[0] else "spot"
+        paper = _load_json(paths.paper_state)
+        events = EventLog(paths.events).read(limit=2000)
+        live = [e for e in events if str(e.get("service") or "").startswith("executor")
+                and e.get("kind") != "heartbeat"]
+        show = show if show in ("all", "opened", "skipped") else "all"
+        body = [_workspace_note(ws), _scan_steps(ws),
+                "<h2>Scans</h2>", _scans_table(paper, ws, int(time.time() * 1000)),
+                "<h2>Signals</h2>", _signal_log(_workspace(paper, ws), show),
+                "<h2>Real-money trader</h2>",
+                '<p class="small muted">What the live trader did with the paper trades it copies (both engines). '
+                "Empty while live trading is locked.</p>", _events_table(live, limit=60)]
+        return page("Scan log", "".join(body), user, token, refresh=30)
+
     @app.get("/trading")
     async def trading(request: Request, msg: str = "", bad: str = ""):
         user, token, redirect = guard(request)
@@ -683,7 +706,7 @@ paper trading. Nothing trades real money.</p>
                              week_close_pct: str = Form(""), min_rr: str = Form(""), trend: str = Form(""),
                              split_tp: str = Form(""), breakeven: str = Form(""), maker_entry: str = Form(""), max_long: str = Form(""),
                              max_short: str = Form(""), max_correlated: str = Form(""), corr_min: str = Form(""),
-                             trade_usdt: str = Form("")):
+                             trade_usdt: str = Form(""), agree: str = Form("")):
         """One engine's loss breakers, minimum reward, higher-timeframe trend check and split take-profit."""
         def act(user):
             from ..learn import guards
@@ -697,7 +720,7 @@ paper trading. Nothing trades real money.</p>
                     "split_tp": split_tp == "1", "breakeven": breakeven == "1", "maker_entry": maker_entry == "1",
                     "max_long": max_long,
                     "max_short": max_short, "max_correlated": max_correlated, "corr_min": corr_min,
-                    "trade_usdt": trade_usdt}, by=user)
+                    "trade_usdt": trade_usdt, "agree": agree}, by=user)
             except ValueError:
                 return "Not changed: enter numbers for the amount per trade, loss limits, hours and minimum reward.", False
             name = "Futures AI" if market == "futures" else "Spot AI"
@@ -894,7 +917,8 @@ def _tabbar(title: str) -> str:
         f'stroke-linejoin="round" aria-hidden="true">{icon}</svg>{name}</a>' for href, name, icon in TABS) + "</nav>")
 
 
-NAV = [("/", "Overview"), ("/markets", "Markets"), ("/pairs", "Pairs"), ("/trading", "Trading"), ("/monitor", "Monitor"),
+NAV = [("/", "Overview"), ("/markets", "Markets"), ("/pairs", "Pairs"), ("/trading", "Trading"), ("/scan-log", "Scan log"),
+       ("/monitor", "Monitor"),
        ("/replay", "Replay"), ("/teacher", "Teacher"),
        ("/news", "News"), ("/research", "Research"), ("/reports", "Reports"), ("/books", "Submit a book"), ("/changes", "Change requests"), ("/admin/users", "Users"),
        ("/settings", "Settings")]
@@ -1475,6 +1499,72 @@ def _prob(p) -> str:
     return "-" if p is None else f"{p:.2f}"
 
 
+def _scan_steps(ws: str) -> str:
+    name = "Futures AI" if ws == "futures" else "Spot AI"
+    return (f'<details class="card"><summary><b>How {name} scans and takes a trade</b></summary><ol class="small">'
+            "<li>About once a minute it looks for charts whose candle has just closed, for every strategy marked "
+            "paper on every pair in its list and every timeframe ticked on the Trading page.</li>"
+            "<li>Each strategy's own rules run on that candle. Most candles give no signal.</li>"
+            "<li>A signal then has to pass, in order: fresh prices, the engine's limits and loss breakers, "
+            "max longs, shorts and pairs moving together, a stop safe from liquidation, fees, Min reward, the "
+            "4h/1d trend check (if on), market context and news, the AI filter and the backtest teacher "
+            "(if turned on), and how many strategies must agree (when that rule is set).</li>"
+            "<li>A signal that passes opens a paper trade. The real-money trader copies it only for an approved "
+            "strategy with live trading unlocked, after its own risk checks.</li></ol>"
+            '<p class="small muted">Scans below are the passes that read new candles, newest first. Signals show '
+            "every one of the last 500 and the check that stopped it. The page refreshes every 30 seconds.</p></details>")
+
+
+def _scans_table(paper: dict, ws: str, now_ms: int, limit: int = 60) -> str:
+    scans = [s for s in paper.get("scans", []) if isinstance(s, dict)]
+    lp = paper.get("last_pass") or {}
+    head = (f'<p class="small muted">Last check {_ms(lp.get("at"))}: {lp.get("strategies", 0)} strategies on '
+            f'{lp.get("pairs", 0)} pairs.</p>' if lp else "")
+    if not scans:
+        return head + ('<p class="muted">No scan logged yet. Scans are logged from this update on, each time '
+                       "a candle closes.</p>")
+    rows = []
+    for s in reversed(scans[-limit:]):
+        e = (s.get("engines") or {}).get(ws) or {}
+        why = e.get("why") or {}
+        reasons = ", ".join(f"{k}: {n}" for k, n in sorted(why.items(), key=lambda kv: -kv[1]))
+        if s.get("blocked") and not e.get("charts"):
+            what = f'<span class="bad">no new entries: {_e(s["blocked"])}</span>'
+        elif not e.get("charts"):
+            what = '<span class="muted">no new candle for this engine</span>'
+        else:
+            what = (f'{e["charts"]} charts checked · '
+                    + (f'<b class="good">{e.get("opened", 0)} opened</b>' if e.get("opened") else "0 opened")
+                    + (f' · <span class="warn">{e["skipped"]} skipped</span> ({_e(reasons)})' if e.get("skipped")
+                       else "" if e.get("opened") else " · no signal"))
+        rows.append(f'<tr><td>{_ms(s.get("at"))}</td><td class="small">{s.get("strategies", 0)} strategies, '
+                    f'{s.get("pairs", 0)} pairs</td><td class="small">{what}</td></tr>')
+    return head + f"<table><tr><th>Scan</th><th>Looked at</th><th>Result</th></tr>{''.join(rows)}</table>"
+
+
+def _signal_log(paper: dict, show: str, limit: int = 300) -> str:
+    sigs = [s for s in paper.get("signals", []) if isinstance(s, dict)]
+    tabs = " ".join(f'<a class="seg{" active" if show == v else ""}" href="/scan-log?show={v}">{label}</a>'
+                    for v, label in (("all", "All"), ("opened", "Opened"), ("skipped", "Skipped")))
+    if show == "opened":
+        sigs = [s for s in sigs if not s.get("skipped")]
+    elif show == "skipped":
+        sigs = [s for s in sigs if s.get("skipped")]
+    if not sigs:
+        return f'<div class="segs" aria-label="filter">{tabs}</div><p class="muted">No signals here yet.</p>'
+    rows = []
+    for s in reversed(sigs[-limit:]):
+        sid, _ex, sym, tf = (s.get("key", "").split("|") + ["", "", "", ""])[:4]
+        rows.append(f"<tr><td>{_ms(s.get('ts'))}</td><td>{_e(sym)} {_e(tf)}"
+                    f"{_short(s.get('side'), s.get('key', '').endswith('|futures'))}</td>"
+                    f"<td class=small>{_e(sid)}</td><td>{s.get('entry', 0):.6g} / {s.get('stop', 0):.6g}</td>"
+                    f'<td class="small {"good" if not s.get("skipped") else "warn"}">'
+                    f'{_e(s.get("skipped") or "opened")}'
+                    f'{"<br>" + _e(s["detail"]) if s.get("detail") else ""}</td></tr>')
+    return (f'<div class="segs" aria-label="filter">{tabs}</div><table><tr><th>Signal</th><th>Market</th><th>Strategy</th>'
+            f"<th>Entry / stop</th><th>What happened</th></tr>{''.join(rows)}</table>")
+
+
 def _signals_section(paper: dict, now_ms: int, limit: int = 15) -> str:
     """Why trades open or don't: every paper signal of the last 24 hours and what became of it."""
     day = [s for s in paper.get("signals", []) if s.get("ts", 0) >= now_ms - 86_400_000]
@@ -1516,7 +1606,8 @@ def _signals_section(paper: dict, now_ms: int, limit: int = 15) -> str:
                     f'{_e(s.get("skipped") or "opened")}'
                     f'{"<br>" + _e(s["detail"]) if s.get("detail") else ""}</td></tr>')
     return (head + summary + "<table><tr><th>Signal</th><th>Market</th><th>Strategy</th><th>Entry / stop</th>"
-            f"<th>What happened</th></tr>{''.join(rows)}</table>")
+            f"<th>What happened</th></tr>{''.join(rows)}</table>"
+            '<p class="small"><a href="/scan-log">Full scan log: every scan and signal</a></p>')
 
 
 def _trades_table(paper: dict, execs: dict, limit: int = 40) -> str:
@@ -1785,6 +1876,7 @@ def _guards_text(g: dict) -> str:
              ("split take-profit on, then breakeven stop" if g["breakeven"] else "split take-profit on") if g["split_tp"]
              else "one take-profit",
              "limit (maker) entries" if g["maker_entry"] else "market entries",
+             f"a trade only when {g['agree']:g} strategies agree" if g["agree"] > 1 else "every strategy trades alone",
              f"at most {g['max_long']:g} longs and {g['max_short']:g} shorts, {g['max_correlated']:g} that move "
              f"together (correlation {g['corr_min']:g}+)"]
     return ", ".join(parts)
@@ -1847,7 +1939,8 @@ def _guards_form(paths: Paths, csrf: str, ws: str) -> str:
             f'{box("breakeven", "Then stop to breakeven")} '
             f'{box("maker_entry", "Enter with limit orders (maker fee)")} '
             f'{num("max_long", "Max longs", "1")} {num("max_short", "Max shorts", "1")} '
-            f'{num("max_correlated", "Max moving together", "1")} {num("corr_min", "at correlation", "0.05")}'
+            f'{num("max_correlated", "Max moving together", "1")} {num("corr_min", "at correlation", "0.05")} '
+            f'{num("agree", "Strategies that must agree (1 off)", "1")}'
             '<button class="ghost">Set rules</button></form>'
             '<p class="small muted">Amount per trade: 0 sizes each trade from the strategy\'s risk (at most half '
             'the wallet). Any other amount (5 USDT or more) is what each new trade uses: the purchase amount on Spot, '
@@ -1865,7 +1958,10 @@ def _guards_form(paths: Paths, csrf: str, ws: str) -> str:
             'so the trade can no longer end in a loss, but it is stopped out more often on a pullback. Replay uses the '
             'minimum reward, the split take-profit and the breakeven stop too, so you can test them there first. Limit entries pay the maker fee (0.02% on '
             'perps instead of 0.055% plus slippage) but miss the trade when the entry candle never comes back to '
-            'the signal price; Replay shows both effects.</p>')
+            'the signal price; Replay shows both effects. Strategies that must agree: with 3, a coin is only traded '
+            'when 3 different strategies signal the same side on it at the same candle close, and then as one trade '
+            '(the one with the furthest target); 1 lets every strategy trade on its own. Real-money trades copy '
+            'these paper trades, so they follow it too.</p>')
 
 
 def _market_card(paths: Paths, paper: dict, csrf: str, ws: str = "spot") -> str:

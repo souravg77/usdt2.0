@@ -138,6 +138,8 @@ class PaperTrader:
         events = {"opened": [], "closed": [], "retired": [], "filtered": []}
         self._now = now_ms
         self._guards, self._trends, self._returns = guards.load(self.guards_path), {}, {}
+        # this pass's signals per engine, for the scan log: {market: {"opened": n, "skipped": n, "why": {...}}}
+        self._pass_log = {m: {"opened": 0, "skipped": 0, "why": {}} for m in wallet.MARKETS}
         for m in wallet.MARKETS:  # trip, hold or clear each engine's loss breaker
             br = guards.update_breaker(self.state, self._wallet(m), m, self._guards[m], now_ms)
             if br and br.get("at") == now_ms:
@@ -165,6 +167,8 @@ class PaperTrader:
         kept = {m: keep.kept_ids(self.registry_path, m) for m in wallet.MARKETS}
         uses = wallet.filters(self.filters_path)
         built, broken, checks = 0, 0, 0  # what this pass looked at, for the dashboard
+        checks_by = {m: 0 for m in wallet.MARKETS}
+        pending: list[tuple] = []  # (key, engine, signal, position) passing every check: opened after the pass
         for entry in reg.with_status("paper"):
             benched = self.state.get("benched") or {}
             trades = {m: picks.trades_now(entry, only_winners[m], m, kept[m]) and entry.id not in (benched.get(m) or {})
@@ -203,6 +207,7 @@ class PaperTrader:
                             if not fresh or df is None or len(df) < MIN_BARS:
                                 continue
                             checks += 1
+                            checks_by[mkt] += 1
                             try:
                                 sdf = with_context(strat, df, self.store, ex, sym, tf)
                                 sigs = [s for s in strat.generate(sdf, ex, sym, tf) if s.ts == newest_close]
@@ -269,26 +274,25 @@ class PaperTrader:
                                                      f"minimum {min_rr:g}R")
                                     events["filtered"].append(k)
                                     continue
-                                self.state["open"][k] = {"entry_id": entry.id, "signal": _sig_dict(leg_sig),
-                                                         "situation": leg_tch["situation"], "teacher": leg_tch["version"],
-                                                         "size_mult": size_mult * ctx_mult * leg_ai["size"],
-                                                         "filled": False,
-                                                         "ai_prob": leg_ai["prob"], "ai_version": leg_ai["version"],
-                                                         "regime": regimes[market], "perp": perp,
-                                                         "split_tp": self._guards[leg_mkt]["split_tp"],
-                                                         "breakeven": self._guards[leg_mkt]["breakeven"],
-                                                         "maker_entry": self._guards[leg_mkt]["maker_entry"]}
-                                events["opened"].append(k)
-                                self._log_signal(k, leg_sig, "")
-                                log.info("paper signal %s entry~%.6g stop %.6g ai p=%s size x%.2f regime %s", k,
-                                         leg_sig.entry, leg_sig.stop, leg_ai["prob"], leg_ai["size"],
-                                         (regimes[market] or {}).get("label"))
+                                pending.append((k, leg_mkt, leg_sig, {
+                                    "entry_id": entry.id, "signal": _sig_dict(leg_sig),
+                                    "situation": leg_tch["situation"], "teacher": leg_tch["version"],
+                                    "size_mult": size_mult * ctx_mult * leg_ai["size"],
+                                    "filled": False,
+                                    "ai_prob": leg_ai["prob"], "ai_version": leg_ai["version"],
+                                    "regime": regimes[market], "perp": perp,
+                                    "split_tp": self._guards[leg_mkt]["split_tp"],
+                                    "breakeven": self._guards[leg_mkt]["breakeven"],
+                                    "maker_entry": self._guards[leg_mkt]["maker_entry"]}))
+        self._open_agreed(pending, events)
         for market, (_df, close, _fresh) in frames.items():
             self._seen[market] = close
         newest = max((c for _d, c, _f in frames.values() if c), default=None)
         self.state["last_pass"] = {"at": now_ms, "strategies": built, "broken": broken, "pairs": len(symbols),
                                    "markets": len({m[1:] for m in frames}), "new_candles": sum(1 for *_x, f in frames.values() if f),
                                    "checks": checks, "newest_candle": newest}
+        if checks or blocked:
+            self._log_scan(now_ms, built, len(symbols), checks_by, blocked)
         if checks:
             log.info("paper pass: %d strategies checked %d new candles (%d markets), %d opened, %d skipped",
                      built, checks, len(frames), len(events["opened"]), len(events["filtered"]))
@@ -541,9 +545,78 @@ class PaperTrader:
             log.exception("backtest teacher failed on %s; taking the signal as is", entry_id)
             return passthrough
 
+    def _log_scan(self, now_ms: int, strategies: int, pairs: int, checks_by: dict, blocked: str) -> None:
+        """One row per pass that read new candles (or was blocked), for the Scan log page: what each
+        engine checked and what became of its signals. A blocked pass is logged once per reason."""
+        scans = self.state.setdefault("scans", [])
+        if not any(checks_by.values()) and scans and scans[-1].get("blocked") == blocked:
+            return
+        scans.append({"at": now_ms, "strategies": strategies, "pairs": pairs, "blocked": blocked,
+                      "engines": {m: {"charts": checks_by[m], **self._pass_log[m]} for m in wallet.MARKETS}})
+        del scans[:-300]
+    def _open_agreed(self, pending: list[tuple], events: dict) -> None:
+        """Open this pass's signals. With an engine's ``agree`` rule above 1, a coin is only traded
+        when at least that many different strategies signal the same side on it in the same pass
+        (the same candle close, any timeframe), and then once: by the agreeing signal with the
+        furthest target in R (the first one on a tie)."""
+        groups: dict[tuple, list[tuple]] = {}
+        for c in pending:
+            k, mkt, sig, _pos = c
+            groups.setdefault((mkt, sig.exchange, sig.symbol, sig.side.value), []).append(c)
+        take = set()
+        for (mkt, _ex, sym, side), cands in groups.items():
+            need = int(self._guards[mkt]["agree"])
+            if need <= 1:
+                take.update(c[0] for c in cands)
+                continue
+            ids = sorted({c[3]["entry_id"] for c in cands})
+            if len(ids) < need:
+                for k, _m, sig, _pos in cands:
+                    self._log_signal(k, sig, "strategies don't agree",
+                                     f"{len(ids)} of the {need} strategies needed signalled {side} {sym} on this candle")
+                    events["filtered"].append(k)
+                continue
+            best = max(cands, key=lambda c: c[2].r_multiple_target or 0.0)
+            take.add(best[0])
+            best[3]["agreed"] = ids
+            for k, _m, sig, _pos in cands:
+                if k != best[0]:
+                    self._log_signal(k, sig, "another agreeing strategy took it",
+                                     f"{', '.join(ids)} agreed; {best[3]['entry_id']} opened the trade")
+                    events["filtered"].append(k)
+        lim = wallet.limits(self.limits_path)
+        now = self._now or int(time.time() * 1000)
+        for k, mkt, sig, pos in pending:
+            if k not in take:
+                continue
+            # the caps were checked against the positions open before this pass: check them again
+            # with the ones this pass has opened so far
+            why = wallet.entry_block(self.state, self._wallet(mkt), mkt, lim[mkt], now)
+            label = "engine limit"
+            if not why:
+                why = self._exposure_block(mkt, sig.exchange, sig.symbol, sig.side is Side.SELL, self._guards[mkt])
+                label = "exposure cap"
+            if why:
+                self._log_signal(k, sig, label, why)
+                events["filtered"].append(k)
+                continue
+            self.state["open"][k] = pos
+            events["opened"].append(k)
+            self._log_signal(k, sig, "", f"{len(pos['agreed'])} strategies agreed" if pos.get("agreed") else "")
+            log.info("paper signal %s entry~%.6g stop %.6g ai p=%s size x%.2f regime %s", k, sig.entry, sig.stop,
+                     pos["ai_prob"], pos["size_mult"], (pos["regime"] or {}).get("label"))
+
     def _log_signal(self, key: str, sig: Signal, skipped: str, detail: str = "") -> None:
         """Every signal and what became of it (``skipped`` says why; empty means opened), so the
         dashboard can say why no trade opened."""
+        counts = getattr(self, "_pass_log", None)
+        if counts is not None:
+            c = counts["futures" if key.endswith(FUTURES_SUFFIX) or sig.side is Side.SELL else "spot"]
+            if skipped:
+                c["skipped"] += 1
+                c["why"][skipped] = c["why"].get(skipped, 0) + 1
+            else:
+                c["opened"] += 1
         log_ = self.state.setdefault("signals", [])
         log_.append({"ts": sig.ts, "key": key, "side": sig.side.value, "entry": sig.entry, "stop": sig.stop,
                      "skipped": skipped, "detail": detail})

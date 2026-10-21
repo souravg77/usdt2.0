@@ -21,6 +21,10 @@
 - **Limit entries** (``maker_entry``): enter with a post-only limit order at the signal price or
   the open, paying the maker fee instead of taker fee and slippage; when the entry candle never
   trades through that price the order is cancelled and the trade is missed (``engine.maker_fill``).
+- **Strategies that must agree** (``agree``, 1 = off): a coin is only traded when at least this many
+  different strategies signal the same side on it at the same candle close (any timeframe), and
+  then as one trade, by the agreeing signal with the furthest target. The live trader mirrors the
+  paper trades, so it follows the same rule.
 - **Timeframes** (``timeframes``): the candle timeframes the engine opens new trades on (all of
   them unless a person narrows it; an empty choice means all). Open trades on the others still run
   to their exits.
@@ -46,13 +50,13 @@ TIMEFRAMES = ("5m", "15m", "30m", "1h", "4h", "1d")  # the ones paper trading ca
 DEFAULTS = {"breaker": True, "day_pause_pct": 3.0, "pause_hours": 24.0, "week_close_pct": 6.0,
             "min_rr": 0.0, "trend": False, "split_tp": False, "breakeven": False, "maker_entry": False,
             "max_long": 8.0, "max_short": 8.0, "max_correlated": 3.0, "corr_min": 0.8, "trade_usdt": 0.0,
-            "timeframes": list(TIMEFRAMES)}
+            "agree": 1.0, "timeframes": list(TIMEFRAMES)}
 RANGES = {"day_pause_pct": (0.5, 50.0), "pause_hours": (1.0, 168.0), "week_close_pct": (1.0, 90.0),
           "min_rr": (0.0, 10.0), "max_long": (1.0, 200.0), "max_short": (1.0, 200.0),
           "max_correlated": (1.0, 50.0), "corr_min": (0.5, 0.99),
-          "trade_usdt": (5.0, 1_000_000.0)}
+          "trade_usdt": (5.0, 1_000_000.0), "agree": (1.0, 10.0)}
 OFF_AT_ZERO = ("min_rr", "trade_usdt")  # 0 means off / automatic, not the range's minimum
-WHOLE = ("max_long", "max_short", "max_correlated")
+WHOLE = ("max_long", "max_short", "max_correlated", "agree")
 CORR_BARS = 168  # hourly returns of the last week
 SWITCHES = ("breaker", "trend", "split_tp", "breakeven", "maker_entry")
 
