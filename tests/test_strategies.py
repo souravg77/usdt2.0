@@ -15,10 +15,15 @@ DATA = {"buy_the_dip": dict(vol=0.03, drift=0.0015),
         "vwap_mean_reversion": dict(seed=0, drift=0.0, tf_ms=900_000),
         "rsi_reversal": dict(seed=0),
         "rsi_divergence": dict(seed=0),
-        "ml_classifier": dict(seed=0)}
+        "ml_classifier": dict(seed=0),
+        "price_channel_two_bars_above": dict(seed=0, vol=0.012, tf_ms=300_000, split_wicks=True),
+        "pin_bar_reentry_long": dict(seed=3, vol=0.012, tf_ms=900_000, split_wicks=True),
+        "m2b_two_legged_pullback_ema20": dict(seed=0, vol=0.012, tf_ms=300_000, split_wicks=True),
+        "high_close_doji_pivot_support": dict(n=3000, seed=0, vol=0.006, drift=0.0, tf_ms=300_000,
+                                              split_wicks=True)}
 
 
-def synthetic(n=1500, seed=7, drift=0.0004, vol=0.01, tf_ms=3_600_000):
+def synthetic(n=1500, seed=7, drift=0.0004, vol=0.01, tf_ms=3_600_000, split_wicks=False):
     rng = np.random.default_rng(seed)
     ret = drift + vol * rng.standard_normal(n)
     # add regime swings so every strategy gets something to do
@@ -28,6 +33,8 @@ def synthetic(n=1500, seed=7, drift=0.0004, vol=0.01, tf_ms=3_600_000):
     wick = np.abs(rng.normal(0, vol / 2, n)) * close
     high = np.maximum(open_, close) + wick
     low = np.minimum(open_, close) - wick
+    if split_wicks:  # upper and lower wicks of their own, sometimes long: pin bars and dojis happen
+        low = np.minimum(open_, close) - np.abs(rng.normal(0, vol / 2, n)) * close * np.where(rng.random(n) < 0.1, 4, 1)
     volume = rng.lognormal(3, 0.5, n)
     df = pd.DataFrame({"ts": np.arange(n) * tf_ms, "open": open_, "high": high, "low": low,
                        "close": close, "volume": volume})
