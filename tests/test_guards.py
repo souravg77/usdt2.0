@@ -610,6 +610,7 @@ def test_the_scan_log_says_why_an_engine_read_no_chart(tmp_path):
     assert row["spot"]["idle"] == {"it is turned off": 1} and _idle_text(row["spot"]) == "it is turned off"
     assert row["futures"]["idle"][f"fewer than {MIN_BARS} candles"] == 1 and row["futures"]["thin"] == ["NEW/USDT 1h"]
     assert row["futures"]["charts"] == 1  # BTC was read
+    assert trader.state["last_pass"]["step"] == H  # the shortest timeframe read, for the late-prices warning
     trader.tick(now_ms=int(df.ts.iloc[650]) + H + 1000)
     trader.tick(now_ms=int(df.ts.iloc[650]) + H + 2000, manual={"by": "shawn"})
     fut = trader.state["scans"][-1]["engines"]["futures"]

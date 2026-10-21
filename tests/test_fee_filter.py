@@ -99,6 +99,11 @@ def test_trading_page_says_why_no_trade_opened():
     assert "10 strategies on 19 pairs" in _signals_section(paper, now) and "10 min ago" in _signals_section(paper, now)
     paper["last_pass"]["newest_candle"] = now - 4 * 3_600_000  # the collector stopped
     assert "prices are not updating" in _signals_section(paper, now)
+    # Shawn: only 4h charts read (Futures AI WIN picks): a 4h candle 135 min old is on time
+    paper["last_pass"].update(newest_candle=now - 135 * 60_000, step=4 * 3_600_000)
+    assert "prices are not updating" not in _signals_section(paper, now)
+    paper["last_pass"]["newest_candle"] = now - 5 * 3_600_000
+    assert "prices are not updating" in _signals_section(paper, now)
     # while entries are blocked the charts aren't read: that's not a collector problem
     paper["last_pass"] = {"at": now, "strategies": 10, "pairs": 20, "markets": 0, "newest_candle": None}
     html = _signals_section(paper, now)
