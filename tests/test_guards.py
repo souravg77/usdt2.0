@@ -430,3 +430,33 @@ def test_each_engine_trades_only_the_timeframes_chosen(tmp_path):
     assert guards.load(path)["spot"]["timeframes"] == list(guards.TIMEFRAMES)  # the other engine unchanged
     got = guards.save(path, "futures", {"min_rr": "2"})  # saving other rules keeps the timeframes
     assert got["timeframes"] == ["1h", "4h", "1d"] and got["min_rr"] == 2
+
+
+def test_scan_log_records_each_pass_and_the_page_shows_it(tmp_path, monkeypatch):
+    """Shawn: show a log of how trades are scanned and taken."""
+    from fastapi.testclient import TestClient
+    from test_web import PW, login
+
+    from aitrader.config import Settings
+    from aitrader.web import Auth, JobRunner, Paths, create_app
+
+    os.makedirs(tmp_path / "t")
+    trader = _two_pair_trader(tmp_path / "t", {"max_long": 1, "max_correlated": 50})
+    scans = trader.state["scans"]
+    assert scans and all(set(s["engines"]) == {"spot", "futures"} for s in scans)
+    spot = [s["engines"]["spot"] for s in scans]
+    assert sum(e["charts"] for e in spot) > 0 and sum(e["opened"] for e in spot) > 0
+    assert sum(e["why"].get("exposure cap", 0) for e in spot) > 0
+    assert all(s["engines"]["futures"]["charts"] == 0 for s in scans)  # Futures AI is off here
+    monkeypatch.chdir(tmp_path)
+    paths = Paths()
+    os.makedirs("data/learn")
+    json.dump(trader.state, open(paths.paper_state, "w"))
+    client = TestClient(create_app(Settings(), Auth("admin", PW, "k"), JobRunner(str(tmp_path / "jobs"), env_file="none"),
+                                   paths))
+    login(client)
+    assert 'href="/scan-log"' in client.get("/trading").text
+    page = client.get("/scan-log").text
+    assert "How Spot AI scans and takes a trade" in page and "charts checked" in page
+    assert "exposure cap" in page and "already holds 1 long" in page and "Real-money trader" in page
+    assert "already holds 1 long" not in client.get("/scan-log?show=opened").text
