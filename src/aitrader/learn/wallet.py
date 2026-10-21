@@ -73,6 +73,34 @@ def set_engine(path: str, market: str, on: bool, by: str = "") -> dict:
     return engines(path)
 
 
+def scan_request_path(state_path: str) -> str:
+    """The Scan now button's request: written by the dashboard, taken by the paper trader."""
+    return os.path.join(os.path.dirname(os.path.abspath(state_path)), "paper_scan.json")
+
+
+def request_scan(path: str, by: str = "") -> dict:
+    """Ask the paper trader to scan every chart now instead of waiting for the next candle."""
+    data = {"by": by, "at": int(time.time() * 1000)}
+    _save_market(path, data)
+    return data
+
+
+def take_scan_request(path: str) -> dict | None:
+    """The waiting Scan now request, removed so it runs once; None when there is none."""
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):  # half written or unreadable: still a request
+        data = {}
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+    return data if isinstance(data, dict) else {}
+
+
 FILTERS = ("ai", "teacher")
 
 
