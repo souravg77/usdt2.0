@@ -429,13 +429,16 @@ def test_ladder_reads_shadow_eligible_and_approval_from_evidence(tmp_path):
 
 def test_library_specs_are_valid_and_run():
     from aitrader.learn.library import library_books, library_specs
+    from aitrader.strategies import STRATEGIES
 
     books = library_books()
     assert len(books) >= 5
     specs, skipped = library_specs()
     waiting = {s["name"] for b in books for s in b["strategies"] if s.get("needs")}
-    assert len(specs) == sum(len(b["strategies"]) for b in books) - len(waiting)
+    built_in = {s["name"] for b in books for s in b["strategies"] if s.get("coded_as")}
+    assert len(specs) == sum(len(b["strategies"]) for b in books) - len(waiting) - len(built_in)
     assert {name for name, _ in skipped} == waiting  # only specs waiting on a missing feature
+    assert built_in and all(n in STRATEGIES for n in built_in)  # the rest run as built-in strategies
     assert len({spec_id(s) for s in specs}) == len(specs)
     df = synthetic(n=1500, vol=0.02)
     fired = 0

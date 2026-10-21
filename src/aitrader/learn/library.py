@@ -32,6 +32,8 @@ def library_specs(book_filter: str | None = None) -> tuple[list[dict], list[tupl
             continue
         for raw in book["strategies"]:
             name = raw.get("name", "?")
+            if raw.get("coded_as"):  # the rule language can't say it: a built-in strategy runs it instead
+                continue
             if raw.get("needs"):
                 skipped.append((name, "needs " + ", ".join(raw["needs"])))
                 continue

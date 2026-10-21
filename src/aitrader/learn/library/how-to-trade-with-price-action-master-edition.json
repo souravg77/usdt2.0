@@ -190,13 +190,10 @@
     "Exit when a bar is completely below the lower band (book: two bars below = bear trend; one bar used for faster exit). Stop below 3-bar low is our addition.",
     "Book gives no risk percentage; 0.5% chosen."
    ],
-   "needs": [
-    "sma_high(n): moving average of bar highs",
-    "sma_low(n): moving average of bar lows"
-   ],
+   "coded_as": "price_channel_two_bars_above",
    "uncodable": [
     "Bear-trend (short) version.",
-    "Not coded yet: needs moving averages of highs and lows (sma_high / sma_low); a Bollinger band is not the same channel"
+    "Coded by hand as a built-in strategy (strategies/price_action.py)"
    ]
   },
   {
@@ -353,16 +350,11 @@
     "Examples were 30m/1h forex futures; mapped to 15m-1h.",
     "Book gives no risk percentage; 0.5% chosen."
    ],
-   "needs": [
-    "pin_bar (bullish, long lower tail) distinct from hammer",
-    "pattern_reference_levels: high/low of a specific earlier signal bar",
-    "event sequencing: pin bar -> break above pin high -> break below pin low (not more than X ATR) -> re-entry",
-    "max_undercut limit ('not too far below' pin low)"
-   ],
+   "coded_as": "pin_bar_reentry_long",
    "uncodable": [
     "Short re-entry (bearish pin) version.",
     "Skipping setups after a projected chart-pattern target was hit.",
-    "Not coded yet: needs a pin-bar feature and a sequence of events (trigger, stop-out, re-entry) the rule language can't express"
+    "Coded by hand as a built-in strategy (strategies/price_action.py)"
    ]
   },
   {

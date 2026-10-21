@@ -460,14 +460,11 @@
     "The buy stop one tick above the test bar is approximated by a close above its high",
     "Stop below the test bar's low (not given in the book); target 2R"
    ],
-   "needs": [
-    "two_legged_pullback (leg counting: a bar with a higher high starts an up-leg, a lower low starts a down-leg; require 2 down-legs since the swing high)",
-    "stop_entry_above(high[1])"
-   ],
+   "coded_as": "m2b_two_legged_pullback_ema20",
    "uncodable": [
     "Short side (M2S): two-legged pullback up to the 20 EMA in a strong downtrend",
     "Discretionary 'clear EMA rejection' and 'space between price and MA' momentum read",
-    "Not coded yet: the two-legged pullback needs leg counting; the approximation would be a different strategy"
+    "Coded by hand as a built-in strategy (strategies/price_action.py)"
    ]
   },
   {
@@ -519,15 +516,11 @@
     "Stop below the doji and the bar before it (not given); target 2R in place of the next pivot level (S1 after an S2 entry)",
     "5-minute ES futures mapped to 5m/15m"
    ],
-   "needs": [
-    "floor_pivots(prior session/day): pp, s1, s2, r1, r2 with PP=(H+L+C)/3, S1=2PP-H, S2=PP-(H-L)",
-    "target_at_next_pivot_level",
-    "count of dojis near the level (multiple dojis = better)"
-   ],
+   "coded_as": "high_close_doji_pivot_support",
    "uncodable": [
     "Short side: doji at resistance, sell on close of a low close doji",
     "Quality filters: no strong bearish bars, a preceding failed low-close doji",
-    "Not coded yet: needs floor pivot levels (PP, S1, S2) from the prior session"
+    "Coded by hand as a built-in strategy (strategies/price_action.py)"
    ]
   },
   {
