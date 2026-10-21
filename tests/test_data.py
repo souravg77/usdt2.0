@@ -66,6 +66,9 @@ async def test_download_fills_in_older_history(fake_ccxt):
     adapter = BybitAdapter(s, client=fake_ccxt(raw), throttle=Throttle(1000, 1000))
     store = CandleStore(":memory:")
     store.upsert([Candle("bybit", "BTC/USDT", "1m", i * 60_000, 1, 2, 0.5, 1.5, 1) for i in range(30, 35)])
+    import aitrader.data.downloader as dl
+
+    dl._tried.clear()
     n = await download(adapter, store, "BTC/USDT", "1m", 0, 40 * 60_000)
     assert n == 35  # 0-29 before the stored ones, 35-39 after
     rows = store.load("bybit", "BTC/USDT", "1m")
@@ -229,3 +232,29 @@ async def test_download_fetches_an_old_month_page_by_page(fake_ccxt):
     dl._tried.clear()
     n = await download(adapter, store, "BTC/USDT", "1m", 100 * 60_000, 2600 * 60_000)
     assert n == 2500 and store.count("bybit", "BTC/USDT", "1m", 0, 10**12) == 2500
+
+
+async def test_history_before_a_new_listing_is_not_asked_every_minute(fake_ccxt):
+    """The collector now asks for 250 candles on every timeframe; a coin listed later has fewer."""
+    import aitrader.data.downloader as dl
+
+    raw = [[i * 60_000, 1, 2, 0.5, 1.5, 1] for i in range(20, 30)]  # listed at bar 20
+    calls = []
+    client = fake_ccxt(raw)
+    real = client.fetch_ohlcv
+
+    async def counting(*a, **k):
+        calls.append(k.get("since", a[2] if len(a) > 2 else None))
+        return await real(*a, **k)
+
+    client.fetch_ohlcv = counting
+    adapter = BybitAdapter(Settings(), client=client, throttle=Throttle(1000, 1000))
+    store = CandleStore(":memory:")
+    dl._tried.clear()
+    await download(adapter, store, "NEW/USDT", "1m", 0, 30 * 60_000)
+    calls.clear()
+    await download(adapter, store, "NEW/USDT", "1m", 0, 30 * 60_000)
+    assert 0 in calls  # the first time: older candles are asked for
+    calls.clear()
+    await download(adapter, store, "NEW/USDT", "1m", 0, 30 * 60_000)
+    assert 0 not in calls  # not again right away

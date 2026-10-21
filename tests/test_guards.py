@@ -580,3 +580,47 @@ def test_scan_now_rereads_every_chart_without_taking_a_signal_twice(tmp_path, mo
     assert r.headers["location"].startswith("/trading?msg=")
     assert "A scan is waiting to start" in client.get("/scan-log").text
     assert client.post("/trading/paper/scan", data={"csrf": "x"}).status_code == 403
+
+
+def test_the_scan_log_says_why_an_engine_read_no_chart(tmp_path):
+    """Shawn: Scan now showed Futures AI reading 0 charts with no reason."""
+    from test_learn import EVERY_UP_BAR, fill_store, synthetic
+
+    from aitrader.data.store import CandleStore
+    from aitrader.learn import Entry, PaperTrader, Registry
+    from aitrader.learn.paper import MIN_BARS, history_start
+    from aitrader.learn.rules import validate_spec
+    from aitrader.web.app import _idle_text
+
+    store = CandleStore(str(tmp_path / "c.db"))
+    df = synthetic(n=700)
+    fill_store(store, df, sym="BTC/USDT")
+    fstore = CandleStore(str(tmp_path / "f.db"))
+    fill_store(fstore, df.iloc[400:], sym="BTC/USDT")  # a young perpetual: 300 candles, enough
+    fill_store(fstore, df.iloc[600:], sym="NEW/USDT")  # a new listing: only 100 candles
+    reg = Registry(str(tmp_path / "reg.json"))
+    reg.add(Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR), status="paper"))
+    reg.save()
+    state = str(tmp_path / "paper_state.json")
+    wallet.set_engine(wallet.engines_path(state), "spot", False)
+    trader = PaperTrader(store, str(tmp_path / "reg.json"), ["bybit"], ["NEW/USDT", "BTC/USDT"], state_path=state,
+                         futures_store=fstore, market_symbols=lambda m: ["NEW/USDT", "BTC/USDT"])
+    trader.tick(now_ms=int(df.ts.iloc[650]) + H)
+    row = trader.state["scans"][-1]["engines"]
+    assert row["spot"]["idle"] == {"it is turned off": 1} and _idle_text(row["spot"]) == "it is turned off"
+    assert row["futures"]["idle"][f"fewer than {MIN_BARS} candles"] == 1 and row["futures"]["thin"] == ["NEW/USDT 1h"]
+    assert row["futures"]["charts"] == 1  # BTC was read
+    trader.tick(now_ms=int(df.ts.iloc[650]) + H + 1000)
+    trader.tick(now_ms=int(df.ts.iloc[650]) + H + 2000, manual={"by": "shawn"})
+    fut = trader.state["scans"][-1]["engines"]["futures"]
+    assert "a position is already open" in _idle_text(fut) or fut["charts"]
+    assert "fewer than 250 candles on 1 charts (e.g. NEW/USDT 1h)" in _idle_text(fut)
+    wallet.set_engine(wallet.engines_path(state), "spot", True)
+    trader.market_symbols = lambda m: [] if m == "futures" else ["BTC/USDT"]
+    trader.tick(now_ms=int(df.ts.iloc[651]) + H, manual={})
+    fut = trader.state["scans"][-1]["engines"]["futures"]
+    assert _idle_text(fut).startswith("no pairs in its list") and fut["charts"] == 0
+    # the collector keeps enough history for 250 candles on every timeframe, daily ones too
+    assert history_start("1d", 10**13) == 10**13 - 300 * 86_400_000
+    store.close()
+    fstore.close()

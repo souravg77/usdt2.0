@@ -34,8 +34,11 @@ async def download(
     first = store.first_ts(adapter.name, symbol, timeframe)
     last = store.last_ts(adapter.name, symbol, timeframe)
     total = 0
-    if first is not None and since_ms < first:
-        # older history than what is stored (e.g. the collector keeps only recent weeks)
+    older = (adapter.name, symbol, timeframe, "older", first)
+    if first is not None and since_ms < first and time.time() - _tried.get(older, 0.0) >= RETRY_HOLE_S:
+        # older history than what is stored (e.g. the collector keeps only recent weeks); a coin
+        # listed after ``since_ms`` has none, so that is asked again only every few hours
+        _tried[older] = time.time()
         total += await _fetch(adapter, store, symbol, timeframe, since_ms, min(first, until_ms),
                               drop_open_candle)
     if first is not None and last is not None:
