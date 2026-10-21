@@ -44,7 +44,7 @@ from ..market.regime import breakdown, classify
 from ..models import TIMEFRAME_MS, Side
 from ..strategies.base import Signal
 from ..trade import futures
-from . import guards, keep, picks, wallet
+from . import guards, keep, picks, score, wallet
 from .lab import with_context
 from .registry import Registry, make_strategy
 
@@ -296,6 +296,11 @@ class PaperTrader:
                                 continue
                             if market not in regimes:
                                 regimes[market] = _regime(df, tf)
+                            try:  # the signal's quality score (the confirmation part is added after the pass)
+                                quality = score.parts(df, sig.side is Side.SELL, self._higher_trends(ex, sym, tf, mkt))
+                            except Exception:  # a score that can't be read must not stop the signal
+                                log.exception("can't score %s on %s %s", entry.id, sym, tf)
+                                quality = None
                             for k, perp in legs:
                                 leg_mkt = "futures" if perp else "spot"
                                 leg_ai = ai if (k, perp) in ai_legs else _NO_AI
@@ -315,7 +320,7 @@ class PaperTrader:
                                     "size_mult": size_mult * ctx_mult * leg_ai["size"],
                                     "filled": False,
                                     "ai_prob": leg_ai["prob"], "ai_version": leg_ai["version"],
-                                    "regime": regimes[market], "perp": perp,
+                                    "regime": regimes[market], "perp": perp, "quality": quality,
                                     "split_tp": self._guards[leg_mkt]["split_tp"],
                                     "breakeven": self._guards[leg_mkt]["breakeven"],
                                     "maker_entry": self._guards[leg_mkt]["maker_entry"]}))
@@ -472,6 +477,11 @@ class PaperTrader:
             why = guards.block(self.state, mkt, now)
             if why:
                 self._log_signal(k, sig, "loss breaker", why)
+                events["filtered"].append(k)
+                continue
+            why = guards.streak_block(self.state, mkt, self._guards[mkt])
+            if why:
+                self._log_signal(k, sig, "losing streak", why)
                 events["filtered"].append(k)
                 continue
             g = self._guards[mkt]
@@ -647,8 +657,20 @@ class PaperTrader:
                     events["filtered"].append(k)
         lim = wallet.limits(self.limits_path)
         now = self._now or int(time.time() * 1000)
+        # how many different strategies signalled each coin and side this pass (the score's confirmation)
+        agreeing = {g: len({c[3]["entry_id"] for c in cands}) for g, cands in groups.items()}
         for k, mkt, sig, pos in pending:
             if k not in take:
+                continue
+            quality = pos.pop("quality", None)
+            if quality is not None:
+                pos["score"] = score.total(quality, agreeing.get((mkt, sig.exchange, sig.symbol, sig.side.value), 1))
+                pos["score_parts"] = quality
+            need = self._guards[mkt]["min_score"]
+            if need > 0 and quality is not None and pos["score"] < need:
+                self._log_signal(k, sig, "signal score too low",
+                                 f"score {pos['score']:.0f}/100, minimum {need:g} (weakest: {score.weakest(quality)})")
+                events["filtered"].append(k)
                 continue
             # the caps were checked against the positions open before this pass: check them again
             # with the ones this pass has opened so far
@@ -663,7 +685,9 @@ class PaperTrader:
                 continue
             self.state["open"][k] = pos
             events["opened"].append(k)
-            self._log_signal(k, sig, "", f"{len(pos['agreed'])} strategies agreed" if pos.get("agreed") else "")
+            self._log_signal(k, sig, "", "; ".join(x for x in (
+                f"{len(pos['agreed'])} strategies agreed" if pos.get("agreed") else "",
+                f"score {pos['score']:.0f}/100" if pos.get("score") is not None else "") if x))
             log.info("paper signal %s entry~%.6g stop %.6g ai p=%s size x%.2f regime %s", k, sig.entry, sig.stop,
                      pos["ai_prob"], pos["size_mult"], (pos["regime"] or {}).get("label"))
 
@@ -791,14 +815,28 @@ class PaperTrader:
                 amount = self._guards[mkt]["trade_usdt"]
                 if amount > 0:  # a fixed amount per trade: the cost on Spot, the margin on Futures
                     units = amount * pos.get("size_mult", 1.0) * lev / t.entry
-                else:  # sized from the strategy's risk, at most half the wallet
-                    risk_usdt = bal * sig.risk_pct * pos.get("size_mult", 1.0)
+                else:  # sized from the risk (the engine's setting, else the strategy's), at most half the wallet
+                    pct = self._guards[mkt]["risk_pct"] / 100 or sig.risk_pct
+                    risk_usdt = bal * pct * pos.get("size_mult", 1.0)
                     units = risk_usdt / abs(sig.entry - sig.stop)
                     # at most half the wallet put into it: the cost on Spot, the margin on Futures
                     units = min(units, bal * self.cfg.max_position_frac * lev / t.entry)
                 # all open positions together may not tie up more than the wallet
                 # (a spot position ties up what it cost; a perp position only its margin)
                 units = min(units, max(0.0, bal - wallet.in_use(self.state, skip=key, market=mkt)) * lev / t.entry)
+                cap = self._guards[mkt]["open_risk_pct"]
+                per_unit = abs(t.entry - sig.stop)
+                if cap > 0 and per_unit > 0:  # all open trades together may lose at most cap% at their stops
+                    room = bal * cap / 100 - guards.open_risk(self.state, mkt, skip=key)
+                    if units * per_unit > room:
+                        units = max(0.0, room / per_unit)
+                        if units * t.entry < wallet.MIN_ORDER_USDT:
+                            del self.state["open"][key]
+                            self._mark_signal(key, sig.ts, "open risk cap",
+                                              f"the open trades already risk {bal * cap / 100 - room:,.2f} USDT "
+                                              f"at their stops, the limit is {cap:g}% of {bal:,.2f} USDT")
+                            log.info("paper %s skipped: open risk cap", key)
+                            continue
                 skip = ("the wallet's money is all in open positions" if units <= 0 else
                         f"below Bybit's {wallet.MIN_ORDER_USDT:g} USDT minimum order"
                         if units * t.entry < wallet.MIN_ORDER_USDT else "")

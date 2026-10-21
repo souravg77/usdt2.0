@@ -720,7 +720,8 @@ paper trading. Nothing trades real money.</p>
                              week_close_pct: str = Form(""), min_rr: str = Form(""), trend: str = Form(""),
                              split_tp: str = Form(""), breakeven: str = Form(""), maker_entry: str = Form(""), max_long: str = Form(""),
                              max_short: str = Form(""), max_correlated: str = Form(""), corr_min: str = Form(""),
-                             trade_usdt: str = Form(""), agree: str = Form("")):
+                             trade_usdt: str = Form(""), agree: str = Form(""), risk_pct: str = Form(""),
+                             open_risk_pct: str = Form(""), loss_streak: str = Form(""), min_score: str = Form("")):
         """One engine's loss breakers, minimum reward, higher-timeframe trend check and split take-profit."""
         def act(user):
             from ..learn import guards
@@ -734,12 +735,28 @@ paper trading. Nothing trades real money.</p>
                     "split_tp": split_tp == "1", "breakeven": breakeven == "1", "maker_entry": maker_entry == "1",
                     "max_long": max_long,
                     "max_short": max_short, "max_correlated": max_correlated, "corr_min": corr_min,
-                    "trade_usdt": trade_usdt, "agree": agree}, by=user)
+                    "trade_usdt": trade_usdt, "agree": agree, "risk_pct": risk_pct or 0,
+                    "open_risk_pct": open_risk_pct or 0, "loss_streak": loss_streak or 0,
+                    "min_score": min_score or 0}, by=user)
             except ValueError:
                 return "Not changed: enter numbers for the amount per trade, loss limits, hours and minimum reward.", False
             name = "Futures AI" if market == "futures" else "Spot AI"
             _event("paper_guards", f"{name} trading rules set by {user}: {_guards_text(g)}")
             return f"{name} now uses: {_guards_text(g)}. Open trades keep the take-profit they opened with."
+        return _control_post(request, csrf, act)
+
+    @app.post("/trading/paper/streak-resume")
+    def trading_paper_streak_resume(request: Request, csrf: str = Form(""), market: str = Form("")):
+        """A person reviewed an engine's losing streak: it may open new trades again."""
+        def act(user):
+            from ..learn import guards
+
+            if market not in ("spot", "futures"):
+                return "Not changed: choose Spot AI or Futures AI.", False
+            guards.save(guards.path_for(paths.paper_state), market, {"streak_ok_at": int(time.time() * 1000)}, by=user)
+            name = "Futures AI" if market == "futures" else "Spot AI"
+            _event("paper_streak_resume", f"{name} resumed after a losing streak by {user}")
+            return f"{name} opens new trades again. Its losing streak counts from now."
         return _control_post(request, csrf, act)
 
     @app.post("/trading/paper/amount")
@@ -1921,7 +1938,11 @@ def _market_switch(paths: Paths, auth, token, title: str) -> str:
 
 
 def _guards_text(g: dict) -> str:
-    parts = [f"{g['trade_usdt']:,.2f} USDT per trade" if g["trade_usdt"] else "trade size from the strategy's risk",
+    parts = [f"{g['trade_usdt']:,.2f} USDT per trade" if g["trade_usdt"] else
+             f"risk {g['risk_pct']:g}% of the wallet per trade" if g["risk_pct"] else "trade size from the strategy's risk",
+             f"all open trades risk at most {g['open_risk_pct']:g}% together" if g["open_risk_pct"] else "no open-risk cap",
+             f"stop after {g['loss_streak']:g} losses in a row" if g["loss_streak"] else "no losing-streak stop",
+             f"signal score at least {g['min_score']:g}/100" if g["min_score"] else "no minimum signal score",
              f"pause {g['pause_hours']:g}h after a {g['day_pause_pct']:g}% day loss, close all at a "
              f"{g['week_close_pct']:g}% week loss" if g["breaker"] else "loss breakers off",
              f"minimum reward {g['min_rr']:g}R" if g["min_rr"] else "no minimum reward",
@@ -1972,6 +1993,11 @@ def _guards_form(paths: Paths, csrf: str, ws: str) -> str:
     from ..learn import guards
 
     g = guards.load(guards.path_for(paths.paper_state))[ws]
+    paper = _load_json(paths.paper_state)
+    why = guards.streak_block(paper if isinstance(paper, dict) else {}, ws, g)
+    streak = (f'<form method="post" action="/trading/paper/streak-resume" class="row">{csrf}'
+              f'<input type="hidden" name="market" value="{ws}"><span class="small bad">{_e(why)}.</span> '
+              '<button class="warn-btn">Resume after the losing streak</button></form>' if why else "")
 
     def box(name, label):
         return (f'<label class="small"><input type="checkbox" name="{name}" value="1"'
@@ -1993,8 +2019,21 @@ def _guards_form(paths: Paths, csrf: str, ws: str) -> str:
             f'{box("maker_entry", "Enter with limit orders (maker fee)")} '
             f'{num("max_long", "Max longs", "1")} {num("max_short", "Max shorts", "1")} '
             f'{num("max_correlated", "Max moving together", "1")} {num("corr_min", "at correlation", "0.05")} '
-            f'{num("agree", "Strategies that must agree (1 off)", "1")}'
+            f'{num("agree", "Strategies that must agree (1 off)", "1")} '
+            f'{num("risk_pct", "Risk per trade % (0 = strategy)")} {num("open_risk_pct", "Max open risk % (0 off)")} '
+            f'{num("loss_streak", "Stop after losses in a row (0 off)", "1")} '
+            f'{num("min_score", "Min signal score /100 (0 off)", "1")}'
             '<button class="ghost">Set rules</button></form>'
+            + streak +
+            '<p class="small muted">Risk per trade %: with the amount per trade at 0, each trade is sized so its '
+            'stop loses that share of the wallet (0 uses each strategy\'s own, often 0.5%). Max open risk %: all open '
+            'trades together may lose at most that share of the wallet if every stop is hit; a new trade is made '
+            'smaller to fit, or skipped. Stop after losses in a row: that many losing trades in a row stop new '
+            'trades until you look at them and press Resume (open trades are still managed). Min signal score: each '
+            'signal is scored 0-100 from completed candles (trend and higher timeframes 25, price structure 20, '
+            'momentum 15, volume 15, volatility 10, liquidity 10, other strategies agreeing 5); below the minimum it '
+            'is skipped. These weights are starting values, not proven ones, and a high score never skips the other '
+            'checks.</p>'
             '<p class="small muted">Amount per trade: 0 sizes each trade from the strategy\'s risk (at most half '
             'the wallet). Any other amount (5 USDT or more) is what each new trade uses: the purchase amount on Spot, '
             'the margin on Futures, so on Futures the position is that amount times the leverage and so is the loss '

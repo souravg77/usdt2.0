@@ -50,13 +50,19 @@ TIMEFRAMES = ("5m", "15m", "30m", "1h", "4h", "1d")  # the ones paper trading ca
 DEFAULTS = {"breaker": True, "day_pause_pct": 3.0, "pause_hours": 24.0, "week_close_pct": 6.0,
             "min_rr": 0.0, "trend": False, "split_tp": False, "breakeven": False, "maker_entry": False,
             "max_long": 8.0, "max_short": 8.0, "max_correlated": 3.0, "corr_min": 0.8, "trade_usdt": 0.0,
-            "agree": 1.0, "timeframes": list(TIMEFRAMES)}
+            "agree": 1.0, "risk_pct": 0.0, "open_risk_pct": 0.0, "loss_streak": 0.0, "streak_ok_at": 0.0,
+            "min_score": 0.0,
+            "timeframes": list(TIMEFRAMES)}
 RANGES = {"day_pause_pct": (0.5, 50.0), "pause_hours": (1.0, 168.0), "week_close_pct": (1.0, 90.0),
           "min_rr": (0.0, 10.0), "max_long": (1.0, 200.0), "max_short": (1.0, 200.0),
           "max_correlated": (1.0, 50.0), "corr_min": (0.5, 0.99),
-          "trade_usdt": (5.0, 1_000_000.0), "agree": (1.0, 10.0)}
-OFF_AT_ZERO = ("min_rr", "trade_usdt")  # 0 means off / automatic, not the range's minimum
-WHOLE = ("max_long", "max_short", "max_correlated", "agree")
+          "trade_usdt": (5.0, 1_000_000.0), "agree": (1.0, 10.0),
+          # from the NEXUS prompt: risk per trade and all open trades' risk (% of the wallet), and the
+          # losing streak that stops new entries until a person resumes them
+          "risk_pct": (0.05, 5.0), "open_risk_pct": (0.1, 50.0), "loss_streak": (1.0, 20.0),
+          "streak_ok_at": (0.0, 1e15), "min_score": (1.0, 100.0)}
+OFF_AT_ZERO = ("min_rr", "trade_usdt", "risk_pct", "open_risk_pct", "loss_streak", "streak_ok_at", "min_score")  # 0 = off
+WHOLE = ("max_long", "max_short", "max_correlated", "agree", "loss_streak")
 CORR_BARS = 168  # hourly returns of the last week
 SWITCHES = ("breaker", "trend", "split_tp", "breakeven", "maker_entry")
 
@@ -202,6 +208,43 @@ def block(state: dict, market: str, now_ms: int) -> str:
 
         return f"{br['why']} (until {local(br['until'] / 1000)})"
     return ""
+
+
+def losing_streak(state: dict, market: str, since: float = 0) -> int:
+    """How many of this engine's newest closed trades (closed after ``since``) lost money in a row."""
+    n = 0
+    for t in reversed(state.get("trades", [])):
+        if wallet.market_of(t) != market or t.get("exit_ts", 0) <= since:
+            continue
+        if t.get("pnl_usdt", t.get("r", 0.0)) >= 0:
+            break
+        n += 1
+    return n
+
+
+def streak_block(state: dict, market: str, g: dict) -> str:
+    """Why a losing streak stops this engine's new trades until a person resumes them, or ""."""
+    need = int(g.get("loss_streak") or 0)
+    if need <= 0:
+        return ""
+    n = losing_streak(state, market, g.get("streak_ok_at") or 0)
+    if n < need:
+        return ""
+    name = "Futures AI" if market == "futures" else "Spot AI"
+    return (f"{name} lost {n} trades in a row (its limit is {need}): no new trades until you review them and "
+            "press Resume after the losing streak on the Trading page")
+
+
+def open_risk(state: dict, market: str, skip: str = "") -> float:
+    """USDT the engine's filled open positions would lose together if every stop were hit."""
+    total = 0.0
+    for key, o in (state.get("open") or {}).items():
+        if key == skip or not o.get("filled") or ((key.endswith("|futures") or wallet.market_of(o) == "futures")
+                                                  != (market == "futures")):
+            continue
+        stop = (o.get("signal") or {}).get("stop", o.get("entry", 0))
+        total += abs(o.get("entry", 0) - stop) * o.get("units", 0)
+    return total
 
 
 # ---- exposure caps ------------------------------------------------------------------------------

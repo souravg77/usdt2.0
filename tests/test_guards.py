@@ -503,7 +503,7 @@ def test_a_trade_opens_only_when_enough_strategies_agree(tmp_path):
     assert no and "2 of the 3 strategies needed" in no[0]["detail"]
     three = _agree_trader(tmp_path / "c", 3, 3)
     opened = [s for s in three.state["signals"] if s["skipped"] == ""]
-    assert opened and all(s["detail"] == "3 strategies agreed" for s in opened)
+    assert opened and all(s["detail"].startswith("3 strategies agreed") for s in opened)
     # one trade per agreement, not three: the others say who took it
     by_ts = {}
     for s in three.state["signals"]:
@@ -625,3 +625,106 @@ def test_the_scan_log_says_why_an_engine_read_no_chart(tmp_path):
     assert history_start("1d", 10**13) == 10**13 - 300 * 86_400_000
     store.close()
     fstore.close()
+
+
+def test_losing_streak_stops_new_trades_until_resumed():
+    """NEXUS prompt: no new entries after N losing trades in a row until a person reviews them."""
+    g = {**guards.DEFAULTS, "loss_streak": 3.0}
+    trades = [{"exit_ts": i, "pnl_usdt": p, "perp": True} for i, p in
+              enumerate([5, -1, -2, -3], start=1)]
+    state = {"trades": trades}
+    assert guards.losing_streak(state, "futures") == 3 and guards.losing_streak(state, "spot") == 0
+    why = guards.streak_block(state, "futures", g)
+    assert "lost 3 trades in a row" in why and "Resume" in why
+    assert guards.streak_block(state, "futures", {**g, "loss_streak": 4.0}) == ""
+    assert guards.streak_block(state, "futures", {**g, "streak_ok_at": 4}) == ""  # resumed after the 3rd
+    state["trades"].append({"exit_ts": 5, "pnl_usdt": 2, "perp": True})
+    assert guards.streak_block(state, "futures", g) == ""  # a win ends the streak
+    assert guards.streak_block(state, "futures", guards.DEFAULTS) == ""  # off by default
+
+
+def test_open_risk_counts_every_filled_position_at_its_stop():
+    state = {"open": {
+        "a|bybit|BTC/USDT|1h|futures": {"filled": True, "entry": 100.0, "units": 2.0, "signal": {"stop": 95.0}},
+        "b|bybit|ETH/USDT|1h": {"filled": True, "entry": 10.0, "units": 10.0, "signal": {"stop": 9.0},
+                                "market": "spot"},
+        "c|bybit|SOL/USDT|1h|futures": {"filled": False, "entry": 1.0, "units": 0, "signal": {"stop": 0.5}}}}
+    assert guards.open_risk(state, "futures") == pytest.approx(10.0)
+    assert guards.open_risk(state, "spot") == pytest.approx(10.0)
+    assert guards.open_risk(state, "futures", skip="a|bybit|BTC/USDT|1h|futures") == 0
+
+
+def test_risk_per_trade_and_open_risk_cap_size_paper_trades(tmp_path):
+    """The engine's risk % sizes each trade; the open-risk cap shrinks or skips the next ones."""
+    trader = _two_pair_trader(tmp_path, {"risk_pct": 1.0, "open_risk_pct": 1.0, "max_correlated": 50})
+    w = wallet.load(wallet.wallet_path(str(tmp_path / "paper_state.json")))
+    rows = list(trader.state["open"].values()) + trader.state["trades"]
+    first = min(rows, key=lambda o: o.get("entry_ts", 1e18))
+    risk = abs(first["entry"] - (first.get("signal") or first)["stop"]) * first["units"]
+    assert risk == pytest.approx(w["start"] * 0.01, rel=0.05)  # 1% of the wallet at the stop
+    assert guards.open_risk(trader.state, "spot") <= w["start"] * 0.01 * 1.05
+    capped = [s for s in trader.state["signals"] if s["skipped"] == "open risk cap"]
+    assert capped and "the limit is 1%" in capped[0]["detail"]
+
+
+def test_trading_page_sets_the_new_risk_rules_and_resumes_a_streak(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from test_web import PW, login
+
+    from aitrader.config import Settings
+    from aitrader.web import Auth, JobRunner, Paths, create_app
+
+    monkeypatch.chdir(tmp_path)
+    paths = Paths()
+    os.makedirs("data/learn")
+    json.dump({"open": {}, "trades": [{"exit_ts": i, "pnl_usdt": -1.0, "perp": True} for i in (1, 2, 3)]},
+              open(paths.paper_state, "w"))
+    client = TestClient(create_app(Settings(), Auth("admin", PW, "k"), JobRunner(str(tmp_path / "jobs"), env_file="none"),
+                                   paths))
+    login(client)
+    from aitrader.learn import wallet
+
+    wallet.set_market(wallet.market_path(paths.paper_state), True)
+    page = client.get("/trading").text
+    csrf = page.split('name="csrf" value="')[1].split('"')[0]
+    assert 'name="risk_pct"' in page and 'name="open_risk_pct"' in page and 'name="loss_streak"' in page
+    r = client.post("/trading/paper/guards", data={"csrf": csrf, "market": "futures", "breaker": "1",
+                                                   "risk_pct": "0.25", "open_risk_pct": "1", "loss_streak": "3"},
+                    follow_redirects=False)
+    assert "bad=1" not in r.headers["location"]
+    g = guards.load(guards.path_for(paths.paper_state))["futures"]
+    assert (g["risk_pct"], g["open_risk_pct"], g["loss_streak"]) == (0.25, 1.0, 3.0)
+    page = client.get("/trading").text
+    assert "risk 0.25% of the wallet per trade" in page or "Resume after the losing streak" in page
+    assert "Resume after the losing streak" in page
+    client.post("/trading/paper/streak-resume", data={"csrf": csrf, "market": "futures"})
+    assert "Resume after the losing streak" not in client.get("/trading").text
+    assert guards.load(guards.path_for(paths.paper_state))["futures"]["loss_streak"] == 3.0  # setting kept
+    # the other rules' form keeps the resume time
+    client.post("/trading/paper/guards", data={"csrf": csrf, "market": "futures", "loss_streak": "3"})
+    assert guards.load(guards.path_for(paths.paper_state))["futures"]["streak_ok_at"] > 0
+
+
+def test_signal_score_parts_and_minimum(tmp_path):
+    """NEXUS prompt section 5: a transparent 0-100 score; below the engine's minimum a signal is skipped."""
+    from test_learn import synthetic
+
+    from aitrader.learn import score
+
+    df = synthetic(n=400)
+    up = score.parts(df, short=False, higher={"4h": "up", "1d": "up"})
+    down = score.parts(df, short=True, higher={"4h": "up", "1d": "up"})
+    assert set(up) == set(score.WEIGHTS) - {"confirmation"} and all(0 <= v <= 1 for v in up.values())
+    assert up["trend"] > down["trend"]  # higher timeframes up: better for a long than a short
+    assert 0 <= score.total(up) <= 95 and score.total(up, agreeing=3) == pytest.approx(score.total(up) + 5)
+    assert sum(score.WEIGHTS.values()) == 100
+    assert "/" in score.weakest(up)
+    os.makedirs(tmp_path / "a")
+    low = _two_pair_trader(tmp_path / "a", {"min_score": 100.0, "max_correlated": 50})
+    skipped = [s for s in low.state["signals"] if s["skipped"] == "signal score too low"]
+    assert skipped and "minimum 100" in skipped[0]["detail"] and not low.state["trades"] and not low.state["open"]
+    os.makedirs(tmp_path / "b")
+    ok = _two_pair_trader(tmp_path / "b", {"max_correlated": 50})  # off by default
+    opened = [s for s in ok.state["signals"] if not s["skipped"]]
+    assert opened and "score " in opened[0]["detail"]
+    assert all("score" in o for o in ok.state["open"].values())
