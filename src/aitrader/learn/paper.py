@@ -325,7 +325,9 @@ class PaperTrader:
         newest = max((c for _d, c, _f in frames.values() if c), default=None)
         self.state["last_pass"] = {"at": now_ms, "strategies": built, "broken": broken, "pairs": len(symbols),
                                    "markets": len({m[1:] for m in frames}), "new_candles": sum(1 for *_x, f in frames.values() if f),
-                                   "checks": checks, "newest_candle": newest}
+                                   "checks": checks, "newest_candle": newest,
+                                   # the shortest timeframe read: on 4h charts alone a candle closes every 4 hours
+                                   "step": min((TIMEFRAME_MS[m[3]] for m in frames), default=None)}
         for m in wallet.MARKETS:
             if engines[m] and per_market[m] and not strategies_on[m]:
                 idle[m]["no strategy is set to trade on it (WIN only or Keep the best)"] = {m}

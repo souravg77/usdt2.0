@@ -1628,7 +1628,8 @@ def _signals_section(paper: dict, now_ms: int, limit: int = 15) -> str:
                  f'on {lp.get("pairs", 0)} pairs; the charts are read again once new entries are allowed.</p>')
     elif lp:
         age = (now_ms - lp["newest_candle"]) / 60_000 if lp.get("newest_candle") else None
-        stale = age is None or age > 90
+        # late when no candle closed for a whole bar of the shortest timeframe read, plus half an hour
+        stale = age is None or age > (lp.get("step") or 3_600_000) / 60_000 + 30
         head += (f'<p class="small {"bad" if stale or not lp.get("strategies") else "muted"}">Last check '
                  f'{_ms(lp.get("at"))}: {lp.get("strategies", 0)} strategies on {lp.get("pairs", 0)} pairs '
                  f'({lp.get("markets", 0)} pair/timeframe charts)'
