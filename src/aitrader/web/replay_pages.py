@@ -259,6 +259,73 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
         res = await asyncio.to_thread(compute, symbol, tf, start, months, strategy)
         return JSONResponse(res)
 
+    def compute_all(tf: str, start: datetime, months: int, strategy: str) -> dict:
+        """The same backtest on every pair of the workspace (its Markets pairs) at once: totals per
+        strategy and per pair, and which pairs had no prices for the period."""
+        per_pair, by_strat, names = [], {}, {}
+        for sym in pairs():
+            res = compute(sym, tf, start, months, strategy)
+            names.update({x["id"]: x["name"] for x in res["strategies"]})
+            closed = [t for t in res["trades"] if t.get("exit_ts")]
+            wins = sum(1 for t in closed if t["r"] > 0)  # plain ints: the trades may hold numpy values
+            per_pair.append({"symbol": sym, "candles": len(res["candles"]), "trades": len(closed), "wins": wins,
+                             "total_r": round(float(sum(t["r"] for t in closed)), 2), "open": len(res["trades"]) - len(closed),
+                             "fee_skipped": int(res.get("fee_skipped", 0)),
+                             "strategies": len(res["strategies"])})
+            for t in closed:
+                b = by_strat.setdefault(t["strategy"], {"id": t["strategy"], "trades": 0, "wins": 0, "total_r": 0.0,
+                                                        "pairs": set()})
+                b["trades"] += 1
+                b["wins"] += int(t["r"] > 0)
+                b["total_r"] += float(t["r"])
+                b["pairs"].add(sym)
+        strategies = sorted(({**b, "name": names.get(b["id"], b["id"]), "total_r": round(b["total_r"], 2),
+                              "pairs": len(b["pairs"])} for b in by_strat.values()),
+                            key=lambda b: b["total_r"], reverse=True)
+        return {"timeframe": tf, "start": int(start.timestamp() * 1000), "months": months, "pairs": per_pair,
+                "strategies": strategies, "missing": [p["symbol"] for p in per_pair if not p["candles"]]}
+
+    @app.get("/api/replay/all")
+    async def api_replay_all(request: Request, tf: str = "1h", month: str = "", months: int = 1,
+                             strategy: str = ""):
+        _user, _token, redirect = guard(request)
+        if redirect:
+            return JSONResponse({"error": "sign in"}, status_code=401)
+        start = _month(month)
+        if tf not in REPLAY_TIMEFRAMES or start is None:
+            return JSONResponse({"error": "pick a timeframe and a month"}, status_code=400)
+        if start > datetime.now(timezone.utc):
+            return JSONResponse({"error": "that month hasn't happened yet"}, status_code=400)
+        months = min(max(int(months or 1), 1), MAX_MONTHS)
+        return JSONResponse(await asyncio.to_thread(compute_all, tf, start, months, strategy))
+
+    @app.post("/replay/download-all")
+    def download_all(request: Request, csrf: str = Form(""), tf: str = Form("1h"), month: str = Form(""),
+                     months: int = Form(1), strategy: str = Form("")):
+        """Download the period for every workspace pair that has no prices for it yet, in one job."""
+        user, token, redirect = guard(request)
+        if redirect:
+            return redirect
+        if not auth.check_csrf(token, csrf):
+            return PlainTextResponse("bad form token; reload the page", status_code=403)
+        start = _month(month)
+        if tf not in REPLAY_TIMEFRAMES or start is None:
+            return RedirectResponse("/replay?error=" + _q("pick a timeframe and a month"), status_code=303)
+        months = min(max(int(months or 1), 1), MAX_MONTHS)
+        since = (start - timedelta(milliseconds=WARMUP_BARS * TIMEFRAME_MS[tf])).strftime("%Y-%m-%d")
+        until = min(_add_months(start, months), datetime.now(timezone.utc),
+                    start + timedelta(milliseconds=MAX_BARS * TIMEFRAME_MS[tf])).strftime("%Y-%m-%d")
+        sym_args = [a for sym in pairs() for a in ("--symbol", sym)]
+        jobs.submit(f"Download {tf} for every {ws()} pair from {month}",
+                    [["download", "--since", since, "--until", until, "--market", ws(), "--exchange", exchange,
+                      "--timeframe", tf, *sym_args]],
+                    meta={"kind": "download", "by": user, "market": ws()})
+        cache.clear()
+        q = f"symbol=*&tf={_q(tf)}&month={_q(month)}&months={months}&strategy={_q(strategy)}"
+        return RedirectResponse(f"/replay?{q}&msg=" + _q(f"Downloading {tf} prices for all {len(pairs())} pairs. "
+                                                          "Press Load again when it is done (see Recent jobs on "
+                                                          "the Overview page)."), status_code=303)
+
     @app.get("/static/replay.js")
     def replay_js():
         with open(os.path.join(STATIC, "replay.js"), encoding="utf-8") as fh:
@@ -532,7 +599,7 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
         if redirect:
             return redirect
         symbols = pairs()
-        symbol = symbol if symbol in symbols else (symbols[0] if symbols else "")
+        symbol = symbol if symbol in symbols or (symbol == "*" and symbols) else (symbols[0] if symbols else "")
         tf = tf if tf in REPLAY_TIMEFRAMES else "1h"
         now = datetime.now(timezone.utc)
         month = month if _month(month) else f"{now.year - 1}-{now.month:02d}"
@@ -556,7 +623,7 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
         body += (
             '<div id="replay">'
             '<form id="replay-form" class="card replay-form">'
-            f'<label>Pair <select name="symbol">{options([(s, s) for s in symbols], symbol)}</select></label>'
+            f'<label>Pair <select name="symbol">{options([("*", f"All {len(symbols)} pairs (totals)")] + [(s, s) for s in symbols], symbol)}</select></label>'
             f'<label>Timeframe <select name="tf">{options([(t, t) for t in REPLAY_TIMEFRAMES], tf)}</select></label>'
             f'<label>From month <input type="month" name="month" value="{_e(month)}" '
             f'max="{now.year}-{now.month:02d}"></label>'
@@ -566,12 +633,17 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
             '<button type="submit">Load</button></form>'
             '<div id="replay-msg" class="muted"></div>'
             + pick_card(tf, token, month, months, strategy) +
+            f'<form id="replay-download-all" method="post" action="/replay/download-all" class="row hidden">'
+            f'{_csrf(auth, token)}<input type="hidden" name="tf"><input type="hidden" name="month">'
+            '<input type="hidden" name="months"><input type="hidden" name="strategy">'
+            '<button>Download the missing prices from Bybit</button></form>'
             f'<form id="replay-download" method="post" action="/replay/download" class="row hidden">{_csrf(auth, token)}'
             '<input type="hidden" name="symbol"><input type="hidden" name="tf"><input type="hidden" name="month">'
             '<input type="hidden" name="months"><button>Download these prices from Bybit</button></form>'
             '<div id="replay-progress" class="card hidden" role="status" aria-live="polite">'
             '<p id="progress-text" class="small"></p>'
             '<div class="bar progress"><span id="progress-fill" style="width:0%"></span></div></div>'
+            '<div id="replay-all" class="card hidden"></div>'
             '<div class="card chart-card"><div class="chart-head"><h2 id="chart-title">Replay</h2>'
             f'<div class="segs" id="speeds">{speeds}</div></div>'
             '<div class="row replay-controls"><button type="button" id="play" disabled>Play</button>'
@@ -585,11 +657,11 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
             '<div id="legend" class="legend"></div>'
             '<canvas id="chart" aria-label="replay chart"></canvas>'
             '<p id="read" class="small market-read"></p></div>'
-            '<div class="stats" id="replay-stats"></div>'
+            '<div id="replay-detail"><div class="stats" id="replay-stats"></div>'
             '<h2>Strategies so far</h2><p class="muted small">Closed trades up to the current candle, best first. '
             'Win % is the share of trades that made money after fees and slippage; R is the amount risked per '
             'trade.</p><div id="board"></div>'
-            '<h2>Trades</h2><div id="log"></div></div>'
+            '<h2>Trades</h2><div id="log"></div></div></div>'
             '<noscript><p class="bad">The replay needs JavaScript.</p></noscript>'
             '<p class="muted small">After Load, the indicators the chosen strategies use switch on (the number on '
             'a switch is how many of them use it); tap a switch to show or hide one. Indicators use the strategies\' '
