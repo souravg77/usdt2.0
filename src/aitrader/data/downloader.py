@@ -54,10 +54,15 @@ async def download(
 
 
 def _holes(store, exchange, symbol, timeframe, start, end) -> list[tuple[int, int]]:
-    """Ranges ``[from, to)`` of missing candles between ``start`` and ``end`` (both stored),
-    leaving out ranges asked for recently that the exchange had nothing for."""
+    """Ranges ``[from, to)`` of missing candles from ``start`` to ``end``, leaving out ranges asked
+    for recently that the exchange had nothing for. The edges count too: a window that lies wholly
+    inside a gap (candles stored before it and after it, none in it) is one hole, not none."""
     step = TIMEFRAME_MS[timeframe]
     stamps = store.timestamps(exchange, symbol, timeframe, start, end)
+    if not stamps or stamps[0] > start:
+        stamps.insert(0, start - step)
+    if stamps[-1] < end:
+        stamps.append(end)
     now, out = time.time(), []
     for a, b in zip(stamps, stamps[1:]):
         if b - a > step:
