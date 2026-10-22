@@ -36,7 +36,7 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 
 from ..backtest import BacktestConfig, metrics
-from ..backtest.engine import Trade, as_perp, cost_r, simulate_signal, too_costly, too_little_reward
+from ..backtest.engine import Trade, as_perp, capped, cost_r, simulate_signal, too_costly, too_little_reward
 from ..data.store import CandleStore
 from ..indicators import candles_to_frame
 from ..market import perp_limits
@@ -524,11 +524,11 @@ class PaperTrader:
         return legs
 
     def _bcfg(self, perp: bool, min_rr: float = 0.0, split_tp: bool = False,
-              maker_entry: bool = False, breakeven: bool = False) -> BacktestConfig:
+              maker_entry: bool = False, breakeven: bool = False, max_rr: float = 0.0) -> BacktestConfig:
         base = as_perp(self.cfg.backtest) if perp else self.cfg.backtest
-        if min_rr or split_tp or maker_entry:
+        if min_rr or split_tp or maker_entry or max_rr:
             return replace(base, min_rr=min_rr, split_tp=split_tp, maker_entry=maker_entry,
-                           breakeven=split_tp and breakeven)
+                           breakeven=split_tp and breakeven, max_rr=max_rr)
         return base
 
     def _exposure_block(self, mkt: str, ex: str, sym: str, short: bool, g: dict) -> str:
@@ -751,7 +751,12 @@ class PaperTrader:
                 del self.state["open"][key]
                 log.info("paper %s dropped: %s is no longer one of the exchanges", key, ex)
                 continue
-            sig = _sig_from(pos["signal"])
+            # the engine's furthest take-profit: the target the trade runs to (and the page shows),
+            # from the strategy's own target, so changing the setting moves open trades too
+            full = pos.setdefault("full_target", pos["signal"].get("target"))
+            max_rr = self._guards[pos_mkt]["max_rr"]
+            sig = capped(_sig_from({**pos["signal"], "target": full}), max_rr)
+            pos["signal"]["target"] = sig.target
             step = TIMEFRAME_MS[tf]
             df = self._frame(ex, sym, tf, sig.ts - WINDOW_BARS * step, now_ms, pos_mkt)
             if df is None:
@@ -771,7 +776,8 @@ class PaperTrader:
                 if entry_id in reg.entries:
                     make_strategy(reg.entries[entry_id])  # registers its custom exit rules
                 bcfg = self._bcfg(bool(pos.get("perp")), split_tp=bool(pos.get("split_tp")),
-                                  maker_entry=bool(pos.get("maker_entry")), breakeven=bool(pos.get("breakeven")))
+                                  maker_entry=bool(pos.get("maker_entry")), breakeven=bool(pos.get("breakeven")),
+                                  max_rr=max_rr)
                 t = simulate_signal(sig, df, entry_i, bcfg, {})
             except Exception:  # never close a trade on the wrong rule: keep it open and say so
                 log.exception("paper %s: can't evaluate its exits; kept open", key)

@@ -69,7 +69,7 @@ def test_minimum_reward_skips_close_targets_but_not_rule_exits():
 def test_settings_have_safe_defaults_and_limits(tmp_path):
     path = guards.path_for(str(tmp_path / "paper_state.json"))
     g = guards.load(path)
-    assert g["futures"] == guards.DEFAULTS and g["spot"]["breaker"] is True
+    assert g["futures"] == {**guards.DEFAULTS, "max_rr": 2.0} and g["spot"]["breaker"] is True
     got = guards.save(path, "futures", {"min_rr": "2", "trend": True, "split_tp": True, "day_pause_pct": "99",
                                         "breaker": False})
     assert got["min_rr"] == 2 and got["trend"] and got["split_tp"] and got["day_pause_pct"] == 50.0

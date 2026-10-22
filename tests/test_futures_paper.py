@@ -16,7 +16,7 @@ H = 3_600_000
 T0 = 1_700_000_000_000 // H * H
 
 
-def _run(tmp_path, bars, entry=100.0, stop=98.0, target=110.0, lev=20.0, side="buy", amount=0.0):
+def _run(tmp_path, bars, entry=100.0, stop=98.0, target=110.0, lev=20.0, side="buy", amount=0.0, max_rr=0.0):
     rows = [(T0 + i * H, 100, 100.2, 99.8, 100, 1000) for i in range(300)]
     rows += [(T0 + (300 + j) * H, o, h, lo, c, 1000) for j, (o, h, lo, c) in enumerate(bars)]
     store = CandleStore(str(tmp_path / "c.db"))
@@ -25,8 +25,8 @@ def _run(tmp_path, bars, entry=100.0, stop=98.0, target=110.0, lev=20.0, side="b
     st = str(tmp_path / "state.json")
     wallet.save(wallet.wallet_path(st, "futures"), 1000, now_ms=0)
     wallet.set_leverage(wallet.market_path(st), lev)
-    if amount:
-        guards.save(guards.path_for(st), "futures", {"trade_usdt": amount})
+    # the strategy's own target unless a test sets the furthest take-profit (Futures AI starts at 2R)
+    guards.save(guards.path_for(st), "futures", {"max_rr": max_rr, "trade_usdt": amount or None})
     tr = PaperTrader(store, str(tmp_path / "reg.json"), ["bybit"], ["BTC/USDT"], PaperConfig(), state_path=st)
     sig = Signal(ts=T0 + 300 * H, strategy="x", exchange="bybit", symbol="BTC/USDT", timeframe="1h",
                  side=Side.SELL if side == "sell" else Side.BUY, entry=entry, stop=stop, target=target,
@@ -141,3 +141,29 @@ def test_a_short_twins_exit_works_before_the_twin_registered_it():
     engine.CUSTOM_EXITS.pop("flipped:rsi>70", None)  # as after a restart
     got = engine._one_trailing_exit("flipped:rsi>70", df)
     assert got is not None and bool(got.iloc[-1])  # falling price: overbought on the flipped chart
+
+
+def test_futures_take_profit_is_pulled_in_to_the_cap(tmp_path):
+    # Shawn's MAGMA/USDT: a 6R Donchian target, capped at 2R for Futures AI
+    assert guards.load(str(tmp_path / "none.json"))["futures"]["max_rr"] == 2.0
+    assert guards.load(str(tmp_path / "none.json"))["spot"]["max_rr"] == 0.0
+    bars = [(100, 100.5, 99.9, 100.2), (100.2, 104.5, 100, 104)]  # reaches 104 = 2R, never 110
+    far = _run(tmp_path / "far", bars)
+    [pos] = far.state["open"].values()
+    assert pos["signal"]["target"] == 110.0 and not far.state["trades"]
+    near = _run(tmp_path / "near", bars, max_rr=2.0)
+    [t] = near.state["trades"]
+    assert t["exit_reason"] == "target" and t["pnl_usdt"] > 0
+    # an open trade shows the capped target, and follows the setting when it changes
+    held = _run(tmp_path / "held", bars[:1], max_rr=3.0)
+    [pos] = held.state["open"].values()
+    assert pos["signal"]["target"] == 106.0 and pos["full_target"] == 110.0
+
+
+def test_capped_short_and_no_target():
+    from aitrader.backtest.engine import capped
+
+    s = Signal(ts=0, strategy="x", exchange="bybit", symbol="BTC/USDT", timeframe="1h", side=Side.SELL,
+               entry=100.0, stop=102.0, target=80.0)
+    assert capped(s, 2.0).target == 96.0 and capped(s, 0).target == 80.0 and capped(s, 20).target == 80.0
+    assert capped(Signal(**{**s.__dict__, "target": None}), 2.0).target is None

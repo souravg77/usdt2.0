@@ -20,7 +20,7 @@ Fill rules, chosen to avoid flattering results (for a short, "below" and "above"
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import pandas as pd
 
@@ -41,6 +41,7 @@ class BacktestConfig:
     max_bars_in_trade: int = 10_000
     max_cost_r: float = 0.25  # skip signals whose round-trip costs exceed this share of the risk (0: off)
     min_rr: float = 0.0  # skip signals whose fixed target is less than this many R away (0: off)
+    max_rr: float = 0.0  # pull a fixed target further than this many R away in to it (0: off)
     split_tp: bool = False  # take half the position at halfway to the target, the rest at the target
     breakeven: bool = False  # with split_tp: once the first half is taken, the stop moves to breakeven
     maker_entry: bool = False  # enter with a post-only limit order (maker fee), or not at all (maker_fill)
@@ -119,6 +120,7 @@ def simulate_signal(sig: Signal, df: pd.DataFrame, pos: int, cfg: BacktestConfig
     """Simulate one signal; ``pos`` is the index of the bar after the signal bar."""
     if pos >= len(df):
         return None
+    sig = capped(sig, cfg.max_rr)
     if sig.side is Side.SELL:
         return _simulate_short(sig, df, pos, cfg, trail_cache)
     slip = cfg.slippage_bps / 10_000
@@ -313,6 +315,16 @@ def as_perp(cfg: BacktestConfig) -> BacktestConfig:
 
     return replace(cfg, taker_fee=cfg.perp_taker_fee, maker_fee=cfg.perp_maker_fee,
                    funding_rate_8h=cfg.perp_funding_8h)
+
+
+def capped(sig: Signal, max_rr: float) -> Signal:
+    """The signal with its fixed target pulled in to ``max_rr`` times the risk when it is further
+    (0: off). A signal with no fixed target keeps exiting on its own rule."""
+    rr = sig.r_multiple_target
+    if not max_rr or rr is None or rr <= max_rr + 1e-9:
+        return sig
+    risk = abs(sig.entry - sig.stop)
+    return replace(sig, target=sig.entry - max_rr * risk if sig.side is Side.SELL else sig.entry + max_rr * risk)
 
 
 def too_costly(sig: Signal, cfg: BacktestConfig) -> bool:
