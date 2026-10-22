@@ -455,6 +455,21 @@
       });
     });
   });
+  // "Choose which to keep": quick ticks, and the period loaded above goes with the choice
+  Array.prototype.forEach.call(document.querySelectorAll("form.pick-choose"), function (f) {
+    Array.prototype.forEach.call(f.querySelectorAll("button[data-tick]"), function (b) {
+      b.addEventListener("click", function () {
+        Array.prototype.forEach.call(f.querySelectorAll("input[name=keep]"), function (c) {
+          c.checked = b.dataset.tick === "all" || (b.dataset.tick === "profit" && parseFloat(c.dataset.r) > 0);
+        });
+      });
+    });
+    f.addEventListener("submit", function () {
+      ["month", "months", "strategy"].forEach(function (k) {
+        if (f.elements[k] && form.elements[k]) f.elements[k].value = form.elements[k].value;
+      });
+    });
+  });
   var dlJob = new URLSearchParams(location.search).get("download");
   if (dlJob) watchDownload(dlJob);
   else load();  // the chosen (or default) pair, timeframe and month, straight away

@@ -229,23 +229,30 @@ def copy_id(entry_id: str, timeframe: str, market: str = "spot") -> str:
 
 
 def apply(reg: Registry, entries: list[Entry], timeframe: str, results: list[dict], picks_file: str,
-          info: dict | None = None, min_trades: int = MIN_TRADES, market: str = "spot") -> dict:
+          info: dict | None = None, min_trades: int = MIN_TRADES, market: str = "spot",
+          chosen: list[str] | None = None) -> dict:
     """Paper-trade a ``timeframe`` copy of each winner on ``market``'s engine, retire that engine's
     copies of earlier picks that no longer win, and save the pick (``info`` is stored with it:
-    pairs, period...)."""
+    pairs, period...). ``chosen``: the admin's own choice of ids from ``results``, kept whatever
+    the rules say (fewer trades, a loss...)."""
     by_id = {e.id: e for e in entries}
-    keep = [r for r in winners(results, min_trades) if r["id"] in by_id]
+    if chosen is not None:
+        want = set(chosen)
+        keep = [r for r in results if r["id"] in want and r["id"] in by_id]
+    else:
+        keep = [r for r in winners(results, min_trades) if r["id"] in by_id]
+    how = "chosen by hand for" if chosen is not None else PICKED
     keep_ids = {copy_id(r["id"], timeframe, market) for r in keep}
     added, back, dropped = [], [], []
     for r in keep:
         c = pick_copy(by_id[r["id"]], timeframe, market)
         if reg.add(c):
             c = reg.entries[c.id]
-            c.set_status("paper", f"{PICKED} {timeframe}: {r['total_r']:+.2f}R over {r['trades']} trades, "
+            c.set_status("paper", f"{how} {timeframe}: {r['total_r']:+.2f}R over {r['trades']} trades, "
                                   f"up in {r['quarters_up']} of {r['quarters_up'] + r['quarters_down']} quarters")
             added.append(c.id)
         elif reg.entries[c.id].status != "paper":
-            reg.entries[c.id].set_status("paper", f"{PICKED} {timeframe} again")
+            reg.entries[c.id].set_status("paper", f"{how} {timeframe} again")
             back.append(c.id)
     for e in reg.entries.values():
         if (picked_for(e) == timeframe and pick_market(e) == market and e.id not in keep_ids
@@ -256,9 +263,27 @@ def apply(reg: Registry, entries: list[Entry], timeframe: str, results: list[dic
     picks = load(picks_file)
     picks[timeframe] = {"at": int(time.time() * 1000), "min_trades": min_trades, "market": market,
                         "picked": [r["id"] for r in keep], "results": results, **(info or {})}
+    if chosen is not None:
+        picks[timeframe]["hand"] = True
+        picks[timeframe]["rule_picked"] = [r["id"] for r in winners(results, min_trades)]
     save(picks_file, picks)
     return {"picked": [r["id"] for r in keep], "added": added, "returned": back, "dropped": dropped,
             "tested": len(results)}
+
+
+def choose(reg: Registry, entries: list[Entry], timeframe: str, picks_file: str, ids: list[str],
+           market: str = "spot", by: str = "") -> dict | None:
+    """Keep exactly ``ids`` from the saved ``timeframe`` pick's tested strategies (the admin's
+    choice on the Replay page), with no new backtest. None when there is no saved pick."""
+    cur = load(picks_file).get(timeframe)
+    if not cur or not cur.get("results"):
+        return None
+    info = {k: v for k, v in cur.items() if k not in ("at", "min_trades", "market", "picked", "results",
+                                                       "hand", "rule_picked", "by")}
+    if by:
+        info["by"] = by
+    return apply(reg, entries, timeframe, cur["results"], picks_file, info=info,
+                 min_trades=cur.get("min_trades", MIN_TRADES), market=market, chosen=list(ids))
 
 
 def clear(reg: Registry, timeframe: str, picks_file: str, market: str = "spot") -> list[str]:

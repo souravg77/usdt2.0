@@ -670,6 +670,14 @@ def cmd_learn(s: Settings, args) -> int:
             gone = picks.clear(reg, tf, path, mkt)
             print(f"{tf} pick undone: every strategy may trade {tf} again; {len(gone)} pick copies stopped")
             return 0
+        if args.choose is not None:  # the admin's own choice from the saved pick's results
+            ids = [i for i in args.choose.split(",") if i]
+            out = picks.choose(reg, known_entries(reg.entries), tf, path, ids, mkt, by=args.by or "")
+            if out is None:
+                print(f"no saved {tf} pick to choose from: run pick-timeframe {tf} first")
+                return 1
+            print(f"{tf}: kept the {len(out['picked'])} chosen strategies; {len(out['dropped'])} stopped trading {tf}")
+            return 0
         now_ms = int(_time.time() * 1000)
         since = (_ms(args.since) if args.since else now_ms - int(args.years * 365.25 * 86_400_000))
         until = min(_ms(args.until), now_ms) if args.until else now_ms
@@ -1712,6 +1720,9 @@ def build_parser() -> argparse.ArgumentParser:
     lpt.add_argument("--only", help="judge only these strategy ids (comma separated); the rest stop trading it")
     lpt.add_argument("--min-trades", type=int, default=10, help="fewest trades to judge a strategy (default 10)")
     lpt.add_argument("--clear", action="store_true", help="undo the pick: every strategy trades it again")
+    lpt.add_argument("--choose", help="keep exactly these tested strategy ids (comma separated) from the saved "
+                                      "pick, whatever the rules say; no new backtest")
+    lpt.add_argument("--by", help="who chose (shown with the pick)")
     lpt.add_argument("--skip-empty", action="store_true",
                      help="no trades on this timeframe: leave it as it is and exit 0 (for a run over every timeframe)")
     lpt.add_argument("--market", choices=["spot", "futures"], default="spot",
