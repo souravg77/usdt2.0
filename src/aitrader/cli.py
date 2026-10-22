@@ -12,7 +12,7 @@ import time
 from datetime import datetime, timezone
 
 from .config import EXCHANGE, Settings
-from .data.downloader import deepen, download, top_up
+from .data.downloader import closed_since, deepen, download, top_up
 from .data.feeds import LiveFeed
 from .data.quality import check_candles
 from .data.store import CandleStore
@@ -90,12 +90,16 @@ def cmd_check_data(s: Settings, args) -> int:
     return 1 if bad and args.strict else 0
 
 
+CLOSE_LAG_MS = 3_000  # Bybit serves a closed candle a moment after its close
+
+
 async def cmd_collect(s: Settings, args) -> int:
     """Long-running service: keep the candle database topped up from both exchanges."""
     import time
 
     log = logging.getLogger("aitrader.collect")
     from .data.perp import PerpCandles, futures_db_path
+    from .learn import wallet
     from .learn.paper import history_start
 
     store = CandleStore(s.db_path)
@@ -103,6 +107,26 @@ async def cmd_collect(s: Settings, args) -> int:
     exchanges = args.exchange or EXCHANGES
     adapters = {ex: make_adapter(ex, s) for ex in exchanges}
     backlog: dict[str, int] = {}  # where the history filling stopped last pass, per exchange
+    auto_path = wallet.autoscan_path(PAPER_STATE)
+    fast: list[tuple] = []  # charts with candles, for Auto scan's quick fetches between passes
+    fast_at = [0]  # when their candles were last fetched (ms, less the closing lag)
+
+    async def quick() -> None:
+        """Auto scan on: fetch the just-closed candle of each chart whose candle closed since the last
+        fetch (on 1m charts each minute, on 4h charts every 4 hours), so paper trading sees it in seconds."""
+        if not fast or not wallet.autoscan(auto_path):
+            return
+        now = int(time.time() * 1000) - CLOSE_LAG_MS
+        due = [c for c in fast if closed_since(c[5], fast_at[0], now)]
+        fast_at[0] = now
+        for ex, mkt, db, source, sym, tf in due:
+            try:
+                n = await top_up(source, db, sym, tf)
+                if n:
+                    log.info("%s %s %s %s +%d (auto scan)", ex, mkt, sym, tf, n)
+            except Exception as exc:
+                log.warning("%s %s %s %s failed: %s", ex, mkt, sym, tf, exc)
+
     try:
         while True:
             since = int(time.time() * 1000) - args.backfill_days * 86_400_000
@@ -132,8 +156,6 @@ async def cmd_collect(s: Settings, args) -> int:
                     log.warning("squeeze scan failed: %s", exc)
                 finally:
                     await client.close()
-            from .learn import wallet
-
             if wallet.engines(wallet.engines_path(PAPER_STATE))["futures"] and perp_limits.due():
                 client = gainers.perp_client()  # Futures AI on: each coin's maximum leverage, once a day
                 try:
@@ -147,8 +169,10 @@ async def cmd_collect(s: Settings, args) -> int:
                                                        keep=open_paper_symbols(PAPER_STATE, "spot"))),
                     ("futures", fstore, configured_symbols(s.symbols, market="futures",
                                                            keep=open_paper_symbols(PAPER_STATE, "futures")))]
+            fast_new: list[tuple] = []
             for ex, adapter in adapters.items():
                 began = time.monotonic()
+                began_ms = int(time.time() * 1000) - CLOSE_LAG_MS
                 # first every chart's newest candles (one request each), so paper trading reads a
                 # just-closed candle within a minute or so; the slower history and hole filling
                 # comes after, within a time budget, carrying on next pass where it stopped
@@ -166,11 +190,14 @@ async def cmd_collect(s: Settings, args) -> int:
                                 log.warning("%s %s %s %s failed: %s", ex, mkt, sym, tf, exc)
                             (empty if n is None else todo).append((mkt, db, source, sym, tf))
                 fresh_s = time.monotonic() - began
+                fast[:] = fast_new = fast_new + [(ex, *c) for c in todo]
+                fast_at[0] = began_ms
                 start = backlog.get(ex, 0) % max(1, len(todo))
                 done = 0
                 for i, (mkt, db, source, sym, tf) in enumerate(empty + todo[start:] + todo[:start]):
                     if i >= len(empty) and time.monotonic() - began - fresh_s > args.backfill_budget:
                         break
+                    await quick()
                     try:
                         # at least the candles a strategy needs on this timeframe (250 daily
                         # candles are far more than --backfill-days)
@@ -191,7 +218,11 @@ async def cmd_collect(s: Settings, args) -> int:
                                      budget_s=args.history_budget)
                     except Exception as exc:
                         log.warning("%s spot history failed: %s", ex, exc)
-            await asyncio.sleep(args.interval)
+            end = time.monotonic() + args.interval
+            while (left := end - time.monotonic()) > 0:  # with Auto scan on, quick fetches meanwhile
+                auto = wallet.autoscan(auto_path)
+                await asyncio.sleep(min(left, auto) if auto else left)
+                await quick()
     finally:
         for a in adapters.values():
             await a.close()

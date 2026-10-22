@@ -486,6 +486,23 @@ paper trading. Nothing trades real money.</p>
                     "minute or less; this page refreshes by itself.")
         return _control_post(request, csrf, act, back="/trading" if back == "/trading" else "/scan-log")
 
+    @app.post("/trading/paper/autoscan")
+    def trading_paper_autoscan(request: Request, csrf: str = Form(""), seconds: str = Form("0"),
+                               back: str = Form("/scan-log")):
+        def act(user):
+            from ..learn import wallet
+
+            try:
+                n = wallet.set_autoscan(wallet.autoscan_path(paths.paper_state), int(seconds), by=user)
+            except ValueError:
+                return "Pick one of the listed Auto scan times.", False
+            _event("paper_autoscan", f"auto scan set to {_every(n) or 'off'} by {user}")
+            if not n:
+                return "Auto scan is off: paper trading looks for new candles every minute."
+            return (f"Auto scan is on: paper trading looks for a just-closed candle every {_every(n)} "
+                    "(Spot AI and Futures AI), and the price collector fetches each chart's candle as it closes.")
+        return _control_post(request, csrf, act, back="/trading" if back == "/trading" else "/scan-log")
+
     def _event(kind: str, text: str, level: str = "info") -> None:
         from ..ops import EventLog
 
@@ -1586,11 +1603,35 @@ def _scan_steps(ws: str) -> str:
             "every one of the last 500 and the check that stopped it. The page refreshes every 30 seconds.</p></details>")
 
 
+def _every(seconds: int) -> str:
+    """5 -> "5 seconds", 60 -> "1 minute"; "" for 0 (off)."""
+    if not seconds:
+        return ""
+    if seconds % 60:
+        return f"{seconds} seconds"
+    return "1 minute" if seconds == 60 else f"{seconds // 60} minutes"
+
+
 def _scan_now_form(csrf: str, paths, back: str = "/scan-log") -> str:
-    """The Scan now button: the paper trader re-reads every chart's newest closed candle at once."""
+    """The Scan now button: the paper trader re-reads every chart's newest closed candle at once.
+    Below it the Auto scan choice: how often to look for a just-closed candle."""
     from ..learn import wallet
 
     waiting = os.path.exists(wallet.scan_request_path(paths.paper_state))
+    auto = wallet.autoscan(wallet.autoscan_path(paths.paper_state))
+    options = "".join(f'<option value="{n}"{" selected" if n == auto else ""}>{_every(n) or "Off"}</option>'
+                      for n in wallet.AUTO_SCAN_SECONDS)
+    auto_form = (f'<form method="post" action="/trading/paper/autoscan" class="row">{csrf}'
+                 f'<input type="hidden" name="back" value="{_e(back)}">'
+                 f'<label>Auto scan every <select name="seconds">{options}</select></label><button>Save</button>'
+                 '<span class="small muted">'
+                 + (f"On: every {_every(auto)} paper trading looks for a candle that just closed and checks it "
+                    "straight away, and the price collector fetches each chart's candle as soon as it closes. "
+                    "Strategies still trade closed candles of the timeframes ticked on the Trading page."
+                    if auto else
+                    "Off: paper trading looks for new candles once a minute. Pick a time from 5 seconds to "
+                    "check each candle within seconds of its close.")
+                 + "</span></form>")
     return (f'<form method="post" action="/trading/paper/scan" class="row">{csrf}'
             f'<input type="hidden" name="back" value="{_e(back)}"><button>Scan now</button>'
             '<span class="small muted">'
@@ -1599,7 +1640,7 @@ def _scan_now_form(csrf: str, paths, back: str = "/scan-log") -> str:
                "Checks every strategy on every pair and ticked timeframe straight away, on the newest closed "
                "candle, instead of waiting for the next candle to close. A signal already handled is not "
                "taken twice.")
-            + "</span></form>")
+            + "</span></form>" + auto_form)
 
 
 def _idle_text(e: dict) -> str:

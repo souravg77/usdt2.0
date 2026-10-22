@@ -53,6 +53,12 @@ async def download(
                                 known={last} if last is not None else set())
 
 
+def closed_since(timeframe: str, since_ms: int, now_ms: int) -> bool:
+    """True when a candle of this timeframe closed after ``since_ms`` and by ``now_ms``."""
+    step = TIMEFRAME_MS[timeframe]
+    return now_ms // step > since_ms // step
+
+
 async def top_up(adapter: ExchangeAdapter, store: CandleStore, symbol: str, timeframe: str,
                  drop_open_candle: bool = True) -> int | None:
     """Only the candles since the newest stored one (fetched again, as ``download`` does): the
