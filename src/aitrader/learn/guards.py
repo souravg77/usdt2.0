@@ -26,8 +26,9 @@
   trades through that price the order is cancelled and the trade is missed (``engine.maker_fill``).
 - **Strategies that must agree** (``agree``, 1 = off): a coin is only traded when at least this many
   different strategies signal the same side on it at the same candle close (any timeframe), and
-  then as one trade, by the agreeing signal with the furthest target. The live trader mirrors the
-  paper trades, so it follows the same rule.
+  then as one trade, by the agreeing signal with the furthest target. The coins more strategies
+  agree on score higher and open first, so a cap that leaves room for only some keeps those. The
+  live trader mirrors the paper trades, so it follows the same rule.
 - **Timeframes** (``timeframes``): the candle timeframes the engine opens new trades on (all of
   them unless a person narrows it; an empty choice means all). Open trades on the others still run
   to their exits.
