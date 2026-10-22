@@ -85,6 +85,17 @@ def test_replay_api_and_page(client):
     runner.wait_idle()
     p = c.get(f"/api/replay/download/{job['id']}").json()
     assert p["status"] == "done" and p["pct"] == 100 and p["have"] == 0 and p["want"] == 44 * 24
+    assert "first" not in p  # no prices at all: nothing to say about a listing
+    # a coin listed after the period: the page says when its prices start (Shawn's JCT/USDT 30m)
+    from aitrader.models import Candle
+
+    jun = int(datetime(2025, 6, 10, tzinfo=timezone.utc).timestamp() * 1000)
+    st = CandleStore("x.db")  # the client fixture runs in tmp_path
+    st.upsert([Candle("bybit", "ETH/USDT", "1h", jun, 1, 2, 0.5, 1.5, 1)])
+    st.close()
+    p = c.get(f"/api/replay/download/{job['id']}").json()
+    assert p["first"] == jun and p["first_month"] == "2025-06" and p["first_text"].startswith("2025-06-10")
+    assert "from-listing" in c.get("/static/replay.js").text
     assert c.get("/api/replay/download/nosuchjob").status_code == 404
     assert 'id="replay-progress"' in c.get("/replay").text
 

@@ -201,6 +201,16 @@ def test_slow_timeframes_are_tested_over_their_minimum_months(tmp_path, monkeypa
     assert got == ["2024-07-01", "2025-01-01"] + ["2025-06-01"] * 4
     assert runner.list()[0]["steps"][0][2] < "2024-07-01"  # 1d's download warms up before its start
     assert "at least 6 months on 4h, 12 months on 1d" in c.get("/replay").text
+    # Shawn: every pair Markets shows for paper trading is tested, coins still held included
+    import os
+
+    os.makedirs("data/learn", exist_ok=True)
+    with open("data/learn/paper_state.json", "w") as fh:
+        json.dump({"open": {"s1|1h|SOL/USDT|long": {"market": "spot"}}}, fh)
+    c.post("/replay/pick", data={"csrf": csrf, "tf": "1h", "month": "2025-06", "months": "1"})
+    runner.wait_idle()
+    pick = [st for st in runner.list()[0]["steps"] if st[0] == "learn"][0]
+    assert pick[1:5] == ["--symbol", "BTC/USDT", "--symbol", "SOL/USDT"]
 
 
 def test_choose_keeps_exactly_the_ticked_ones_whatever_the_rules(tmp_path):

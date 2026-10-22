@@ -131,12 +131,15 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
         return "futures" if futures_mode() else "spot"
 
     def pairs() -> list[str]:
-        """The workspace's pairs: Futures AI's (its top gainers while that list is on) in the Futures
-        view, Spot AI's in the Spot view."""
-        from ..market.pairs import configured_symbols
+        """The workspace's pairs, the same list as its Markets page: Futures AI's (its top gainers while
+        that list is on) in the Futures view, Spot AI's in the Spot view, plus the coins that engine
+        still holds in paper trading. Replay and Keep only the winners test all of them."""
+        from ..market.pairs import configured_symbols, open_paper_symbols
 
+        mkt = "futures" if futures_mode() else "spot"
         try:
-            return configured_symbols(settings.symbols, market="futures" if futures_mode() else "spot")
+            held = open_paper_symbols(paper_state, mkt) if paper_state else []
+            return configured_symbols(settings.symbols, market=mkt, keep=held)
         except Exception:
             return list(settings.symbols)
 
@@ -306,10 +309,16 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
         store = CandleStore(db_for(settings.db_path, meta.get("market", "spot")))
         try:
             have = store.count(exchange, meta["symbol"], meta["tf"], meta["since_ms"], meta["until_ms"])
+            first = store.first_ts(exchange, meta["symbol"], meta["tf"]) if not have else None
         finally:
             store.close()
-        return JSONResponse(download_status(job["status"], have, meta["since_ms"], meta["until_ms"],
-                                            meta["tf"], job.get("error", ""), ahead))
+        out = download_status(job["status"], have, meta["since_ms"], meta["until_ms"], meta["tf"],
+                              job.get("error", ""), ahead)
+        if first is not None and first >= meta["until_ms"]:  # nothing then: the coin was listed later
+            out["first"] = first
+            out["first_text"] = clock.local(first / 1000)[:10]
+            out["first_month"] = datetime.fromtimestamp(first / 1000, timezone.utc).strftime("%Y-%m")
+        return JSONResponse(out)
 
     def chosen_ids(strategy: str, tf: str) -> list[str] | None:
         """The strategies the Replay page's Strategy choice loads on ``tf`` (None: all of them)."""
