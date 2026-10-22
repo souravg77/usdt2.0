@@ -10,6 +10,9 @@
   if (!root) return;
   var form = document.getElementById("replay-form");
   var dlForm = document.getElementById("replay-download");
+  var dlAll = document.getElementById("replay-download-all");
+  var allEl = document.getElementById("replay-all");
+  var oneEl = root.querySelector(".chart-card");
   var msgEl = document.getElementById("replay-msg");
   var progEl = document.getElementById("replay-progress");
   var progText = document.getElementById("progress-text");
@@ -72,9 +75,15 @@
     msgEl.textContent = "Running the strategies over that period…";
     usedEl.textContent = "";
     dlForm.classList.add("hidden");
+    dlAll.classList.add("hidden");
     progEl.classList.add("hidden");
     S.dl = null;  // stop watching a download
     setEnabled(false);
+    var all = p.get("symbol") === "*";
+    allEl.classList.toggle("hidden", !all);
+    oneEl.classList.toggle("hidden", all);
+    document.getElementById("replay-detail").classList.toggle("hidden", all);
+    if (all) { loadAll(p); return; }
     fetch("/api/replay?" + p.toString(), { credentials: "same-origin" }).then(function (res) {
       if (res.status === 401) { location.href = "/login"; return null; }
       return res.json().then(function (j) { return { ok: res.ok, j: j }; });
@@ -118,6 +127,58 @@
       setEnabled(true);
       showUsed(d);
       update();
+    }).catch(function (e) { msgEl.textContent = "Couldn't reach the server."; if (window.console) console.error(e); });
+  }
+
+  // "All pairs": the same backtest on every pair of this engine at once, shown as totals per
+  // strategy and per pair (no chart: there is no single price line to play).
+  function loadAll(p) {
+    msgEl.textContent = "Running the strategies over that period on every pair… this can take a minute.";
+    allEl.innerHTML = "";
+    S.data = null;
+    fetch("/api/replay/all?" + p.toString(), { credentials: "same-origin" }).then(function (res) {
+      if (res.status === 401) { location.href = "/login"; return null; }
+      return res.json().then(function (j) { return { ok: res.ok, j: j }; });
+    }).then(function (x) {
+      if (!x) return;
+      if (!x.ok) { msgEl.textContent = x.j.error || "Couldn't load that period."; return; }
+      var d = x.j, n = 0, w = 0, tot = 0, open = 0, withData = 0;
+      d.pairs.forEach(function (q) { n += q.trades; w += q.wins; tot += q.total_r; open += q.open; if (q.candles) withData++; });
+      msgEl.textContent = "Backtested " + d.timeframe + " on " + withData + " of " + d.pairs.length + " pairs from " +
+        when(d.start).slice(0, 7) + " for " + d.months + " month" + (d.months === 1 ? "" : "s") + " · " + n +
+        " trades closed." + (d.missing.length ? " " + d.missing.length + " pair" + (d.missing.length === 1 ? " has" : "s have") +
+        " no saved " + d.timeframe + " prices for that period: " + d.missing.join(", ") + "." : "");
+      if (d.missing.length) {
+        ["tf", "month", "months", "strategy"].forEach(function (k) { dlAll.elements[k].value = p.get(k) || ""; });
+        dlAll.classList.remove("hidden");
+      }
+      var wr = n ? w / n * 100 : 0;
+      var tiles = [["Pairs tested", withData, ""], ["Trades closed", n, ""],
+                   ["Win rate", n ? wr.toFixed(1) + "%" : "-", n && wr >= 50 ? "good" : ""],
+                   ["Total", n ? r(tot) : "-", tot > 0 ? "good" : tot < 0 ? "bad" : ""], ["Still open", open, ""]];
+      var cls = function (v) { return v > 0 ? "good" : v < 0 ? "bad" : ""; };
+      allEl.innerHTML = '<h2>All pairs · ' + esc(d.timeframe) + "</h2>" +
+        '<div class="stats">' + tiles.map(function (t) {
+          return '<div class="stat"><span class="k">' + t[0] + '</span><span class="v ' + t[2] + '">' + t[1] + "</span></div>";
+        }).join("") + "</div>" +
+        '<h2>Strategies</h2><p class="muted small">Closed trades on every pair together, best total first. Pairs is ' +
+        "how many pairs the strategy traded.</p>" +
+        (d.strategies.length ? '<table><tr><th>Strategy</th><th>Total</th><th>Win %</th><th>Trades</th>' +
+          "<th>Pairs</th></tr>" + d.strategies.map(function (s) {
+            return "<tr><td><b>" + esc(s.name).replace(/_/g, "_<wbr>") + '</b></td><td class="' + cls(s.total_r) +
+              '"><b>' + r(s.total_r) + "</b></td><td>" + (s.wins / s.trades * 100).toFixed(0) + "%</td><td>" +
+              s.trades + "</td><td>" + s.pairs + "</td></tr>";
+          }).join("") + "</table>" : '<p class="muted">No strategy closed a trade on any pair in that period.</p>') +
+        '<h2>Pairs</h2><p class="muted small">Pick one pair in the Pair menu to replay it on the chart.</p>' +
+        '<table><tr><th>Pair</th><th>Total</th><th>Win %</th><th>Trades</th><th>Candles</th><th></th></tr>' +
+        d.pairs.slice().sort(function (a, b) { return b.total_r - a.total_r || b.candles - a.candles; }).map(function (q) {
+          var note = !q.candles ? "no prices yet" : q.fee_skipped ? q.fee_skipped + " skipped for fees" : "";
+          return "<tr><td><a href=\"/replay?" + esc(new URLSearchParams({ symbol: q.symbol, tf: d.timeframe,
+            month: p.get("month") || "", months: String(d.months), strategy: p.get("strategy") || "" }).toString()) +
+            "\"><b>" + esc(q.symbol) + '</b></a></td><td class="' + cls(q.total_r) + '">' + (q.trades ? r(q.total_r) : "-") +
+            "</td><td>" + (q.trades ? (q.wins / q.trades * 100).toFixed(0) + "%" : "-") + "</td><td>" + q.trades +
+            "</td><td>" + q.candles + '</td><td class="muted small">' + esc(note) + "</td></tr>";
+        }).join("") + "</table>";
     }).catch(function (e) { msgEl.textContent = "Couldn't reach the server."; if (window.console) console.error(e); });
   }
 

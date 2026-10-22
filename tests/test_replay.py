@@ -268,3 +268,33 @@ def test_replay_offers_win_only_and_three_years(client, monkeypatch):
                                      "months": "36"}, follow_redirects=False)
     job = [j for j in runner.list() if j["meta"].get("kind") == "download"][0]
     assert job["steps"][0][4] == "2025-06-02"  # only what Replay can show of 3 years of 5m
+
+
+def test_replay_all_pairs_totals_and_downloads_the_missing(client):
+    # Shawn: "Backtesting will be done on all the pairs ... once it selects all pairs"
+    c, runner = client
+    assert c.get("/api/replay/all?tf=1h&month=2025-03").status_code == 401
+    c.post("/login", data={"user": "admin", "password": PW})
+    page = c.get("/replay?symbol=*").text
+    assert '<option value="*" selected>All 2 pairs (totals)</option>' in page and 'id="replay-all"' in page
+    assert 'id="replay-download-all"' in page and "loadAll" in c.get("/static/replay.js").text
+    r = c.get("/api/replay/all?tf=1h&month=2025-03&months=1").json()
+    one = c.get("/api/replay?symbol=BTC/USDT&tf=1h&month=2025-03&months=1").json()
+    closed = [t for t in one["trades"] if t.get("exit_ts")]
+    btc, eth = r["pairs"]
+    assert btc["symbol"] == "BTC/USDT" and btc["candles"] == 31 * 24 and btc["trades"] == len(closed) > 0
+    assert eth == {**eth, "symbol": "ETH/USDT", "candles": 0, "trades": 0}
+    assert r["missing"] == ["ETH/USDT"]
+    s = r["strategies"][0]
+    assert s["name"] == "up_bar" and s["pairs"] == 1 and s["trades"] == len(closed)
+    assert s["total_r"] == round(sum(t["r"] for t in closed), 2)
+    assert c.get("/api/replay/all?tf=1h&month=2999-01").status_code == 400
+    csrf = Auth("admin", PW, "k").csrf(c.cookies.get(COOKIE))
+    assert c.post("/replay/download-all", data={"csrf": "x"}).status_code == 403
+    d = c.post("/replay/download-all", data={"csrf": csrf, "tf": "1h", "month": "2025-03", "months": "1"},
+               follow_redirects=False)
+    assert d.status_code == 303 and d.headers["location"].startswith("/replay?symbol=*&tf=1h&month=2025-03")
+    job = [j for j in runner.list() if j["meta"].get("kind") == "download"][0]
+    assert job["steps"] == [["download", "--since", "2025-02-16", "--until", "2025-04-01", "--market", "spot",
+                             "--exchange", "bybit", "--timeframe", "1h", "--symbol", "BTC/USDT",
+                             "--symbol", "ETH/USDT"]]
