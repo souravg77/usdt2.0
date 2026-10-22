@@ -283,8 +283,21 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
         strategies = sorted(({**b, "name": names.get(b["id"], b["id"]), "total_r": round(b["total_r"], 2),
                               "pairs": len(b["pairs"])} for b in by_strat.values()),
                             key=lambda b: b["total_r"], reverse=True)
+        # a pair with no prices in the period: when its saved prices start, if any are saved (a coin
+        # Bybit listed after the period has none to download for it)
+        end_ms = int(_add_months(start, months).timestamp() * 1000)
+        store = CandleStore(db_for(settings.db_path, "futures" if futures_mode() else "spot"))
+        try:
+            for p in per_pair:
+                first = store.first_ts(exchange, p["symbol"], tf) if not p["candles"] else None
+                if first is not None and first >= end_ms:
+                    p["first"], p["first_text"] = first, clock.local(first / 1000)[:10]
+        finally:
+            store.close()
         return {"timeframe": tf, "start": int(start.timestamp() * 1000), "months": months, "pairs": per_pair,
-                "strategies": strategies, "missing": [p["symbol"] for p in per_pair if not p["candles"]]}
+                "strategies": strategies,
+                "missing": [p["symbol"] for p in per_pair if not p["candles"] and "first" not in p],
+                "later": [p["symbol"] for p in per_pair if "first" in p]}
 
     @app.get("/api/replay/all")
     async def api_replay_all(request: Request, tf: str = "1h", month: str = "", months: int = 1,

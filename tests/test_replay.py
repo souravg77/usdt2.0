@@ -284,7 +284,7 @@ def test_replay_all_pairs_totals_and_downloads_the_missing(client):
     btc, eth = r["pairs"]
     assert btc["symbol"] == "BTC/USDT" and btc["candles"] == 31 * 24 and btc["trades"] == len(closed) > 0
     assert eth == {**eth, "symbol": "ETH/USDT", "candles": 0, "trades": 0}
-    assert r["missing"] == ["ETH/USDT"]
+    assert r["missing"] == ["ETH/USDT"] and r["later"] == []
     s = r["strategies"][0]
     assert s["name"] == "up_bar" and s["pairs"] == 1 and s["trades"] == len(closed)
     assert s["total_r"] == round(sum(t["r"] for t in closed), 2)
@@ -298,3 +298,20 @@ def test_replay_all_pairs_totals_and_downloads_the_missing(client):
     assert job["steps"] == [["download", "--since", "2025-02-16", "--until", "2025-04-01", "--market", "spot",
                              "--exchange", "bybit", "--timeframe", "1h", "--symbol", "BTC/USDT",
                              "--symbol", "ETH/USDT"]]
+
+
+def test_replay_all_pairs_says_which_coins_were_listed_after_the_period(client):
+    # Shawn's Futures 30m: 5 pairs had no prices for Oct 2025 even after the download
+    from aitrader.models import Candle
+
+    c, _runner = client
+    c.post("/login", data={"user": "admin", "password": PW})
+    jun = int(datetime(2025, 6, 10, tzinfo=timezone.utc).timestamp() * 1000)
+    st = CandleStore("x.db")  # the client fixture runs in tmp_path
+    st.upsert([Candle("bybit", "ETH/USDT", "1h", jun, 1, 2, 0.5, 1.5, 1)])
+    st.close()
+    r = c.get("/api/replay/all?tf=1h&month=2025-03&months=1").json()
+    assert r["missing"] == [] and r["later"] == ["ETH/USDT"]
+    eth = [p for p in r["pairs"] if p["symbol"] == "ETH/USDT"][0]
+    assert eth["first"] == jun and eth["first_text"].startswith("2025-06-10")
+    assert "listed later" in c.get("/static/replay.js").text
