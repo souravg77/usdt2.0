@@ -717,7 +717,8 @@ paper trading. Nothing trades real money.</p>
     @app.post("/trading/paper/guards")
     def trading_paper_guards(request: Request, csrf: str = Form(""), market: str = Form(""),
                              breaker: str = Form(""), day_pause_pct: str = Form(""), pause_hours: str = Form(""),
-                             week_close_pct: str = Form(""), min_rr: str = Form(""), trend: str = Form(""),
+                             week_close_pct: str = Form(""), min_rr: str = Form(""), max_rr: str = Form(""),
+                             trend: str = Form(""),
                              split_tp: str = Form(""), breakeven: str = Form(""), maker_entry: str = Form(""), max_long: str = Form(""),
                              max_short: str = Form(""), max_correlated: str = Form(""), corr_min: str = Form(""),
                              trade_usdt: str = Form(""), agree: str = Form(""), risk_pct: str = Form(""),
@@ -731,7 +732,8 @@ paper trading. Nothing trades real money.</p>
             try:
                 g = guards.save(guards.path_for(paths.paper_state), market, {
                     "breaker": breaker == "1", "day_pause_pct": day_pause_pct, "pause_hours": pause_hours,
-                    "week_close_pct": week_close_pct, "min_rr": min_rr or 0, "trend": trend == "1",
+                    "week_close_pct": week_close_pct, "min_rr": min_rr or 0, "max_rr": max_rr or 0,
+                    "trend": trend == "1",
                     "split_tp": split_tp == "1", "breakeven": breakeven == "1", "maker_entry": maker_entry == "1",
                     "max_long": max_long,
                     "max_short": max_short, "max_correlated": max_correlated, "corr_min": corr_min,
@@ -1984,6 +1986,7 @@ def _guards_text(g: dict) -> str:
              f"pause {g['pause_hours']:g}h after a {g['day_pause_pct']:g}% day loss, close all at a "
              f"{g['week_close_pct']:g}% week loss" if g["breaker"] else "loss breakers off",
              f"minimum reward {g['min_rr']:g}R" if g["min_rr"] else "no minimum reward",
+             f"take-profit at most {g['max_rr']:g}R away" if g["max_rr"] else "the strategies' own take-profits",
              "higher-timeframe trend check on" if g["trend"] else "no trend check",
              ("split take-profit on, then breakeven stop" if g["breakeven"] else "split take-profit on") if g["split_tp"]
              else "one take-profit",
@@ -2051,7 +2054,7 @@ def _guards_form(paths: Paths, csrf: str, ws: str) -> str:
             f'<input type="hidden" name="market" value="{ws}">'
             f'{box("breaker", "Loss breakers")} {num("day_pause_pct", "Pause at day loss %")} '
             f'{num("pause_hours", "for hours")} {num("week_close_pct", "Close all at week loss %")} '
-            f'{num("min_rr", "Min reward R (0 off)")} {box("trend", "Trade with the 4h/1d trend")} '
+            f'{num("min_rr", "Min reward R (0 off)")} {num("max_rr", "Max take-profit R (0 off)")} {box("trend", "Trade with the 4h/1d trend")} '
             f'{box("split_tp", "Half at halfway, half at target")} '
             f'{box("breakeven", "Then stop to breakeven")} '
             f'{box("maker_entry", "Enter with limit orders (maker fee)")} '

@@ -6,6 +6,9 @@
   it closes all its open positions and opens nothing new until next Monday.
 - **Minimum reward** (``min_rr``, 0 = off): a signal whose fixed target is less than this many times
   its risk away is skipped. A signal that exits on its own rule (no fixed target) is not judged.
+- **Furthest take-profit** (``max_rr``, 0 = off; Futures AI starts at 2): a fixed target further
+  than this many times the risk is pulled in to it, so the trade takes its profit sooner. Open
+  trades follow a new setting at their next check. A signal with no fixed target is not changed.
 - **Higher-timeframe trend** (``trend``): a long is skipped while the 4h or daily trend points down,
   a short while it points up (5m to 1h signals check 4h and 1d, 4h signals check 1d). A trend is up
   when the close is above EMA 50 and EMA 20 is above EMA 50, down when both are below.
@@ -48,21 +51,23 @@ from . import wallet
 
 TIMEFRAMES = ("5m", "15m", "30m", "1h", "4h", "1d")  # the ones paper trading can use
 DEFAULTS = {"breaker": True, "day_pause_pct": 3.0, "pause_hours": 24.0, "week_close_pct": 6.0,
-            "min_rr": 0.0, "trend": False, "split_tp": False, "breakeven": False, "maker_entry": False,
+            "min_rr": 0.0, "max_rr": 0.0, "trend": False, "split_tp": False, "breakeven": False, "maker_entry": False,
             "max_long": 8.0, "max_short": 8.0, "max_correlated": 3.0, "corr_min": 0.8, "trade_usdt": 0.0,
             "agree": 1.0, "risk_pct": 0.0, "open_risk_pct": 0.0, "loss_streak": 0.0, "streak_ok_at": 0.0,
             "min_score": 0.0,
             "timeframes": list(TIMEFRAMES)}
 RANGES = {"day_pause_pct": (0.5, 50.0), "pause_hours": (1.0, 168.0), "week_close_pct": (1.0, 90.0),
-          "min_rr": (0.0, 10.0), "max_long": (1.0, 200.0), "max_short": (1.0, 200.0),
+          "min_rr": (0.0, 10.0), "max_rr": (1.0, 20.0), "max_long": (1.0, 200.0), "max_short": (1.0, 200.0),
           "max_correlated": (1.0, 50.0), "corr_min": (0.5, 0.99),
           "trade_usdt": (5.0, 1_000_000.0), "agree": (1.0, 10.0),
           # from the NEXUS prompt: risk per trade and all open trades' risk (% of the wallet), and the
           # losing streak that stops new entries until a person resumes them
           "risk_pct": (0.05, 5.0), "open_risk_pct": (0.1, 50.0), "loss_streak": (1.0, 20.0),
           "streak_ok_at": (0.0, 1e15), "min_score": (1.0, 100.0)}
-OFF_AT_ZERO = ("min_rr", "trade_usdt", "risk_pct", "open_risk_pct", "loss_streak", "streak_ok_at", "min_score")  # 0 = off
+OFF_AT_ZERO = ("min_rr", "max_rr", "trade_usdt", "risk_pct", "open_risk_pct", "loss_streak", "streak_ok_at", "min_score")  # 0 = off
 WHOLE = ("max_long", "max_short", "max_correlated", "agree", "loss_streak")
+# an engine's own starting values (Shawn: Futures AI takes profit at 2R at most)
+MARKET_DEFAULTS = {"futures": {"max_rr": 2.0}}
 CORR_BARS = 168  # hourly returns of the last week
 SWITCHES = ("breaker", "trend", "split_tp", "breakeven", "maker_entry")
 
@@ -74,9 +79,9 @@ def path_for(state_path: str) -> str:
     return os.path.join(os.path.dirname(os.path.abspath(state_path)), "paper_guards.json")
 
 
-def _clean(d: dict) -> dict:
+def _clean(d: dict, market: str = "") -> dict:
     out = {}
-    for k, v in DEFAULTS.items():
+    for k, v in {**DEFAULTS, **MARKET_DEFAULTS.get(market, {})}.items():
         got = d.get(k, v)
         if k == "timeframes":
             if isinstance(got, str):
@@ -108,7 +113,7 @@ def load(path: str) -> dict:
         data = data if isinstance(data, dict) else {}
     except (OSError, ValueError):
         data = {}
-    return {m: _clean(data.get(m) if isinstance(data.get(m), dict) else {}) for m in wallet.MARKETS}
+    return {m: _clean(data.get(m) if isinstance(data.get(m), dict) else {}, m) for m in wallet.MARKETS}
 
 
 def save(path: str, market: str, values: dict, by: str = "") -> dict:
@@ -125,7 +130,7 @@ def save(path: str, market: str, values: dict, by: str = "") -> dict:
         data = {}
     mine = data.get(market) if isinstance(data.get(market), dict) else {}
     mine.update({k: v for k, v in values.items() if k in DEFAULTS and v not in (None, "")})
-    data[market] = {**_clean(mine), "by": by, "at": int(time.time() * 1000)}
+    data[market] = {**_clean(mine, market), "by": by, "at": int(time.time() * 1000)}
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
