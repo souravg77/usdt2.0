@@ -18,6 +18,7 @@ from aitrader.web.auth import COOKIE
 from test_learn import EVERY_UP_BAR
 from test_replay import END, START, make_store
 
+PW_ADMIN = "correct horse battery"
 UP = Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR))
 
 
@@ -324,6 +325,45 @@ def test_trading_page_winners_only_button(tmp_path, monkeypatch):
     wallet.set_market(wallet.market_path("data/learn/paper_state.json"), True)
     page = c.get("/trading").text
     assert "Futures AI has no WIN strategies yet, so it opens no new trades" in page
+
+
+def test_trading_page_lists_every_win_choice_with_tick_boxes(tmp_path, monkeypatch):
+    """Shawn: under Futures AI WIN, show the selected and the unselected strategies, tick to choose."""
+    from aitrader.learn import wallet
+
+    monkeypatch.chdir(tmp_path)
+    make_store(tmp_path / "x.db").close()
+    reg_path = str(tmp_path / "registry.json")
+    Registry(reg_path).save()
+    runner = JobRunner(str(tmp_path / "jobs"), env_file=str(tmp_path / "none.env"))
+    monkeypatch.setattr(runner, "command", lambda step: ["true"])
+    app = create_app(Settings(db_path=str(tmp_path / "x.db"), symbols=["BTC/USDT"]), Auth("admin", PW_ADMIN, "k"),
+                     runner, Paths(report=str(tmp_path / "none.json"), registry=reg_path))
+    c = TestClient(app)
+    c.post("/login", data={"user": "admin", "password": PW_ADMIN})
+    csrf = Auth("admin", PW_ADMIN, "k").csrf(c.cookies.get(COOKIE))
+    wallet.set_market(wallet.market_path("data/learn/paper_state.json"), True)
+    assert "No Futures AI timeframe pick yet" in c.get("/trading").text
+    fut = picks.picks_path(reg_path, "futures")
+    picks.save(fut, {"1h": {"at": 1, "picked": ["a"], "results": [result("a"), result("b", trades=4)]},
+                     "4h": {"at": 1, "picked": ["c"], "results": [result("c"), result("d", total=-1)]}})
+    page = c.get("/trading").text
+    assert "Futures AI WIN strategies: choose which work" in page
+    assert "<b>1h</b>: 1 of 2 selected" in page and "<b>4h</b>: 1 of 2 selected" in page
+    assert 'name="keep_1h" value="a" checked' in page and 'name="keep_1h" value="b">' in page
+    assert "only 4 trades (needs 10)" in page
+    # nothing changed: no job
+    r = c.post("/trading/paper/win-choose", data={"csrf": csrf, "market": "futures", "tfs": "1h,4h",
+                                                  "keep_1h": "a", "keep_4h": "c"}, follow_redirects=False)
+    assert "No%20change" in r.headers["location"] and not runner.list()
+    # tick b on 1h, untick c on 4h: one job, a step per changed timeframe
+    c.post("/trading/paper/win-choose", data={"csrf": csrf, "market": "futures", "tfs": "1h,4h",
+                                              "keep_1h": ["a", "b", "zzz"]})
+    runner.wait_idle()
+    job = runner.list()[0]
+    assert job["steps"] == [["learn", "pick-timeframe", "1h", "--choose=a,b", "--market", "futures", "--by", "admin"],
+                            ["learn", "pick-timeframe", "4h", "--choose=", "--market", "futures", "--by", "admin"]]
+    assert c.post("/trading/paper/win-choose", data={"csrf": "x", "market": "futures"}).status_code == 403
 
 
 def test_winners_only_is_per_engine_and_reads_the_old_file(tmp_path):

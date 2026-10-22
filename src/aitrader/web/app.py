@@ -835,6 +835,44 @@ paper trading. Nothing trades real money.</p>
             return f"{name} trades the best strategies again, with the WIN ones. The other engine is not changed."
         return _control_post(request, csrf, act)
 
+    @app.post("/trading/paper/win-choose")
+    async def trading_paper_win_choose(request: Request):
+        """The admin's tick boxes under an engine's WIN strategies: keep exactly the ticked ones on
+        each timeframe whose choice changed (``pick-timeframe --choose``, no new test)."""
+        from ..learn import picks
+
+        user, token, redirect = guard(request)
+        if redirect:
+            return redirect
+        form = await request.form()
+        if not auth.check_csrf(token, str(form.get("csrf", ""))):
+            return PlainTextResponse("bad form token; reload the page", status_code=403)
+        mkt = _ws_market(str(form.get("market", "")))
+        name = "Futures AI" if mkt == "futures" else "Spot AI"
+        if any(j["status"] in ("queued", "running") and j.get("meta", {}).get("kind") == "pick" for j in jobs.list()):
+            return RedirectResponse("/trading?bad=1&msg=" + _q("A pick is already running; try again when it ends "
+                                                                "(Recent jobs on the Overview page)."), status_code=303)
+        saved = picks.load(picks.picks_path(paths.registry, mkt))
+        steps, changed = [], []
+        for tf in str(form.get("tfs", "")).split(","):
+            cur = saved.get(tf) or {}
+            if tf not in WIN_TF_ORDER or not cur.get("results"):
+                continue
+            tested = [r["id"] for r in cur["results"]]
+            ids = [i for i in tested if i in set(str(v) for v in form.getlist(f"keep_{tf}"))]
+            if set(ids) != set(cur.get("picked", [])):
+                steps.append(["learn", "pick-timeframe", tf, f"--choose={','.join(ids)}", "--market", mkt, "--by", user])
+                changed.append(f"{tf} ({len(ids)} selected)")
+        if not steps:
+            return RedirectResponse("/trading?msg=" + _q(f"No change to {name}'s WIN strategies."), status_code=303)
+        jobs.submit(f"{name}: your WIN strategies on {', '.join(changed)}", steps,
+                    meta={"kind": "pick", "by": user, "market": mkt})
+        _event("win_choose", f"{name} WIN strategies chosen by {user}: {', '.join(changed)}")
+        return RedirectResponse("/trading?msg=" + _q(
+            f"Saving {name}'s WIN strategies on {', '.join(changed)}. The ticked ones trade from the next minute; "
+            "the unticked ones stop trading that timeframe on " + name + ". The other engine is not changed."),
+            status_code=303)
+
     @app.post("/trading/paper/filter")
     def trading_paper_filter(request: Request, csrf: str = Form(""), market: str = Form(""), name: str = Form(""),
                              on: str = Form("")):
@@ -1909,7 +1947,7 @@ def _paper_switch_card(c: dict, paths: Paths, events: list[dict], jobs: list[dic
             f'<form method="post" action="/trading/paper/keep" class="row">{csrf}{hidden}'
             f'<label class="small">Keep the best <input type="number" name="n" min="{MIN_N}" max="{MAX_N}" '
             f'value="{keep_n}" style="width:4.5em"> strategies</label><button class="ghost">Keep only the best</button></form>'
-            + _winners_only_form(only, wins, csrf, ws) + '</div>')
+            + _winners_only_form(only, wins, csrf, ws) + _win_choice(paths.registry, csrf, ws) + '</div>')
 
 
 def _futures_state(paths: Paths) -> tuple[bool, float]:
@@ -2152,6 +2190,46 @@ def _winners_only_form(only: bool, wins: int, csrf: str, ws: str = "spot") -> st
             f'When this is on, the best strategies above stop opening {name} trades; their open trades still '
             'close normally. The other engine has its own switch on its workspace.</p>'
             f'<form method="post" action="/trading/paper/winners-only" class="row">{csrf}{btn}</form>')
+
+
+WIN_TF_ORDER = ("5m", "15m", "30m", "1h", "4h", "1d")
+
+
+def _win_choice(registry_path: str, csrf: str, ws: str = "spot") -> str:
+    """Every strategy each of this engine's timeframe picks tested, selected (a WIN strategy now) or
+    not, with a tick box each: the admin chooses which ones work, with no new test."""
+    from ..learn import picks
+
+    name = "Futures AI" if ws == "futures" else "Spot AI"
+    saved = picks.load(picks.picks_path(registry_path, ws))
+    tfs = [tf for tf in WIN_TF_ORDER if (saved.get(tf) or {}).get("results")]
+    if not tfs:
+        return (f'<p class="small muted">No {name} timeframe pick yet: run Keep only the winners on the Replay page in '
+                f'the {name} view, then choose the WIN strategies here.</p>')
+    blocks = []
+    for tf in tfs:
+        cur = saved[tf]
+        kept = set(cur.get("picked", []))
+        fewest = cur.get("min_trades", picks.MIN_TRADES)
+        rows = "".join(
+            f'<tr><td style="min-width:10em"><label class="keep-tick"><input type="checkbox" name="keep_{tf}" '
+            f'value="{_e(r["id"])}"{" checked" if r["id"] in kept else ""}> {_e(r["name"])}</label></td>'
+            f'<td>{r["trades"]}</td><td>{r["win_rate"]:.0f}%</td>'
+            f'<td class="{"good" if r["total_r"] > 0 else "bad"}">{r["total_r"]:+.2f}R</td>'
+            f'<td class="small" style="min-width:12em">'
+            f'{"<span class=good>passes the rules</span>" if not picks.why_not(r, fewest) else _e(picks.why_not(r, fewest))}'
+            '</td></tr>'
+            for r in sorted(cur["results"], key=lambda r: (r["id"] not in kept, -r["total_r"])))
+        blocks.append(f'<details><summary><b>{tf}</b>: {len(kept)} of {len(cur["results"])} selected</summary>'
+                      '<table><tr><th>Strategy</th><th>Trades</th><th>Win %</th><th>Total</th><th>Rules</th></tr>'
+                      f'{rows}</table></details>')
+    return (f'<h4>{name} WIN strategies: choose which work</h4>'
+            f'<p class="small muted">Every strategy each {name} timeframe pick tested, the selected ones first. A ticked '
+            f'one is a {name} WIN strategy on that timeframe; an unticked one stops trading that timeframe on {name}. '
+            'Results are from the pick\'s own test (Replay page), after fees. Save runs no new test.</p>'
+            f'<form method="post" action="/trading/paper/win-choose">{csrf}'
+            f'<input type="hidden" name="market" value="{ws}"><input type="hidden" name="tfs" value="{",".join(tfs)}">'
+            + "".join(blocks) + '<button>Save the selected WIN strategies</button></form>')
 
 
 def _live_card(settings, paths: Paths, events: list[dict]) -> str:
