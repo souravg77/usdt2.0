@@ -26,12 +26,25 @@ ATOM = b"""<feed xmlns="http://www.w3.org/2005/Atom"><entry><title>Border clashe
 <link href="https://world.example/war"/><updated>2025-10-09T06:00:00Z</updated></entry></feed>"""
 
 
+BYBIT = {"retCode": 0, "retMsg": "OK", "result": {"total": 3, "list": [
+    {"title": "Bybit Will Delist the ETHFI/USDT Spot Trading Pair", "url": "https://announcements.bybit.com/en/a1",
+     "type": {"title": "Delistings", "key": "delistings"}, "tags": ["Spot"], "description": "Trading stops soon",
+     "publishTime": 1_759_990_000_000, "dateTimestamp": 1_759_990_000_000},
+    {"title": "New Listing: XYZ/USDT", "url": "https://announcements.bybit.com/en/a2",
+     "type": {"title": "New Listings", "key": "new_crypto"}, "tags": ["Spot", "Spot Listings"],
+     "publishTime": 1_759_995_000_000},
+    {"title": "Old maintenance", "url": "https://announcements.bybit.com/en/a3",
+     "type": {"title": "Maintenance Updates"}, "publishTime": 1_700_000_000_000}]}}
+
+
 def fake_fetch(url):
     if url == feeds.FEAR_GREED_URL:
         return json.dumps({"data": [{"value": "22", "value_classification": "Extreme Fear"},
                                     {"value": "35", "value_classification": "Fear"}]}).encode()
     if url == feeds.TRENDING_URL:
         return json.dumps({"coins": [{"item": {"symbol": "pepe", "name": "Pepe", "market_cap_rank": 30}}]}).encode()
+    if url.startswith("https://api.bybit.com/v5/announcements"):
+        return json.dumps(BYBIT if "page=1" in url else {"retCode": 0, "result": {"list": []}}).encode()
     if "bbc" in url:
         return ATOM
     if "aljazeera" in url:
@@ -47,6 +60,14 @@ def test_feeds_gather_and_fail_soft():
     assert "Bitcoin ETF inflows jump" in titles and "Old story" not in titles and "No link" not in titles
     assert got["world_headlines"][0]["title"] == "Border clashes escalate"
     assert got["errors"] == ["Al Jazeera: TimeoutError"]
+    # Shawn: read all the news from Bybit's news API (the last 3 days, newest first)
+    by = got["bybit_announcements"]
+    assert [b["title"] for b in by] == ["New Listing: XYZ/USDT", "Bybit Will Delist the ETHFI/USDT Spot Trading Pair"]
+    assert by[1]["source"] == "Bybit: Delistings" and by[1]["tags"] == ["Spot"] and by[1]["published"] == 1_759_990_000_000
+    assert feeds.gather(lambda u: b"{}" if "bybit" in u else fake_fetch(u), NOW)["bybit_announcements"] == []
+    bad = feeds.gather(lambda u: b'{"retCode": 10006, "retMsg": "Too many visits"}' if "bybit" in u
+                       else fake_fetch(u), NOW)
+    assert "Bybit announcements: ValueError" in bad["errors"]
 
 
 REPORT = {"market_risk": "elevated", "market_risk_why": "border war escalating", "summary": "Risk-off.",
@@ -96,6 +117,7 @@ def test_write_brief_searches_then_reports():
     first = api.bodies[0]
     assert first["tools"][0]["type"] == "web_search_20250305" and first["tools"][0]["max_uses"] == 6
     assert "Extreme Fear" in first["messages"][0]["content"] and "Border clashes" in first["messages"][0]["content"]
+    assert "Bybit Will Delist the ETHFI/USDT" in first["messages"][0]["content"]
     assert "tool_choice" not in first and "tool_choice" not in api.bodies[1]
     assert len(api.bodies[1]["messages"]) == 2  # paused turn sent back unchanged
     assert api.bodies[2]["tool_choice"] == {"type": "tool", "name": "report_market_news"}
@@ -160,8 +182,9 @@ def client(tmp_path, monkeypatch):
     return TestClient(app), runner, paths
 
 
-def test_news_page(client):
+def test_news_page(client, monkeypatch):
     c, runner, paths = client
+    monkeypatch.setattr(feeds, "DAY_MS", 10**15)  # the sample Bybit announcements count as recent
     assert c.get("/news", follow_redirects=False).status_code == 303
     c.post("/login", data={"user": "admin", "password": PW})
     assert "No news yet" in c.get("/news").text
@@ -170,6 +193,7 @@ def test_news_page(client):
     update(SYMS, paths.news, fetch=fake_fetch, post=api)
     page = c.get("/news").text
     assert "Border clashes escalate" in page and "ETH/USDT: new buys paused" in page
+    assert "<summary>Bybit announcements (3)</summary>" in page and "Bybit: Delistings" in page
     assert "Extreme Fear" in page and "javascript:" not in page
     csrf = Auth("admin", PW, "k").csrf(c.cookies.get(COOKIE))
     assert c.post("/news/refresh", data={"csrf": "x"}).status_code == 403

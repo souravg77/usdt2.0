@@ -3,6 +3,8 @@
 - Crypto Fear & Greed index (alternative.me).
 - Coins trending in searches on CoinGecko (what people are looking up right now).
 - Headlines from crypto news sites and world news (RSS): wars, sanctions, regulation, hacks.
+- Every Bybit announcement (its public announcements API): new listings, delistings, maintenance,
+  launchpools, rule changes. Bybit is the exchange the engines trade on, so these come first.
 
 Every fetch fails soft: a source that can't be read is left out and named in ``errors``.
 """
@@ -30,6 +32,9 @@ WORLD_FEEDS = [
     ("BBC World", "https://feeds.bbci.co.uk/news/world/rss.xml"),
     ("Al Jazeera", "https://www.aljazeera.com/xml/rss/all.xml"),
 ]
+BYBIT_NEWS_URL = "https://api.bybit.com/v5/announcements/index?locale=en-US&limit=50&page={page}"
+BYBIT_NEWS_PAGES = 4  # up to 200 announcements, newest first
+BYBIT_NEWS_DAYS = 3
 DAY_MS = 86_400_000
 MAX_BYTES = 3_000_000
 
@@ -108,6 +113,37 @@ def headlines(feeds: list[tuple[str, str]], fetch=fetch_url, now_ms: int | None 
     return items, errors
 
 
+def bybit_announcements(fetch=fetch_url, now_ms: int | None = None, days: int = BYBIT_NEWS_DAYS) -> list[dict]:
+    """Every Bybit announcement of the last ``days`` days, newest first, page by page: title, link,
+    published (ms), source ("Bybit: <kind>"), kind, tags and a short description."""
+    now_ms = now_ms or int(time.time() * 1000)
+    out, seen = [], set()
+    for page in range(1, BYBIT_NEWS_PAGES + 1):
+        data = json.loads(fetch(BYBIT_NEWS_URL.format(page=page)))
+        if data.get("retCode") not in (0, None):
+            raise ValueError(f"Bybit said {data.get('retMsg') or data.get('retCode')}")
+        rows = (data.get("result") or {}).get("list") or []
+        old = False
+        for r in rows:
+            url, title = str(r.get("url") or ""), " ".join(str(r.get("title") or "").split())
+            when = r.get("publishTime") or r.get("dateTimestamp")
+            when = int(when) if str(when or "").isdigit() else None
+            if when is not None and now_ms - when > days * DAY_MS:
+                old = True
+                continue
+            if not title or not url.startswith("https://") or url in seen:
+                continue
+            seen.add(url)
+            kind = str((r.get("type") or {}).get("title") or "Announcement")[:60]
+            out.append({"title": title[:300], "url": url[:500], "published": when, "source": f"Bybit: {kind}",
+                        "kind": kind, "tags": [str(t)[:40] for t in (r.get("tags") or [])][:8],
+                        "description": " ".join(str(r.get("description") or "").split())[:300]})
+        if old or len(rows) < 50:  # reached the older ones, or the last page
+            break
+    out.sort(key=lambda i: i["published"] or 0, reverse=True)
+    return out
+
+
 def gather(fetch=fetch_url, now_ms: int | None = None) -> dict:
     """Everything the free sources say right now."""
     out: dict = {"errors": []}
@@ -117,6 +153,11 @@ def gather(fetch=fetch_url, now_ms: int | None = None) -> dict:
         except Exception as exc:
             out[key] = None
             out["errors"].append(f"{key}: {type(exc).__name__}")
+    try:
+        out["bybit_announcements"] = bybit_announcements(fetch, now_ms)
+    except Exception as exc:
+        out["bybit_announcements"] = []
+        out["errors"].append(f"Bybit announcements: {type(exc).__name__}")
     out["crypto_headlines"], err = headlines(CRYPTO_FEEDS, fetch, now_ms)
     out["errors"] += err
     out["world_headlines"], err = headlines(WORLD_FEEDS, fetch, now_ms)
