@@ -53,6 +53,30 @@ async def download(
                                 known={last} if last is not None else set())
 
 
+async def deepen(adapter: ExchangeAdapter, store: CandleStore, symbols, timeframes, start_ms: int,
+                 budget_s: float = 45.0, chunk_bars: int = 10_000) -> int:
+    """Walk each pair's stored history back towards ``start_ms``, one chunk (``chunk_bars``
+    candles) per pair and timeframe at a time, until ``budget_s`` seconds are used: Spot AI keeps
+    its pairs' complete history without holding up the live top-up (later passes carry on where
+    this one stopped). A coin listed after ``start_ms`` has no older candles; that is asked again
+    only every few hours (``download``'s older-history rule). Returns how many candles were added."""
+    began, total = time.monotonic(), 0
+    for sym in symbols:
+        for tf in timeframes:
+            if time.monotonic() - began > budget_s:
+                return total
+            first = store.first_ts(adapter.name, sym, tf)
+            if first is None or first <= start_ms + TIMEFRAME_MS[tf]:
+                continue  # nothing stored yet (the top-up comes first), or already complete
+            since = max(start_ms, first - chunk_bars * TIMEFRAME_MS[tf])
+            n = await download(adapter, store, sym, tf, since, first)
+            if n:
+                log.info("%s %s %s: %d older candles (history back to %d)", adapter.name, sym, tf, n,
+                         store.first_ts(adapter.name, sym, tf))
+            total += n
+    return total
+
+
 def _holes(store, exchange, symbol, timeframe, start, end) -> list[tuple[int, int]]:
     """Ranges ``[from, to)`` of missing candles from ``start`` to ``end``, leaving out ranges asked
     for recently that the exchange had nothing for. The edges count too: a window that lies wholly

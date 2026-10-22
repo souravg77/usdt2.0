@@ -238,6 +238,31 @@ async def test_a_period_inside_a_gap_of_stored_candles_is_downloaded(fake_ccxt):
     assert await download(adapter, store, "BTC/USDT", "1m", 7 * 60_000, 25 * 60_000) == 3 + 5
 
 
+async def test_spot_pairs_keep_their_complete_history_a_chunk_at_a_time(fake_ccxt):
+    """Shawn: Spot keeps the complete history of its pairs. The collector stores the recent
+    candles first, then walks each pair back a chunk per pass, within a time budget."""
+    import aitrader.data.downloader as dl
+
+    raw = [[i * 60_000, 1, 2, 0.5, 1.5, 1] for i in range(100)]
+    adapter = BybitAdapter(Settings(), client=fake_ccxt(raw), throttle=Throttle(1000, 1000))
+    store = CandleStore(":memory:")
+    store.upsert([Candle("bybit", "BTC/USDT", "1m", i * 60_000, 1, 2, 0.5, 1.5, 1) for i in range(90, 100)])
+    dl._tried.clear()
+    assert await dl.deepen(adapter, store, ["BTC/USDT", "NEW/USDT"], ["1m"], 0, chunk_bars=30) == 30
+    assert store.first_ts("bybit", "BTC/USDT", "1m") == 60 * 60_000
+    assert await dl.deepen(adapter, store, ["BTC/USDT"], ["1m"], 0, chunk_bars=30) == 30
+    assert await dl.deepen(adapter, store, ["BTC/USDT"], ["1m"], 0, chunk_bars=30) == 30
+    assert store.first_ts("bybit", "BTC/USDT", "1m") == 0
+    assert store.count("bybit", "BTC/USDT", "1m", 0, 10**12) == 100
+    assert await dl.deepen(adapter, store, ["BTC/USDT"], ["1m"], 0, chunk_bars=30) == 0  # complete
+    # out of time: the next pass carries on
+    store2 = CandleStore(":memory:")
+    store2.upsert([Candle("bybit", s, "1m", 99 * 60_000, 1, 2, 0.5, 1.5, 1) for s in ("BTC/USDT", "ETH/USDT")])
+    dl._tried.clear()
+    await dl.deepen(adapter, store2, ["BTC/USDT", "ETH/USDT"], ["1m"], 0, budget_s=-1, chunk_bars=30)
+    assert store2.first_ts("bybit", "BTC/USDT", "1m") == 99 * 60_000
+
+
 async def test_download_fetches_an_old_month_page_by_page(fake_ccxt):
     """Bybit answers a kline request that has only a start with its newest bars, so a past month
     came back empty; each page must ask for its own start-to-end window."""
