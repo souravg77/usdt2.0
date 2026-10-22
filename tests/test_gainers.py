@@ -147,6 +147,20 @@ SPOT_TICKERS = {
 }
 
 
+def test_a_1h_window_checks_coins_down_on_the_day():
+    """Shawn's Spot list on a red day: only 2 coins were up over 24h, so only 2 were scanned, though
+    others were rising in the last hour."""
+    got = gainers.pick(MARKETS, TICKERS, top=10, window="1h")
+    assert "DOWN/USDT" in [g["symbol"] for g in got]
+    assert got[0]["symbol"] == "BTC/USDT"  # the most traded first
+    assert "DOWN/USDT" not in [g["symbol"] for g in gainers.pick(MARKETS, TICKERS, top=10)]
+    # it still needs to have risen over the window to be listed
+    up = gainers.enrich({"symbol": "DOWN/USDT", "change": -9.0}, [[i, 1, 1, 1, 100.0, 1.0] for i in range(25)]
+                        + [[25, 1, 1, 1, 103.0, 1.0]])
+    flat = gainers.enrich({"symbol": "FLAT/USDT", "change": 2.0}, [[i, 1, 1, 1, 100.0, 1.0] for i in range(26)])
+    assert [r["symbol"] for r in gainers.rank([up, flat], "1h")] == ["DOWN/USDT"]
+
+
 def test_spot_scanner_scores_and_flags_pumps(tmp_path):
     got = gainers.pick(MARKETS, SPOT_TICKERS, top=5, market="spot")
     # PEPE's spread is 0.5%, over the 0.2% limit; perps and thin pairs are left out
