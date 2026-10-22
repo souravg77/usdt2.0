@@ -92,7 +92,7 @@ services:
   # domain (Let's Encrypt). Set AITRADER_SITE and AITRADER_TLS in .env (deploy/Caddyfile).
   #   docker compose --profile https up -d caddy
   caddy:
-    image: caddy:2.8.4-alpine
+    image: caddy:2.11.7-alpine
     profiles: ["https"]
     depends_on: [web]
     environment:  # only these two; the app secrets in .env stay out of this container
