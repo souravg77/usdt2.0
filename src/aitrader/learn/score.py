@@ -61,8 +61,9 @@ def parts(df: pd.DataFrame, short: bool, higher: dict | None = None) -> dict:
 
 
 def total(p: dict, agreeing: int = 1) -> float:
-    """The 0-100 score, with ``agreeing`` strategies signalling the same side on the coin this pass."""
-    full = {**p, "confirmation": 1.0 if agreeing >= 2 else 0.0}
+    """The 0-100 score, with ``agreeing`` strategies signalling the same side on the coin this pass:
+    the more of them, the more of the confirmation points (2 a third, 3 two thirds, 4 or more all)."""
+    full = {**p, "confirmation": min(1.0, max(0, agreeing - 1) / 3)}
     return round(sum(WEIGHTS[k] * full.get(k, 0.0) for k in WEIGHTS), 1)
 
 

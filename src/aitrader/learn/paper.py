@@ -659,13 +659,21 @@ class PaperTrader:
         now = self._now or int(time.time() * 1000)
         # how many different strategies signalled each coin and side this pass (the score's confirmation)
         agreeing = {g: len({c[3]["entry_id"] for c in cands}) for g, cands in groups.items()}
+        chosen = []
         for k, mkt, sig, pos in pending:
             if k not in take:
                 continue
+            n = agreeing.get((mkt, sig.exchange, sig.symbol, sig.side.value), 1)
             quality = pos.pop("quality", None)
             if quality is not None:
-                pos["score"] = score.total(quality, agreeing.get((mkt, sig.exchange, sig.symbol, sig.side.value), 1))
+                pos["score"] = score.total(quality, n)
                 pos["score_parts"] = quality
+            chosen.append((n, pos.get("score") or 0.0, k, mkt, sig, pos))
+        # priority: the coins most strategies agree on open first, then the higher score, so when a
+        # cap leaves room for only some of them, those are the ones that open (Shawn)
+        chosen.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        for _n, _s, k, mkt, sig, pos in chosen:
+            quality = pos.get("score_parts")
             need = self._guards[mkt]["min_score"]
             if need > 0 and quality is not None and pos["score"] < need:
                 self._log_signal(k, sig, "signal score too low",

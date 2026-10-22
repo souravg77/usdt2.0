@@ -515,6 +515,34 @@ def test_a_trade_opens_only_when_enough_strategies_agree(tmp_path):
     assert all(set(p["agreed"]) == {"up0", "up1", "up2"} for p in agreed)
 
 
+def test_the_coin_more_strategies_agree_on_opens_first(tmp_path):
+    """Shawn: at least 2 must agree, and more agreeing strategies get more priority."""
+    from aitrader.data.store import CandleStore
+    from aitrader.learn import PaperTrader, Registry
+    from aitrader.learn.paper import _sig_dict
+    from aitrader.models import Side
+    from aitrader.strategies.base import Signal
+
+    Registry(str(tmp_path / "reg.json")).save()
+    state = str(tmp_path / "paper_state.json")
+    guards.save(guards.path_for(state), "spot", {"agree": 2, "max_long": 1})
+    tr = PaperTrader(CandleStore(str(tmp_path / "c.db")), str(tmp_path / "reg.json"), ["bybit"],
+                     ["BTC/USDT", "ETH/USDT", "SOL/USDT"], state_path=state)
+    pending = []
+    for sym, n in (("SOL/USDT", 1), ("ETH/USDT", 2), ("BTC/USDT", 3)):  # BTC has the most agreeing
+        for i in range(n):
+            sig = Signal(ts=1, strategy=f"s{i}", exchange="bybit", symbol=sym, timeframe="1h", side=Side.BUY,
+                         entry=100.0, stop=98.0, target=104.0)
+            pending.append((f"s{i}|bybit|{sym}|1h", "spot", sig,
+                            {"entry_id": f"s{i}", "signal": _sig_dict(sig), "filled": False, "perp": False,
+                             "ai_prob": None, "size_mult": 1.0, "regime": None}))
+    events = {"opened": [], "filtered": []}
+    tr._open_agreed(pending, events)
+    assert [k.split("|")[2] for k in events["opened"]] == ["BTC/USDT"]  # one long allowed: the 3-strategy coin
+    why = {s["key"].split("|")[2]: s["skipped"] for s in tr.state["signals"] if s["key"].startswith("s0|")}
+    assert why == {"BTC/USDT": "", "ETH/USDT": "exposure cap", "SOL/USDT": "strategies don't agree"}
+
+
 def test_scan_now_rereads_every_chart_without_taking_a_signal_twice(tmp_path, monkeypatch):
     """Shawn: give a button to scan manually."""
     import time as _time
@@ -716,7 +744,8 @@ def test_signal_score_parts_and_minimum(tmp_path):
     down = score.parts(df, short=True, higher={"4h": "up", "1d": "up"})
     assert set(up) == set(score.WEIGHTS) - {"confirmation"} and all(0 <= v <= 1 for v in up.values())
     assert up["trend"] > down["trend"]  # higher timeframes up: better for a long than a short
-    assert 0 <= score.total(up) <= 95 and score.total(up, agreeing=3) == pytest.approx(score.total(up) + 5)
+    assert 0 <= score.total(up) <= 95 and score.total(up, agreeing=2) == pytest.approx(score.total(up) + 5 / 3, abs=0.06)
+    assert score.total(up, agreeing=4) == score.total(up, agreeing=9) == pytest.approx(score.total(up) + 5)
     assert sum(score.WEIGHTS.values()) == 100
     assert "/" in score.weakest(up)
     os.makedirs(tmp_path / "a")
