@@ -146,12 +146,11 @@
       d.pairs.forEach(function (q) { n += q.trades; w += q.wins; tot += q.total_r; open += q.open; if (q.candles) withData++; });
       msgEl.textContent = "Backtested " + d.timeframe + " on " + withData + " of " + d.pairs.length + " pairs from " +
         when(d.start).slice(0, 7) + " for " + d.months + " month" + (d.months === 1 ? "" : "s") + " · " + n +
-        " trades closed." + (d.later.length ? " " + d.later.join(", ") + (d.later.length === 1 ? " was" : " were") +
-        " listed on Bybit after that period, so there are no prices to test (see the Pairs table for when they start)." : "") +
-        (d.missing.length ? " " + d.missing.length + " pair" + (d.missing.length === 1 ? " has" : "s have") +
-        " no saved " + d.timeframe + " prices for that period: " + d.missing.join(", ") + ". If they are still missing " +
-        "after the download, Bybit has no " + d.timeframe + " prices for them in that period: they were most likely " +
-        "listed later, so pick a later From month." : "");
+        " trades closed." + (d.missing.length ? " " + d.missing.length + " pair" + (d.missing.length === 1 ? " has" : "s have") +
+        " no saved " + d.timeframe + " prices for that period yet: " + d.missing.join(", ") + ". Press Download " +
+        "to get them from Bybit; the backtest loads by itself when it is done." : "") +
+        (d.later.length ? " Bybit had no " + d.timeframe + " prices in that period for " + d.later.join(", ") +
+        " (downloaded and still empty): they started trading later, so pick a later From month to test them." : "");
       if (d.missing.length) {
         ["tf", "month", "months", "strategy"].forEach(function (k) { dlAll.elements[k].value = p.get(k) || ""; });
         dlAll.classList.remove("hidden");
@@ -176,8 +175,8 @@
         '<h2>Pairs</h2><p class="muted small">Pick one pair in the Pair menu to replay it on the chart.</p>' +
         '<table><tr><th>Pair</th><th>Total</th><th>Win %</th><th>Trades</th><th>Candles</th><th></th></tr>' +
         d.pairs.slice().sort(function (a, b) { return b.total_r - a.total_r || b.candles - a.candles; }).map(function (q) {
-          var note = q.first_text ? "listed later: prices from " + q.first_text :
-            !q.candles ? "no prices yet" : q.fee_skipped ? q.fee_skipped + " skipped for fees" : "";
+          var note = q.candles ? (q.fee_skipped ? q.fee_skipped + " skipped for fees" : "") :
+            (q.downloaded ? "none on Bybit then" : "not downloaded yet") + (q.first_text ? "; saved from " + q.first_text : "");
           return "<tr><td><a href=\"/replay?" + esc(new URLSearchParams({ symbol: q.symbol, tf: d.timeframe,
             month: p.get("month") || "", months: String(d.months), strategy: p.get("strategy") || "" }).toString()) +
             "\"><b>" + esc(q.symbol) + '</b></a></td><td class="' + cls(q.total_r) + '">' + (q.trades ? r(q.total_r) : "-") +
@@ -194,6 +193,8 @@
     S.dl = jobId;
     progEl.classList.remove("hidden");
     dlForm.classList.add("hidden");
+    dlAll.classList.add("hidden");
+    var many = new URLSearchParams(location.search).get("symbol") === "*";  // All pairs: reload either way
     msgEl.textContent = "";
     progText.textContent = "Starting the download from Bybit…";
     function poll() {
@@ -210,7 +211,7 @@
           progText.textContent = "Waiting: another job is running first" + (d.ahead ? " (" + d.ahead + ")" : "") + ". " + counts + " saved.";
         } else if (d.status === "running") {
           progText.innerHTML = "<b>Downloading from Bybit: " + d.pct + "%</b> · " + esc(counts) + " saved.";
-        } else if (d.status === "done" && !d.have && d.first) {
+        } else if (d.status === "done" && !d.have && d.first && !many) {
           // the coin was listed after the period: say when its prices start, and offer that month
           progFill.style.width = "0%";
           progText.innerHTML = "No prices for that period: Bybit has this coin's prices only from <b>" + esc(d.first_text) +
@@ -224,7 +225,7 @@
             load();
           });
           return;
-        } else if (d.status === "done" && !d.have) {
+        } else if (d.status === "done" && !d.have && !many) {
           progFill.style.width = "0%";
           progText.innerHTML = "Bybit sent no prices for that period. <a href=\"/jobs/" + encodeURIComponent(jobId) +
             "\">See what the download said</a>.";
