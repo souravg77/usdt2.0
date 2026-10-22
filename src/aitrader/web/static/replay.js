@@ -144,6 +144,20 @@
           progText.textContent = "Waiting: another job is running first" + (d.ahead ? " (" + d.ahead + ")" : "") + ". " + counts + " saved.";
         } else if (d.status === "running") {
           progText.innerHTML = "<b>Downloading from Bybit: " + d.pct + "%</b> · " + esc(counts) + " saved.";
+        } else if (d.status === "done" && !d.have && d.first) {
+          // the coin was listed after the period: say when its prices start, and offer that month
+          progFill.style.width = "0%";
+          progText.innerHTML = "No prices for that period: Bybit has this coin's prices only from <b>" + esc(d.first_text) +
+            "</b> (it was listed then). <a href=\"#\" id=\"from-listing\">Load from " + esc(d.first_month) + "</a>.";
+          document.getElementById("from-listing").addEventListener("click", function (ev) {
+            ev.preventDefault();
+            form.elements.month.value = d.first_month;
+            progEl.classList.add("hidden");
+            var p = new URLSearchParams(location.search); p.delete("download"); p.set("month", d.first_month);
+            history.replaceState(null, "", "/replay?" + p.toString());
+            load();
+          });
+          return;
         } else if (d.status === "done" && !d.have) {
           progFill.style.width = "0%";
           progText.innerHTML = "Bybit sent no prices for that period. <a href=\"/jobs/" + encodeURIComponent(jobId) +
