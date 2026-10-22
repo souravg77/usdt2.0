@@ -1,10 +1,12 @@
 """Timeframe picks: keep only the steady winners on one timeframe; the rest stop trading it."""
 
 import json
+import time
 
 from fastapi.testclient import TestClient
 
 from aitrader.config import Settings
+from aitrader.data.store import CandleStore
 from aitrader.learn import Entry, validate_spec
 from aitrader.learn import picks
 from aitrader.learn.keep import keep_top
@@ -98,15 +100,19 @@ def test_replay_page_starts_and_undoes_a_pick(tmp_path, monkeypatch):
     assert 'id="tf-pick"' in c.get("/replay").text
     csrf = Auth("admin", "correct horse battery", "k").csrf(c.cookies.get(COOKIE))
     assert c.post("/replay/pick", data={"csrf": "x", "tf": "4h"}).status_code == 403
-    r = c.post("/replay/pick", data={"csrf": csrf, "tf": "4h"}, follow_redirects=False)
-    assert r.status_code == 303 and "tf=4h" in r.headers["location"]
+    r = c.post("/replay/pick", data={"csrf": csrf, "tf": "4h", "month": "2025-04", "months": "6"},
+               follow_redirects=False)
+    assert r.status_code == 303 and "tf=4h" in r.headers["location"] and "month=2025-04" in r.headers["location"]
     runner.wait_idle()
     job = [j for j in runner.list() if j["meta"].get("kind") == "pick"][0]
     assert job["steps"][0][:2] == ["download", "--since"] and job["steps"][0][-4:] == ["--timeframe", "4h",
                                                                                          "--symbol", "BTC/USDT"]
-    assert job["steps"][1] == ["learn", "--symbol", "BTC/USDT", "pick-timeframe", "4h", "--years", "2",
-                               "--market", "spot"]
-    assert job["title"] == "Keep only the 4h winners on Spot AI pairs"
+    # Shawn: the period loaded on Replay, not 2 years (the download starts earlier to warm the indicators up)
+    assert job["steps"][1] == ["learn", "--symbol", "BTC/USDT", "pick-timeframe", "4h", "--since", "2025-04-01",
+                               "--until", "2025-10-01", "--min-trades", "10", "--market", "spot"]
+    assert job["steps"][0][2] < "2025-04-01" and job["steps"][0][3:5] == ["--until", "2025-10-01"]
+    assert job["title"] == "Keep only the 4h winners on Spot AI pairs (Apr 2025 to Oct 2025)"
+    assert "over the period loaded above" in c.get("/replay").text
     # a saved pick is listed with an undo button
     picks.save(picks.picks_path(str(tmp_path / "registry.json")),
                {"4h": {"at": 1, "picked": ["up"], "pairs": ["BTC/USDT"], "results": [result("up")]}})
@@ -119,12 +125,105 @@ def test_replay_page_starts_and_undoes_a_pick(tmp_path, monkeypatch):
                        "results": [result("few", trades=4), result("losing", total=-3.5),
                                    result("shaky", up=1, down=3)]}})
     page = c.get("/replay?tf=5m").text
-    assert "No strategy passed on 5m" in page and "All 3 tested strategies" in page
+    assert "No strategy passed on 5m" in page and "Choose which to keep (3 tested)" in page
     assert "only 4 trades (needs 10)" in page and "lost money overall (-3.50R after fees)" in page
     assert "down in more quarters than up (1 of 4 up)" in page and "BTC/USDT 105,120 candles (50%)" in page
     c.post("/replay/pick", data={"csrf": csrf, "tf": "4h", "undo": "1"})
     runner.wait_idle()
     assert ["learn", "pick-timeframe", "4h", "--clear", "--market", "spot"] in [j["steps"][0] for j in runner.list()]
+
+
+def test_the_admin_chooses_which_tested_strategies_to_keep(tmp_path, monkeypatch):
+    """Shawn: show every tested strategy's full results and let the admin tick his own, even with
+    fewer than 10 trades."""
+    monkeypatch.chdir(tmp_path)
+    make_store(tmp_path / "x.db").close()
+    runner = JobRunner(str(tmp_path / "jobs"), env_file=str(tmp_path / "none.env"))
+    monkeypatch.setattr(runner, "command", lambda step: ["true"])
+    reg_path = str(tmp_path / "registry.json")
+    app = create_app(Settings(db_path=str(tmp_path / "x.db"), symbols=["BTC/USDT"]),
+                     Auth("admin", "correct horse battery", "k"), runner,
+                     Paths(report=str(tmp_path / "none.json"), registry=reg_path))
+    c = TestClient(app)
+    c.post("/login", data={"user": "admin", "password": "correct horse battery"})
+    csrf = Auth("admin", "correct horse battery", "k").csrf(c.cookies.get(COOKIE))
+    few = dict(result("few", trades=3, total=2.4), quarters={"2025-Q2": 2.4})
+    picks.save(picks.picks_path(reg_path), {"4h": {"at": 1, "picked": ["good"], "pairs": ["BTC/USDT"],
+                                                   "results": [result("good"), few]}})
+    page = c.get("/replay?tf=4h").text
+    assert 'name="keep" value="good" data-r="5.0" checked' in page and 'name="keep" value="few" data-r="2.4">' in page
+    assert "only 3 trades (needs 10) · few trades, could be luck" in page and "+0.80R" in page  # per trade
+    assert "2025-Q2" in page and "Keep the ticked strategies" in page and 'name="min_trades"' in page
+    r = c.post("/replay/pick/choose", data={"csrf": csrf, "tf": "4h", "keep": ["few", "good", "nope"],
+                                            "month": "2025-04", "months": "6"}, follow_redirects=False)
+    assert r.status_code == 303 and "month=2025-04" in r.headers["location"]
+    runner.wait_idle()
+    job = [j for j in runner.list() if j["meta"].get("kind") == "pick"][0]
+    assert job["steps"] == [["learn", "pick-timeframe", "4h", "--choose=few,good", "--market", "spot", "--by", "admin"]]
+    assert c.post("/replay/pick/choose", data={"csrf": "x", "tf": "4h"}).status_code == 403
+    r = c.post("/replay/pick/choose", data={"csrf": csrf, "tf": "1d"}, follow_redirects=False)
+    assert "error=" in r.headers["location"]
+    # a custom "Fewest trades" goes to the pick
+    c.post("/replay/pick", data={"csrf": csrf, "tf": "1d", "month": "2025-04", "months": "1", "min_trades": "3"})
+    runner.wait_idle()
+    job = [j for j in runner.list() if j["title"].startswith("Keep only the 1d")][0]
+    assert job["steps"][1][-4:-2] == ["--min-trades", "3"]
+
+
+def test_slow_timeframes_are_tested_over_their_minimum_months(tmp_path, monkeypatch):
+    """Shawn: at least 6 months on 4h and 12 on 1d, whatever shorter period is loaded."""
+    monkeypatch.chdir(tmp_path)
+    make_store(tmp_path / "x.db").close()
+    runner = JobRunner(str(tmp_path / "jobs"), env_file=str(tmp_path / "none.env"))
+    monkeypatch.setattr(runner, "command", lambda step: ["true"])
+    app = create_app(Settings(db_path=str(tmp_path / "x.db"), symbols=["BTC/USDT"]),
+                     Auth("admin", "correct horse battery", "k"), runner,
+                     Paths(report=str(tmp_path / "none.json"), registry=str(tmp_path / "registry.json")))
+    c = TestClient(app)
+    c.post("/login", data={"user": "admin", "password": "correct horse battery"})
+    csrf = Auth("admin", "correct horse battery", "k").csrf(c.cookies.get(COOKIE))
+
+    def since_of(tf, months):
+        r = c.post("/replay/pick", data={"csrf": csrf, "tf": tf, "month": "2025-06", "months": months},
+                   follow_redirects=False)
+        runner.wait_idle()
+        steps = runner.list()[0]["steps"]
+        return [st[st.index("--since") + 1] for st in steps if st[0] == "learn"], r.headers["location"]
+
+    assert since_of("1h", "1")[0] == ["2025-06-01"]  # fast charts: the month loaded
+    got, where = since_of("4h", "1")
+    assert got == ["2025-01-01"] and "tested%20over%206%20months" in where and "month=2025-06" in where
+    assert since_of("4h", "6")[0] == ["2025-06-01"]  # already long enough
+    assert since_of("1d", "3")[0] == ["2024-09-01"]
+    assert since_of("1d", "12")[0] == ["2025-06-01"]
+    got, _where = since_of("all", "1")  # quick timeframes first: 1d, 4h, 1h, 30m, 15m, 5m
+    assert got == ["2024-07-01", "2025-01-01"] + ["2025-06-01"] * 4
+    assert runner.list()[0]["steps"][0][2] < "2024-07-01"  # 1d's download warms up before its start
+    assert "at least 6 months on 4h, 12 months on 1d" in c.get("/replay").text
+
+
+def test_choose_keeps_exactly_the_ticked_ones_whatever_the_rules(tmp_path):
+    reg = Registry(str(tmp_path / "registry.json"))
+    other = Entry(id="other", kind="rule", name="other",
+                  spec=validate_spec(dict(EVERY_UP_BAR, name="other", timeframes=["1h", "4h"])))
+    for e in (UP, other):
+        reg.add(e)
+        e.set_status("paper", "test")
+    path = picks.picks_path(reg.path)
+    picks.apply(reg, [UP, other], "4h", [result("other"), result("up", trades=3)], path,
+                info={"pairs": ["BTC/USDT"], "since": 5})
+    assert picks.load(path)["4h"]["picked"] == ["other"]
+    out = picks.choose(Registry(reg.path), [UP, other], "4h", path, ["up"], by="admin")
+    assert out["picked"] == ["up"] and out["dropped"] == ["win4h-other"]
+    reg = Registry(reg.path)
+    assert reg.entries["win4h-up"].status == "paper" and "chosen by hand" in reg.entries["win4h-up"].history[-1]["why"]
+    saved = picks.load(path)["4h"]
+    assert saved["hand"] and saved["rule_picked"] == ["other"] and saved["by"] == "admin"
+    assert saved["pairs"] == ["BTC/USDT"] and saved["since"] == 5 and len(saved["results"]) == 2
+    # choosing again keeps the original results; none ticked keeps none
+    out = picks.choose(reg, [UP, other], "4h", path, [])
+    assert out["picked"] == [] and picks.load(path)["4h"]["rule_picked"] == ["other"]
+    assert picks.choose(reg, [UP], "1d", path, ["up"]) is None
 
 
 def test_cli_pick_timeframe_and_undo(tmp_path, monkeypatch, capsys):
@@ -147,6 +246,13 @@ def test_cli_pick_timeframe_and_undo(tmp_path, monkeypatch, capsys):
     assert "1h: tested" in out
     tf_picks = picks.load("data/learn/timeframe_picks.json")
     assert "1h" in tf_picks and tf_picks["1h"]["results"]
+    # the admin's own choice from the saved results: none ticked keeps none
+    assert main(["--env-file", "none", "learn", "pick-timeframe", "1h", "--choose=", "--by", "admin"]) == 0
+    assert picks.load("data/learn/timeframe_picks.json")["1h"]["picked"] == []
+    assert "kept the 0 chosen" in capsys.readouterr().out
+    assert main(["--env-file", "none", "learn", "pick-timeframe", "1h", "--choose=up"]) == 0
+    assert picks.load("data/learn/timeframe_picks.json")["1h"]["picked"] == ["up"]
+    assert main(["--env-file", "none", "learn", "pick-timeframe", "4h", "--choose=up"]) == 1
     assert main(["--env-file", "none", "learn", "pick-timeframe", "1h", "--clear"]) == 0
     assert picks.load("data/learn/timeframe_picks.json") == {}
 
@@ -415,9 +521,9 @@ def test_the_futures_view_keeps_the_winners_on_futures_pairs_only(tmp_path, monk
     c.post("/replay/pick", data={"csrf": csrf, "tf": "1h"})
     title, steps, meta = submitted[0]
     syms = ["--symbol", "SOL/USDT", "--symbol", "ZEREBRO/USDT"]
-    assert title == "Keep only the 1h winners on Futures AI pairs" and meta["market"] == "futures"
+    assert title.startswith("Keep only the 1h winners on Futures AI pairs") and meta["market"] == "futures"
     assert steps[0][-4:] == syms[-4:] and "BTC/USDT" not in steps[0] and "BTC/USDT" not in steps[1]
-    assert steps[1] == ["learn", *syms, "pick-timeframe", "1h", "--years", "2", "--market", "futures"]
+    assert steps[1][:8] == ["learn", *syms, "pick-timeframe", "1h", "--since"] and steps[1][-2:] == ["--market", "futures"]
 
 
 def test_a_futures_pick_keeps_its_own_copies_and_leaves_spot_alone(tmp_path):
@@ -465,7 +571,7 @@ def test_keep_the_winners_on_every_timeframe_in_the_futures_view(tmp_path, monke
     csrf = Auth("admin", "correct horse battery", "k").csrf(c.cookies.get(COOKIE))
     c.post("/replay/pick", data={"csrf": csrf, "tf": "all"})
     title, steps, meta = submitted[0]
-    assert title == "Keep only the winners on every timeframe on Futures AI pairs" and meta["market"] == "futures"
+    assert title.startswith("Keep only the winners on every timeframe on Futures AI pairs") and meta["market"] == "futures"
     picked = [s[4] for s in steps if s[0] == "learn"]
     assert picked == ["1d", "4h", "1h", "30m", "15m", "5m"] and len(steps) == 12
     assert all(s[-3:] == ["--market", "futures", "--skip-empty"] for s in steps if s[0] == "learn")
@@ -485,3 +591,29 @@ def test_cli_pick_skips_an_empty_timeframe_when_asked(tmp_path, monkeypatch):
     assert main(args) == 1  # nothing to test on 1d
     assert main(args + ["--skip-empty"]) == 0
     assert picks.load("data/learn/timeframe_picks.json") == {}
+
+
+def test_a_pick_judges_only_the_period_and_strategies_asked_for(tmp_path, monkeypatch, capsys):
+    """Shawn: Keep only the winners uses what Replay loaded, not a 2-year test."""
+    from aitrader.cli import main
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "data").mkdir()
+    make_store(tmp_path / "data" / "aitrader.db").close()
+    reg = Registry("data/learn/registry.json")
+    reg.add(Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR), status="paper"))
+    reg.add(Entry(id="up2", kind="rule", name="up_bar2", spec=validate_spec(EVERY_UP_BAR), status="paper"))
+    reg.save()
+    store = CandleStore("data/aitrader.db")
+    first, last = store.first_ts("bybit", "BTC/USDT", "1h"), store.last_ts("bybit", "BTC/USDT", "1h")
+    store.close()
+    mid = first + (last - first) * 3 // 4
+    day = lambda ms: time.strftime("%Y-%m-%d", time.gmtime(ms / 1000))  # noqa: E731
+    base = ["--env-file", "none", "learn", "--symbol", "BTC/USDT", "pick-timeframe", "1h", "--min-trades", "1"]
+    assert main(base + ["--since", day(first), "--only", "up"]) == 0
+    whole = picks.load("data/learn/timeframe_picks.json")["1h"]
+    assert [r["id"] for r in whole["results"]] == ["up"] and whole["only"] == 1 and "years" not in whole
+    assert main(base + ["--since", day(mid), "--until", day(last), "--only", "up"]) == 0
+    part = picks.load("data/learn/timeframe_picks.json")["1h"]
+    assert 0 < part["results"][0]["trades"] < whole["results"][0]["trades"]  # only trades in that period
+    assert part["until"] <= last + 86_400_000

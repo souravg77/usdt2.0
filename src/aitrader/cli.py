@@ -670,8 +670,21 @@ def cmd_learn(s: Settings, args) -> int:
             gone = picks.clear(reg, tf, path, mkt)
             print(f"{tf} pick undone: every strategy may trade {tf} again; {len(gone)} pick copies stopped")
             return 0
-        since = int(_time.time() * 1000) - int(args.years * 365.25 * 86_400_000)
+        if args.choose is not None:  # the admin's own choice from the saved pick's results
+            ids = [i for i in args.choose.split(",") if i]
+            out = picks.choose(reg, known_entries(reg.entries), tf, path, ids, mkt, by=args.by or "")
+            if out is None:
+                print(f"no saved {tf} pick to choose from: run pick-timeframe {tf} first")
+                return 1
+            print(f"{tf}: kept the {len(out['picked'])} chosen strategies; {len(out['dropped'])} stopped trading {tf}")
+            return 0
+        now_ms = int(_time.time() * 1000)
+        since = (_ms(args.since) if args.since else now_ms - int(args.years * 365.25 * 86_400_000))
+        until = min(_ms(args.until), now_ms) if args.until else now_ms
         entries = known_entries(reg.entries)
+        if args.only:  # only these strategies are judged (e.g. the ones the Replay page had loaded)
+            only = set(args.only.split(","))
+            entries = [e for e in entries if e.id in only]
         if mkt == "spot":  # Spot AI never sells short: its picks don't test the short twins
             entries = [e for e in entries if e.kind != "short"]
         from .data.perp import db_for
@@ -682,15 +695,17 @@ def cmd_learn(s: Settings, args) -> int:
                 from .backtest.engine import as_perp
 
                 cfg = as_perp(cfg)
-            results = picks.evaluate(entries, store, exchanges[0], list(symbols), tf, since, cfg)
-            bars = {sym: store.count(exchanges[0], sym, tf, since, int(_time.time() * 1000) + 1) for sym in symbols}
+            results = picks.evaluate(entries, store, exchanges[0], list(symbols), tf, since, cfg, until_ms=until)
+            bars = {sym: store.count(exchanges[0], sym, tf, since, until + 1) for sym in symbols}
         finally:
             store.close()
         if not any(r["trades"] for r in results):
             print(f"no {tf} trades: download {tf} prices first (aitrader download --since ... --timeframe {tf})")
             return 0 if args.skip_empty else 1
         out = picks.apply(reg, entries, tf, results, path, min_trades=args.min_trades, market=mkt,
-                          info={"since": since, "pairs": list(symbols), "years": args.years, "bars": bars})
+                          info={"since": since, "until": until, "pairs": list(symbols), "bars": bars,
+                                **({} if args.since else {"years": args.years}),
+                                **({"only": len(entries)} if args.only else {})})
         print(f"{tf}: tested {out['tested']} strategies on {len(symbols)} pairs; kept {len(out['picked'])} "
               f"(total above 0R, at least {args.min_trades} trades, up in at least half their quarters)")
         for r in picks.winners(results, args.min_trades):
@@ -1698,9 +1713,16 @@ def build_parser() -> argparse.ArgumentParser:
     lpt = le_sub.add_parser("pick-timeframe", help="on one timeframe, trade only the strategies that made "
                                                    "money there steadily (the rest stop trading it)")
     lpt.add_argument("timeframe", nargs="?", default="4h", choices=["5m", "15m", "30m", "1h", "4h", "1d"])
-    lpt.add_argument("--years", type=float, default=2.0, help="how much saved history to test (default 2)")
+    lpt.add_argument("--years", type=float, default=2.0, help="how much saved history to test (default 2), "
+                     "when --since isn't given")
+    lpt.add_argument("--since", help="test from this UTC date (YYYY-MM-DD), e.g. the period loaded on Replay")
+    lpt.add_argument("--until", help="test up to this UTC date (default: now)")
+    lpt.add_argument("--only", help="judge only these strategy ids (comma separated); the rest stop trading it")
     lpt.add_argument("--min-trades", type=int, default=10, help="fewest trades to judge a strategy (default 10)")
     lpt.add_argument("--clear", action="store_true", help="undo the pick: every strategy trades it again")
+    lpt.add_argument("--choose", help="keep exactly these tested strategy ids (comma separated) from the saved "
+                                      "pick, whatever the rules say; no new backtest")
+    lpt.add_argument("--by", help="who chose (shown with the pick)")
     lpt.add_argument("--skip-empty", action="store_true",
                      help="no trades on this timeframe: leave it as it is and exit 0 (for a run over every timeframe)")
     lpt.add_argument("--market", choices=["spot", "futures"], default="spot",

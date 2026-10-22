@@ -44,10 +44,13 @@ PICK_ALL_ORDER = ["1d", "4h", "1h", "30m", "15m", "5m"]  # "every timeframe": th
 SPEEDS = [1, 2, 5, 10, 50, 200]
 CACHE_SIZE = 6
 TOPS = [10, 20, 30]
+# Shawn: a pick tests at least this many months on slow charts (1 month of 4h is ~180 candles, of
+# 1d only 30, too few for any strategy to show 10 trades); a shorter loaded period starts earlier
+MIN_PICK_MONTHS = {"4h": 6, "1d": 12}
+MIN_TRADE_CHOICES = (1, 3, 5, 10, 20, 30)  # "Fewest trades" a pick asks of a strategy
 MAX_MONTHS = 36  # Replay's longest period: 3 years
 LENGTHS = [("1", "1 month"), ("2", "2 months"), ("3", "3 months"), ("6", "6 months"), ("12", "1 year"),
            ("24", "2 years"), ("36", "3 years")]
-PICK_YEARS = 2  # history a timeframe pick tests (learn.picks)
 
 
 def _top(strategy: str) -> int:
@@ -308,8 +311,32 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
         return JSONResponse(download_status(job["status"], have, meta["since_ms"], meta["until_ms"],
                                             meta["tf"], job.get("error", ""), ahead))
 
+    def chosen_ids(strategy: str, tf: str) -> list[str] | None:
+        """The strategies the Replay page's Strategy choice loads on ``tf`` (None: all of them)."""
+        from ..learn.registry import make_strategy
+
+        n = _top(strategy)
+        if not n:
+            return [strategy] if strategy and strategy != "win" and not strategy.startswith("top:") else None
+        mkt = "futures" if futures_mode() else "spot"
+        entries = [e for e in known_entries(Registry(registry_path).entries) if picks.trades_now(e, False, mkt)
+                   and not picks.is_copy(e) and (futures_mode() or e.kind != "short")]
+        by_id = {e.id: e for e in entries}
+        out = []
+        for i in best_ids(entries, tf)[0]:
+            try:
+                if i in by_id and tf in make_strategy(by_id[i]).spec.timeframes:
+                    out.append(i)
+            except Exception:
+                continue
+            if len(out) >= n:
+                break
+        return out
+
     @app.post("/replay/pick")
-    def pick(request: Request, csrf: str = Form(""), tf: str = Form("4h"), undo: str = Form("")):
+    def pick(request: Request, csrf: str = Form(""), tf: str = Form("4h"), undo: str = Form(""),
+             month: str = Form(""), months: int = Form(0), strategy: str = Form(""),
+             min_trades: int = Form(picks.MIN_TRADES)):
         user, token, redirect = guard(request)
         if redirect:
             return redirect
@@ -321,79 +348,156 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
                for j in jobs.list()):
             return RedirectResponse(f"/replay?tf={_q(tf)}&error=" + _q("A pick is already running; see Recent "
                                                                        "jobs on the Overview page."), status_code=303)
+        mkt = "futures" if futures_mode() else "spot"
+        where = "Futures AI" if futures_mode() else "Spot AI"
         if undo:
-            where = "Futures AI" if futures_mode() else "Spot AI"
-            jobs.submit(f"Undo the {where} {tf} pick",
-                        [["learn", "pick-timeframe", tf, "--clear", "--market",
-                          "futures" if futures_mode() else "spot"]],
+            jobs.submit(f"Undo the {where} {tf} pick", [["learn", "pick-timeframe", tf, "--clear", "--market", mkt]],
                         meta={"kind": "pick", "by": user})
             msg = f"Undoing the {where} {tf} pick: every strategy may trade {tf} on {where} again."
-        elif tf == "all":
-            since = (datetime.now(timezone.utc) - timedelta(days=round(PICK_YEARS * 365.25))).strftime("%Y-%m-%d")
-            sym_args = [a for sym in pairs() for a in ("--symbol", sym)]
-            where, mkt = ("Futures AI", "futures") if futures_mode() else ("Spot AI", "spot")
-            if not sym_args:
-                return RedirectResponse("/replay?error=" + _q(f"{where} has no pairs to test yet"), status_code=303)
-            steps = []
-            for t in PICK_ALL_ORDER:  # the quick timeframes first, 5m (the most candles) last
-                steps += [["download", "--since", since, "--market", mkt, "--exchange", exchange, "--timeframe", t,
-                           *sym_args],
-                          ["learn", *sym_args, "pick-timeframe", t, "--years", str(PICK_YEARS),
-                           "--market", mkt, "--skip-empty"]]
-            jobs.submit(f"Keep only the winners on every timeframe on {where} pairs", steps,
+            cache.clear()
+            return RedirectResponse(f"/replay?tf={_q(tf)}&msg=" + _q(msg), status_code=303)
+        # the period loaded on the Replay page (From month and Length), not a fixed history
+        now = datetime.now(timezone.utc)
+        start = _month(month) or datetime(now.year - 1, now.month, 1, tzinfo=timezone.utc)
+        months = min(max(int(months or 1), 1), MAX_MONTHS)
+        until = min(_add_months(start, months), now)
+        if start >= now:
+            return RedirectResponse("/replay?error=" + _q("choose a From month in the past"), status_code=303)
+        period = f"{start:%b %Y} to {until:%b %Y}" if until - start > timedelta(days=31) else f"{start:%b %Y}"
+        sym_args = [a for sym in pairs() for a in ("--symbol", sym)]  # the workspace's own pairs
+        if not sym_args:
+            return RedirectResponse("/replay?error=" + _q(f"{where} has no pairs to test yet"), status_code=303)
+        n = _top(strategy)
+        label = (f"the best {n} strategies" if n else
+                 "all strategies" if strategy in ("", "win") or strategy.startswith("top:") else "the chosen strategy")
+
+        fewest = min_trades if min_trades in MIN_TRADE_CHOICES else picks.MIN_TRADES
+
+        def start_for(t: str) -> datetime:
+            """The loaded period's start, moved back so ``t`` gets at least its minimum months."""
+            return _add_months(start, -max(0, MIN_PICK_MONTHS.get(t, 1) - months))
+
+        def period_for(t: str) -> str:
+            s0 = start_for(t)
+            return f"{s0:%b %Y} to {until:%b %Y}" if until - s0 > timedelta(days=31) else f"{s0:%b %Y}"
+
+        longer = {t: n for t, n in MIN_PICK_MONTHS.items() if n > months}
+        if tf != "all":
+            longer = {t: n for t, n in longer.items() if t == tf}
+        stretched = (" " + " ".join(f"{t} is tested over {n} months ({period_for(t)}), not {months}, so its "
+                                    "strategies have enough candles to make trades." for t, n in longer.items())
+                     if longer else "")
+
+        def steps_for(t: str, skip_empty: bool) -> list[list[str]]:
+            t_start = start_for(t)
+            warm = t_start - timedelta(milliseconds=picks.MIN_BARS * TIMEFRAME_MS[t])  # indicators warm up first
+            only = chosen_ids(strategy, t)
+            pick_args = ["learn", *sym_args, "pick-timeframe", t, "--since", f"{t_start:%Y-%m-%d}",
+                         "--until", f"{until:%Y-%m-%d}", "--min-trades", str(fewest), "--market", mkt]
+            if only is not None:
+                pick_args += ["--only", ",".join(only)]
+            if skip_empty:
+                pick_args.append("--skip-empty")
+            return [["download", "--since", f"{warm:%Y-%m-%d}", "--until", f"{until:%Y-%m-%d}", "--market", mkt,
+                     "--exchange", exchange, "--timeframe", t, *sym_args], pick_args]
+
+        if tf == "all":
+            steps = [st for t in PICK_ALL_ORDER for st in steps_for(t, True)]  # quick timeframes first, 5m last
+            jobs.submit(f"Keep only the winners on every timeframe on {where} pairs ({period})", steps,
                         meta={"kind": "pick", "by": user, "market": mkt})
-            msg = (f"Testing every strategy on each timeframe ({', '.join(PICK_ALL_ORDER)}) on {PICK_YEARS:g} years "
-                   f"of prices for the {len(pairs())} {where} pairs. On each timeframe the steady winners become "
-                   f"{where}'s WIN strategies and the rest stop trading it there; the other engine is not changed. "
-                   "It takes a while: each timeframe's result appears here as soon as it is done.")
+            msg = (f"Testing {label} on each timeframe ({', '.join(PICK_ALL_ORDER)}) over {period} for the "
+                   f"{len(pairs())} {where} pairs. On each timeframe the winners become {where}'s WIN strategies "
+                   "and the rest stop trading it there; the other engine is not changed. Each timeframe's result "
+                   "appears here as soon as it is done." + stretched)
             tf = "1h"
         else:
-            since = (datetime.now(timezone.utc) - timedelta(days=round(PICK_YEARS * 365.25))).strftime("%Y-%m-%d")
-            # the workspace's own pairs: in the Futures view only Futures AI's (its top gainers)
-            sym_args = [a for sym in pairs() for a in ("--symbol", sym)]
-            where = "Futures AI" if futures_mode() else "Spot AI"
-            jobs.submit(f"Keep only the {tf} winners on {where} pairs",
-                        [["download", "--since", since, "--market", ws(), "--exchange", exchange, "--timeframe", tf,
-                          *sym_args],
-                         ["learn", *sym_args, "pick-timeframe", tf, "--years", str(PICK_YEARS),
-                          "--market", "futures" if futures_mode() else "spot"]],
-                        meta={"kind": "pick", "by": user, "market": "futures" if futures_mode() else "spot"})
-            msg = (f"Testing every {tf} strategy on {PICK_YEARS:g} years of {tf} prices for the {len(pairs())} "
-                   f"{where} pairs. "
-                   f"The steady winners keep trading {tf} on {where} only, as its new WIN strategies; the rest "
-                   f"stop trading {tf} there, and the other engine is not changed. This page shows the "
-                   "list when it's done (reload it in a few minutes).")
+            period = period_for(tf)
+            jobs.submit(f"Keep only the {tf} winners on {where} pairs ({period})", steps_for(tf, False),
+                        meta={"kind": "pick", "by": user, "market": mkt})
+            msg = (f"Testing {label} on {tf} over {period} for the {len(pairs())} {where} pairs. The winners keep "
+                   f"trading {tf} on {where} only, as its new WIN strategies; the rest stop trading {tf} there, and "
+                   "the other engine is not changed. This page shows the list when it's done (reload it in a few "
+                   "minutes)." + stretched)
         cache.clear()
-        return RedirectResponse(f"/replay?tf={_q(tf)}&msg=" + _q(msg), status_code=303)
+        q = f"tf={_q(tf)}&month={_q(f'{start:%Y-%m}')}&months={months}&strategy={_q(strategy)}"
+        return RedirectResponse(f"/replay?{q}&msg=" + _q(msg), status_code=303)
 
-    def pick_card(tf: str, token: str) -> str:
+    @app.post("/replay/pick/choose")
+    async def pick_choose(request: Request):
+        """The admin's own choice from a pick's tested strategies: keep exactly the ticked ones."""
+        user, token, redirect = guard(request)
+        if redirect:
+            return redirect
+        form = await request.form()
+        if not auth.check_csrf(token, str(form.get("csrf", ""))):
+            return PlainTextResponse("bad form token; reload the page", status_code=403)
+        tf = str(form.get("tf", ""))
+        back = f"/replay?tf={_q(tf)}&month={_q(str(form.get('month', '')))}&months={_q(str(form.get('months', '1')))}" \
+               f"&strategy={_q(str(form.get('strategy', '')))}"
+        cur = picks.load(picks_file()).get(tf) if tf in REPLAY_TIMEFRAMES else None
+        if not cur or not cur.get("results"):
+            return RedirectResponse(back + "&error=" + _q("run Keep only the winners on this timeframe first"),
+                                    status_code=303)
+        if any(j["status"] in ("queued", "running") and j.get("meta", {}).get("kind") == "pick"
+               for j in jobs.list()):
+            return RedirectResponse(back + "&error=" + _q("A pick is already running; see Recent jobs on the "
+                                                          "Overview page."), status_code=303)
+        tested = {r["id"] for r in cur["results"]}
+        ids = [i for i in dict.fromkeys(str(v) for v in form.getlist("keep")) if i in tested]
+        mkt = "futures" if futures_mode() else "spot"
+        where = "Futures AI" if futures_mode() else "Spot AI"
+        jobs.submit(f"Keep your {len(ids)} chosen {tf} strategies on {where}",
+                    [["learn", "pick-timeframe", tf, f"--choose={','.join(ids)}", "--market", mkt, "--by", user]],
+                    meta={"kind": "pick", "by": user, "market": mkt})
+        cache.clear()
+        msg = (f"Keeping the {len(ids)} strategies you ticked as {where}'s WIN strategies on {tf}; the others stop "
+               f"trading {tf} on {where}. Reload in a few seconds." if ids else
+               f"You ticked none, so no strategy will trade {tf} on {where}. Undo the {tf} pick to let them all "
+               "trade it again.")
+        return RedirectResponse(back + "&msg=" + _q(msg), status_code=303)
+
+    def pick_card(tf: str, token: str, month: str = "", months: int = 1, strategy: str = "") -> str:
         p = picks.load(picks_file())
         cur = p.get(tf)
         others = ", ".join(t for t in REPLAY_TIMEFRAMES if t in p and t != tf)
+        period = (f'<input type="hidden" name="month" value="{_e(month)}"><input type="hidden" name="months" '
+                  f'value="{months}"><input type="hidden" name="strategy" value="{_e(strategy)}">')
         opts = "".join(f'<option value="{t}"{" selected" if t == tf else ""}>{t}</option>' for t in REPLAY_TIMEFRAMES)
-        head = (f'{_e(tf)} pick on: {len(cur.get("picked", []))} strategies kept' if cur
+        fewest = "".join(f'<option value="{n}"{" selected" if n == picks.MIN_TRADES else ""}>{n}</option>'
+                         for n in MIN_TRADE_CHOICES)
+        head = (f'{_e(tf)} pick on: {len(cur.get("picked", []))} strategies kept'
+                f'{" (your choice)" if cur.get("hand") else ""}' if cur
                 else "Keep only the winners on one timeframe")
         out = (f'<details class="card" id="tf-pick" data-tf="{_e(tf)}"><summary><b>{head}</b></summary>'
-               '<p class="small muted">Tests every strategy that trades the chosen timeframe on '
-               f'{PICK_YEARS:g} years of its prices for this workspace\'s pairs only (in the Futures view the Futures AI '
-               'pairs, in the Spot view the Spot AI pairs), after fees. A strategy is kept when its '
-               f'total is above 0R over at least {picks.MIN_TRADES} trades and it made money in at least as '
-               'many 3-month quarters as it lost in, so one lucky quarter is not enough. Kept strategies '
-               'become this engine\'s WIN strategies on that timeframe; the others stop trading it on this engine '
-               '(their other timeframes carry on). Each engine has its own picks.</p>'
-               f'<form method="post" action="/replay/pick" class="row">{_csrf(auth, token)}'
+               '<p class="small muted">Tests the strategies loaded above (the Strategy choice) on the chosen '
+               'timeframe over the period loaded above (From month and Length), for this workspace\'s pairs only (in '
+               'the Futures view the Futures AI pairs, in the Spot view the Spot AI pairs), after fees. A strategy is '
+               'kept when its total is above 0R over at least the "Fewest trades" (10 unless you change it) and '
+               'it made money in at least as many 3-month quarters as it lost in, so one lucky quarter is not '
+               'enough. Kept strategies become this engine\'s WIN strategies on that timeframe; the others stop '
+               'trading it on this engine (their other timeframes carry on). Each engine has its own picks. '
+               'On slow charts a pick tests at least ' + ", ".join(f"{n} months on {t}" for t, n in MIN_PICK_MONTHS.items())
+               + ' (starting earlier when less is loaded), because one month has too few candles for 10 trades. '
+               'After a pick, "Choose which to keep" shows every tested strategy\'s full results so you can tick '
+               'your own, including ones with fewer trades.</p>'
+               f'<form method="post" action="/replay/pick" class="row pick-form">{_csrf(auth, token)}' + period +
                f'<label>Timeframe <select name="tf">{opts}</select></label>'
+               f'<label>Fewest trades <select name="min_trades">{fewest}</select></label>'
                '<button>Keep only the winners</button></form>'
-               f'<form method="post" action="/replay/pick" class="row">{_csrf(auth, token)}'
-               '<input type="hidden" name="tf" value="all">'
+               f'<form method="post" action="/replay/pick" class="row pick-form">{_csrf(auth, token)}' + period +
+               f'<input type="hidden" name="tf" value="all"><input type="hidden" name="min_trades" '
+               f'value="{picks.MIN_TRADES}">'
                '<button class="ghost">Keep the winners on every timeframe</button></form>')
         if others:
             out += f'<p class="small">Also picked: {_e(others)}.</p>'
         if cur:
             won = [r for r in cur.get("results", []) if r["id"] in set(cur.get("picked", []))]
             when = clock.local(cur["at"] / 1000)
+            tested = (f'{clock.local(cur["since"] / 1000)[:10]} to {clock.local(cur["until"] / 1000)[:10]}'
+                      if cur.get("until") and cur.get("since") else f'the last {cur.get("years", 2):g} years')
             out += (f'<p><b>{_e(tf)} pick ({_e(when)}):</b> {len(won)} of {len(cur.get("results", []))} '
-                    f'strategies kept on {len(cur.get("pairs", []))} pairs: {_e(", ".join(cur.get("pairs", [])))}.</p>')
+                    f'strategies kept, tested {_e(tested)} on {len(cur.get("pairs", []))} pairs: '
+                    f'{_e(", ".join(cur.get("pairs", [])))}.</p>')
             if not won and cur.get("results"):
                 out += (f'<p class="warn">No strategy passed on {_e(tf)}, so none trades {_e(tf)} on this engine now '
                         'and Replay shows none. That is the test working: after fees none made money steadily on '
@@ -406,7 +510,7 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
                     f'{r["quarters_up"] + r["quarters_down"]}</td></tr>' for r in won)
                 out += ('<table><tr><th>Strategy</th><th>Trades</th><th>Win %</th>'
                         f'<th>Total</th><th>Quarters up</th></tr>{rows}</table>')
-            out += _tested_table(cur, tf)
+            out += _tested_table(cur, tf, _csrf(auth, token) + period)
             out += (f'<form method="post" action="/replay/pick" class="row">{_csrf(auth, token)}'
                     f'<input type="hidden" name="tf" value="{_e(tf)}"><input type="hidden" name="undo" value="1">'
                     f'<button class="ghost">Undo the {_e(tf)} pick</button></form>')
@@ -452,7 +556,7 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
             f'<label class="wide">Strategy <select name="strategy">{strat_opts}</select></label>'
             '<button type="submit">Load</button></form>'
             '<div id="replay-msg" class="muted"></div>'
-            + pick_card(tf, token) +
+            + pick_card(tf, token, month, months, strategy) +
             f'<form id="replay-download" method="post" action="/replay/download" class="row hidden">{_csrf(auth, token)}'
             '<input type="hidden" name="symbol"><input type="hidden" name="tf"><input type="hidden" name="month">'
             '<input type="hidden" name="months"><button>Download these prices from Bybit</button></form>'
@@ -487,22 +591,53 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
         return page("Replay backtest", body, user, token)
 
 
-def _tested_table(cur: dict, tf: str) -> str:
-    """Every strategy the pick tested, best first, with why each one was or wasn't kept, and how much
-    price history each pair had."""
+def _tested_table(cur: dict, tf: str, hidden: str = "") -> str:
+    """Every strategy the pick tested, best first, with its full results and why the rules would or
+    wouldn't keep it, as a form: the admin ticks which to keep (the kept ones start ticked), and how
+    much price history each pair had."""
     results = cur.get("results") or []
     if not results:
         return ""
     kept = set(cur.get("picked", []))
+    fewest = cur.get("min_trades", picks.MIN_TRADES)
+
+    def rule(r: dict) -> str:
+        why = picks.why_not(r, fewest)
+        return '<span class="good">passes the rules</span>' if not why else _e(why)
+
+    def quarters(r: dict) -> str:
+        qs = r.get("quarters") or {}
+        return ", ".join(f'{_e(q)} <span class="{"good" if v > 0 else "bad"}">{v:+.2f}R</span>'
+                         for q, v in qs.items()) or "no trades"
+
     rows = "".join(
-        f'<tr><td>{_e(r["name"])}</td><td>{r["trades"]}</td><td>{r["win_rate"]:.0f}%</td>'
+        f'<tr><td style="min-width:10em"><label class="keep-tick"><input type="checkbox" name="keep" value="{_e(r["id"])}" data-r="{r["total_r"]}"'
+        f'{" checked" if r["id"] in kept else ""}> {_e(r["name"])}</label></td>'
+        f'<td>{r["trades"]}</td><td>{r["win_rate"]:.0f}%</td>'
         f'<td class="{"good" if r["total_r"] > 0 else "bad"}">{r["total_r"]:+.2f}R</td>'
+        f'<td>{(r["total_r"] / r["trades"] if r["trades"] else 0):+.2f}R</td>'
         f'<td>{r["quarters_up"]} of {r["quarters_up"] + r["quarters_down"]}</td>'
-        f'<td class="small">{"<span class=good>kept</span>" if r["id"] in kept else _e(picks.why_not(r, cur.get("min_trades", picks.MIN_TRADES)))}</td></tr>'
+        f'<td class="small">{quarters(r)}</td><td class="small">{rule(r)}'
+        f'{" · few trades, could be luck" if 0 < r["trades"] < picks.MIN_TRADES else ""}</td></tr>'
         for r in sorted(results, key=lambda r: r["total_r"], reverse=True))
-    out = (f'<details><summary class="small">All {len(results)} tested strategies and why each was or wasn\'t kept'
-           '</summary><table><tr><th>Strategy</th><th>Trades</th><th>Win %</th><th>Total</th>'
-           f'<th>Quarters up</th><th>Result</th></tr>{rows}</table>')
+    rule_ids = cur.get("rule_picked") if cur.get("hand") else None
+    note = (f'<p class="small">You chose these by hand{(" (" + _e(cur["by"]) + ")") if cur.get("by") else ""}; '
+            f'the rules alone would keep {len(rule_ids)}.</p>' if rule_ids is not None else "")
+    out = (f'<details open><summary><b>Choose which to keep ({len(results)} tested)</b></summary>'
+           '<p class="small muted">Every strategy the pick tested, best total first, after fees. Tick the ones you '
+           f'want {_e(tf)} WIN strategies on this engine, even ones the rules skip (for example fewer than '
+           f'{fewest} trades), then press Keep the ticked strategies. No new test runs; the others stop trading '
+           f'{_e(tf)} on this engine. Few trades means the result could be luck: a strategy with 2 winning trades '
+           'has shown very little.</p>' + note +
+           f'<form method="post" action="/replay/pick/choose" class="pick-choose">{hidden}'
+           f'<input type="hidden" name="tf" value="{_e(tf)}">'
+           '<div class="row"><button type="button" class="ghost" data-tick="all">Tick all</button>'
+           '<button type="button" class="ghost" data-tick="none">Tick none</button>'
+           '<button type="button" class="ghost" data-tick="profit">Tick all in profit</button></div>'
+           '<table><tr><th>Strategy</th><th>Trades</th><th>Win %</th><th>Total</th>'
+           '<th>Per trade</th><th>Quarters up</th><th style="min-width:11em">Each quarter</th>'
+           '<th style="min-width:15em">Rules</th></tr>'
+           f'{rows}</table><button>Keep the ticked strategies</button></form>')
     bars = cur.get("bars") or {}
     step = TIMEFRAME_MS.get(tf)
     if bars and step and cur.get("since") and cur.get("at"):
