@@ -114,7 +114,7 @@ async def cmd_collect(s: Settings, args) -> int:
     async def quick() -> None:
         """Auto scan on: fetch the just-closed candle of each chart whose candle closed since the last
         fetch (on 1m charts each minute, on 4h charts every 4 hours), so paper trading sees it in seconds."""
-        if not fast or not wallet.autoscan(auto_path):
+        if not fast or not 0 < wallet.autoscan(auto_path) < wallet.FULL_SCAN_SECONDS:
             return
         now = int(time.time() * 1000) - CLOSE_LAG_MS
         due = [c for c in fast if closed_since(c[5], fast_at[0], now)]
@@ -221,7 +221,7 @@ async def cmd_collect(s: Settings, args) -> int:
             end = time.monotonic() + args.interval
             while (left := end - time.monotonic()) > 0:  # with Auto scan on, quick fetches meanwhile
                 auto = wallet.autoscan(auto_path)
-                await asyncio.sleep(min(left, auto) if auto else left)
+                await asyncio.sleep(min(left, auto) if 0 < auto < wallet.FULL_SCAN_SECONDS else left)
                 await quick()
     finally:
         for a in adapters.values():

@@ -362,9 +362,15 @@ class PaperTrader:
         if self.events is not None:
             self.events.emit("start", "paper service started")
         n, last, seen = 0, None, None  # passes run, when the last began, candle databases' versions then
+        full = time.monotonic()  # when the last full scan (Scan now or Auto scan) ran
         try:
             while stop_after is None or n < stop_after:
                 manual = wallet.take_scan_request(self.scan_path)
+                auto = wallet.autoscan(self.autoscan_path)
+                if manual is None and auto >= wallet.FULL_SCAN_SECONDS and time.monotonic() - full >= auto:
+                    manual = {"by": "", "auto": auto}  # Auto scan's full scan is due
+                if manual is not None:
+                    full = time.monotonic()
                 versions = self._versions()
                 if manual is not None or last is None or time.monotonic() - last >= interval - 0.5 or versions != seen:
                     last, seen = time.monotonic(), versions
@@ -380,9 +386,8 @@ class PaperTrader:
                         beat.beat(open=len(self.state["open"]))
                     n += 1
                 if stop_after is None or n < stop_after:
-                    auto = wallet.autoscan(self.autoscan_path)
-                    self._wait(max(0.0, interval - (time.monotonic() - last)) if not auto
-                               else min(auto, max(0.0, interval - (time.monotonic() - last))))
+                    left = max(0.0, interval - (time.monotonic() - last))
+                    self._wait(min(auto, left) if 0 < auto < wallet.FULL_SCAN_SECONDS else left)
         except BaseException as exc:
             if self.events is not None and not isinstance(exc, KeyboardInterrupt):
                 self.events.emit("crash", f"paper service stopped: {exc!r}", level="error")
@@ -634,7 +639,9 @@ class PaperTrader:
             return
         row = {"at": now_ms, "strategies": strategies, "pairs": pairs, "blocked": blocked,
                "engines": {m: {"charts": checks_by[m], **self._pass_log[m]} for m in wallet.MARKETS}}
-        if manual is not None:
+        if manual is not None and manual.get("auto"):
+            row["auto"] = int(manual["auto"])
+        elif manual is not None:
             row["manual"] = str(manual.get("by") or "")
         elif not self._logged:
             row["started"] = True

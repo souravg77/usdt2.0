@@ -499,6 +499,9 @@ paper trading. Nothing trades real money.</p>
             _event("paper_autoscan", f"auto scan set to {_every(n) or 'off'} by {user}")
             if not n:
                 return "Auto scan is off: paper trading looks for new candles every minute."
+            if n >= wallet.FULL_SCAN_SECONDS:
+                return (f"Auto scan is on: every {_every(n)} paper trading scans every chart by itself, as if "
+                        "you pressed Scan now (Spot AI and Futures AI).")
             return (f"Auto scan is on: paper trading looks for a just-closed candle every {_every(n)} "
                     "(Spot AI and Futures AI), and the price collector fetches each chart's candle as it closes.")
         return _control_post(request, csrf, act, back="/trading" if back == "/trading" else "/scan-log")
@@ -1609,7 +1612,9 @@ def _every(seconds: int) -> str:
         return ""
     if seconds % 60:
         return f"{seconds} seconds"
-    return "1 minute" if seconds == 60 else f"{seconds // 60} minutes"
+    if seconds % 3600:
+        return "1 minute" if seconds == 60 else f"{seconds // 60} minutes"
+    return "1 hour" if seconds == 3600 else f"{seconds // 3600} hours"
 
 
 def _scan_now_form(csrf: str, paths, back: str = "/scan-log") -> str:
@@ -1625,12 +1630,16 @@ def _scan_now_form(csrf: str, paths, back: str = "/scan-log") -> str:
                  f'<input type="hidden" name="back" value="{_e(back)}">'
                  f'<label>Auto scan every <select name="seconds">{options}</select></label><button>Save</button>'
                  '<span class="small muted">'
-                 + (f"On: every {_every(auto)} paper trading looks for a candle that just closed and checks it "
+                 + (f"On: every {_every(auto)} paper trading scans every chart by itself, as if Scan now was "
+                    "pressed, besides its usual check once a minute. "
+                    "Strategies still trade closed candles of the timeframes ticked on the Trading page."
+                    if auto >= wallet.FULL_SCAN_SECONDS else
+                    f"On: every {_every(auto)} paper trading looks for a candle that just closed and checks it "
                     "straight away, and the price collector fetches each chart's candle as soon as it closes. "
                     "Strategies still trade closed candles of the timeframes ticked on the Trading page."
                     if auto else
-                    "Off: paper trading looks for new candles once a minute. Pick a time from 5 seconds to "
-                    "check each candle within seconds of its close.")
+                    "Off: paper trading looks for new candles once a minute. 5 to 30 seconds checks each candle "
+                    "within seconds of its close; 5 minutes to 4 hours runs a full scan (like Scan now) that often.")
                  + "</span></form>")
     return (f'<form method="post" action="/trading/paper/scan" class="row">{csrf}'
             f'<input type="hidden" name="back" value="{_e(back)}"><button>Scan now</button>'
@@ -1683,7 +1692,9 @@ def _scans_table(paper: dict, ws: str, now_ms: int, limit: int = 60) -> str:
                     + (f'<b class="good">{e.get("opened", 0)} opened</b>' if e.get("opened") else "0 opened")
                     + (f' · <span class="warn">{e["skipped"]} skipped</span> ({_e(reasons)})' if e.get("skipped")
                        else "" if e.get("opened") else " · no signal"))
-        if "manual" in s:
+        if s.get("auto"):
+            what = f'<b>Auto scan</b> (every {_every(s["auto"])}) · ' + what
+        elif "manual" in s:
             what = f'<b>Scan now</b>{" by " + _e(s["manual"]) if s["manual"] else ""} · ' + what
         elif s.get("started"):
             what = "<b>paper trader started</b> · " + what

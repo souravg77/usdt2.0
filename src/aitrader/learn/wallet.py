@@ -101,9 +101,11 @@ def take_scan_request(path: str) -> dict | None:
     return data if isinstance(data, dict) else {}
 
 
-# the Scan log's Auto scan choices, in seconds (0 = off): how often the paper trader looks for a
-# just-closed candle between its regular passes, and the collector fetches one
-AUTO_SCAN_SECONDS = (0, 5, 10, 15, 30, 60, 120, 300)
+# the Scan log's Auto scan choices, in seconds (0 = off). Under a minute: how often the paper trader
+# looks for a just-closed candle between its regular passes (and the collector fetches one); from
+# 5 minutes: how often it runs a full scan by itself, as if someone pressed Scan now
+AUTO_SCAN_SECONDS = (0, 5, 10, 15, 30, 300, 900, 1800, 3600, 7200, 14400)
+FULL_SCAN_SECONDS = 300  # choices from here on are full scans
 
 
 def autoscan_path(state_path: str) -> str:

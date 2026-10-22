@@ -647,6 +647,15 @@ def test_auto_scan_looks_every_few_seconds_but_only_passes_on_new_candles(tmp_pa
         trader.run(interval=60)
     assert waits[0] == 5  # looks every 5 seconds, not every minute
     assert len(ticks) == 2  # the first pass, then only once a new candle was stored
+    # 5 minutes to 4 hours: a full scan by itself that often, besides the usual pass each minute
+    wallet.set_autoscan(path, 1800)
+    ticks.clear(), waits.clear()
+    clock = iter(range(0, 10_000_000, 600))  # 10 minutes per look at the clock
+    monkeypatch.setattr(paper.time, "monotonic", lambda: next(clock))
+    with pytest.raises(KeyboardInterrupt):
+        trader.run(interval=60)
+    assert waits[0] <= 60  # the regular minute, not 30 minutes
+    assert any(t and t.get("auto") == 1800 for t in ticks) and None in ticks
     store.close()
     other.close()
 
@@ -664,6 +673,10 @@ def test_auto_scan_looks_every_few_seconds_but_only_passes_on_new_candles(tmp_pa
     assert wallet.autoscan(wallet.autoscan_path(paths.paper_state)) == 5
     page = client.get("/trading").text
     assert '<option value="5" selected>5 seconds</option>' in page and "On: every 5 seconds" in page
+    assert '<option value="300">5 minutes</option>' in page and '<option value="900">15 minutes</option>' in page
+    assert '<option value="14400">4 hours</option>' in page and '<option value="1800">30 minutes</option>' in page
+    r = client.post("/trading/paper/autoscan", data={"csrf": csrf, "seconds": "3600"}, follow_redirects=False)
+    assert "every+1+hour" in r.headers["location"] or "every%201%20hour" in r.headers["location"]
     r = client.post("/trading/paper/autoscan", data={"csrf": csrf, "seconds": "3"}, follow_redirects=False)
     assert "bad=1" in r.headers["location"]
 
