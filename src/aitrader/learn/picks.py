@@ -143,12 +143,17 @@ def _quarter(ms: int) -> str:
 
 
 def evaluate(entries: list[Entry], store: CandleStore, exchange: str, symbols: list[str], timeframe: str,
-             since_ms: int | None = None, cfg: BacktestConfig | None = None) -> list[dict]:
-    """Each strategy that trades ``timeframe``: its trades on every pair, totalled and by quarter."""
+             since_ms: int | None = None, cfg: BacktestConfig | None = None,
+             until_ms: int | None = None) -> list[dict]:
+    """Each strategy that trades ``timeframe``: its trades on every pair entered from ``since_ms`` to
+    ``until_ms``, totalled and by quarter. The candles before ``since_ms`` only warm the indicators up."""
+    from ..models import TIMEFRAME_MS
+
     cfg = cfg or BacktestConfig()
+    warm = since_ms - MIN_BARS * TIMEFRAME_MS[timeframe] if since_ms is not None else None
     frames = {}
     for sym in symbols:
-        candles = store.load(exchange, sym, timeframe, start=since_ms)
+        candles = store.load(exchange, sym, timeframe, start=warm, end=until_ms)
         if len(candles) >= MIN_BARS:
             frames[sym] = candles_to_frame(candles)
     out = []
@@ -164,8 +169,9 @@ def evaluate(entries: list[Entry], store: CandleStore, exchange: str, symbols: l
         trades = []
         for sym, df in frames.items():
             try:
-                trades += run_backtest(strat, with_context(strat, df, store, exchange, sym, timeframe),
-                                       exchange, sym, timeframe, cfg)
+                trades += [t for t in run_backtest(strat, with_context(strat, df, store, exchange, sym, timeframe),
+                                                   exchange, sym, timeframe, cfg)
+                           if since_ms is None or t.entry_ts >= since_ms]
             except Exception:
                 continue
         quarters: dict[str, float] = {}
