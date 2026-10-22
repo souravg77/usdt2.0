@@ -12,7 +12,7 @@ import time
 from datetime import datetime, timezone
 
 from .config import EXCHANGE, Settings
-from .data.downloader import download
+from .data.downloader import deepen, download
 from .data.feeds import LiveFeed
 from .data.quality import check_candles
 from .data.store import CandleStore
@@ -159,6 +159,13 @@ async def cmd_collect(s: Settings, args) -> int:
                                     log.info("%s %s %s %s +%d", ex, mkt, sym, tf, n)
                             except Exception as exc:
                                 log.warning("%s %s %s %s failed: %s", ex, mkt, sym, tf, exc)
+                if args.spot_history_days > 0:  # Spot AI's pairs keep their complete history, a bit each pass
+                    try:
+                        await deepen(adapter, store, jobs[0][2], s.timeframes,
+                                     int(time.time() * 1000) - args.spot_history_days * 86_400_000,
+                                     budget_s=args.history_budget)
+                    except Exception as exc:
+                        log.warning("%s spot history failed: %s", ex, exc)
             await asyncio.sleep(args.interval)
     finally:
         for a in adapters.values():
@@ -1603,6 +1610,11 @@ def build_parser() -> argparse.ArgumentParser:
     co.add_argument("--exchange", action="append", choices=EXCHANGES)
     co.add_argument("--interval", type=float, default=60, help="seconds between top-ups")
     co.add_argument("--backfill-days", type=int, default=30, help="history to fetch on first run")
+    co.add_argument("--spot-history-days", type=int, default=1095,
+                    help="Spot AI's pairs: keep this many days of history on every timeframe, fetched a bit "
+                         "each pass (default 1095, 3 years; 0 = off)")
+    co.add_argument("--history-budget", type=float, default=45,
+                    help="seconds per pass spent fetching that older history")
 
     st = sub.add_parser("stream", help="print live prices from the websocket feed")
     st.add_argument("--exchange", default=EXCHANGE, choices=EXCHANGES)
