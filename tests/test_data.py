@@ -221,6 +221,23 @@ async def test_a_hole_the_exchange_has_nothing_for_is_not_asked_every_minute(fak
     assert calls == [9 * 60_000]  # not again right away
 
 
+async def test_a_period_inside_a_gap_of_stored_candles_is_downloaded(fake_ccxt):
+    """Shawn's 30m Replay: candles were stored from before the month asked for and from recent
+    weeks but none in it, so no hole was seen and Bybit was never asked ("+0 candles")."""
+    import aitrader.data.downloader as dl
+
+    raw = [[i * 60_000, 1, 2, 0.5, 1.5, 1] for i in range(40)]
+    adapter = BybitAdapter(Settings(), client=fake_ccxt(raw), throttle=Throttle(1000, 1000))
+    store = CandleStore(":memory:")
+    store.upsert([Candle("bybit", "BTC/USDT", "1m", i * 60_000, 1, 2, 0.5, 1.5, 1) for i in (*range(5), *range(30, 35))])
+    dl._tried.clear()
+    n = await download(adapter, store, "BTC/USDT", "1m", 10 * 60_000, 20 * 60_000)
+    assert n == 10 and store.count("bybit", "BTC/USDT", "1m", 10 * 60_000, 20 * 60_000) == 10
+    # and a window that starts or ends inside a gap fills that edge
+    dl._tried.clear()
+    assert await download(adapter, store, "BTC/USDT", "1m", 7 * 60_000, 25 * 60_000) == 3 + 5
+
+
 async def test_download_fetches_an_old_month_page_by_page(fake_ccxt):
     """Bybit answers a kline request that has only a start with its newest bars, so a past month
     came back empty; each page must ask for its own start-to-end window."""
