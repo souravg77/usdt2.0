@@ -295,23 +295,34 @@ def test_replay_all_pairs_totals_and_downloads_the_missing(client):
                follow_redirects=False)
     assert d.status_code == 303 and d.headers["location"].startswith("/replay?symbol=*&tf=1h&month=2025-03")
     job = [j for j in runner.list() if j["meta"].get("kind") == "download"][0]
+    assert d.headers["location"].endswith("&download=" + job["id"])  # the page shows its progress
     assert job["steps"] == [["download", "--since", "2025-02-16", "--until", "2025-04-01", "--market", "spot",
-                             "--exchange", "bybit", "--timeframe", "1h", "--symbol", "BTC/USDT",
-                             "--symbol", "ETH/USDT"]]
+                             "--exchange", "bybit", "--timeframe", "1h", "--symbol", "ETH/USDT"]]  # only the missing
+    runner.wait_idle()
+    p = c.get(f"/api/replay/download/{job['id']}").json()
+    assert p["status"] == "done" and p["have"] == 0 and p["want"] == 44 * 24 and "first" not in p
 
 
-def test_replay_all_pairs_says_which_coins_were_listed_after_the_period(client):
-    # Shawn's Futures 30m: 5 pairs had no prices for Oct 2025 even after the download
+def test_replay_all_pairs_says_which_coins_bybit_had_no_prices_for(client):
+    # Shawn's Futures 1h from Oct 2025: every pair was called "listed later" from its first saved
+    # candle, but the collector keeps only the latest candles; only a finished download can tell
     from aitrader.models import Candle
 
-    c, _runner = client
+    c, runner = client
     c.post("/login", data={"user": "admin", "password": PW})
     jun = int(datetime(2025, 6, 10, tzinfo=timezone.utc).timestamp() * 1000)
     st = CandleStore("x.db")  # the client fixture runs in tmp_path
     st.upsert([Candle("bybit", "ETH/USDT", "1h", jun, 1, 2, 0.5, 1.5, 1)])
     st.close()
     r = c.get("/api/replay/all?tf=1h&month=2025-03&months=1").json()
-    assert r["missing"] == [] and r["later"] == ["ETH/USDT"]
+    assert r["missing"] == ["ETH/USDT"] and r["later"] == []  # not downloaded yet: offer the download
     eth = [p for p in r["pairs"] if p["symbol"] == "ETH/USDT"][0]
-    assert eth["first"] == jun and eth["first_text"].startswith("2025-06-10")
-    assert "listed later" in c.get("/static/replay.js").text
+    assert eth["first_text"].startswith("2025-06-10") and eth["downloaded"] is False
+    csrf = Auth("admin", PW, "k").csrf(c.cookies.get(COOKIE))
+    c.post("/replay/download-all", data={"csrf": csrf, "tf": "1h", "month": "2025-03", "months": "1"})
+    runner.wait_idle()
+    r = c.get("/api/replay/all?tf=1h&month=2025-03&months=1").json()
+    assert r["missing"] == [] and r["later"] == ["ETH/USDT"]  # downloaded and still empty: none on Bybit then
+    other = c.get("/api/replay/all?tf=1h&month=2025-01&months=1").json()
+    assert other["later"] == [] and "ETH/USDT" in other["missing"]  # a different period wasn't downloaded
+    assert "none on Bybit then" in c.get("/static/replay.js").text

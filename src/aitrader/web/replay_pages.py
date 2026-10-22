@@ -103,10 +103,11 @@ def _day_ms(day: str) -> int:
 
 
 def download_status(status: str, have: int, since_ms: int, until_ms: int, tf: str, error: str = "",
-                    ahead: str = "") -> dict:
-    """How far a download job has got: the share of the period's candles already saved. Bybit can
-    have gaps (or a pair listed later), so only a finished job counts as 100%."""
-    want = max(1, (until_ms - since_ms) // TIMEFRAME_MS[tf])
+                    ahead: str = "", pairs: int = 1) -> dict:
+    """How far a download job has got: the share of the period's candles already saved (over
+    ``pairs`` pairs). Bybit can have gaps (or a pair listed later), so only a finished job counts as
+    100%."""
+    want = max(1, (until_ms - since_ms) // TIMEFRAME_MS[tf]) * max(1, pairs)
     done = status == "done"
     pct = 100 if done else min(99, int(have * 100 / want))
     return {"status": status, "have": have, "want": want, "pct": pct, "error": error, "ahead": ahead}
@@ -283,21 +284,35 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
         strategies = sorted(({**b, "name": names.get(b["id"], b["id"]), "total_r": round(b["total_r"], 2),
                               "pairs": len(b["pairs"])} for b in by_strat.values()),
                             key=lambda b: b["total_r"], reverse=True)
-        # a pair with no prices in the period: when its saved prices start, if any are saved (a coin
-        # Bybit listed after the period has none to download for it)
+        # a pair with no prices in the period: when its saved prices start, if any are saved. Only a
+        # finished download of this period that still left it empty shows Bybit had none then (the
+        # coin was listed later); the first saved candle alone can't, since the collector keeps
+        # only the latest few hundred
+        start_ms = int(start.timestamp() * 1000)
         end_ms = int(_add_months(start, months).timestamp() * 1000)
-        store = CandleStore(db_for(settings.db_path, "futures" if futures_mode() else "spot"))
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        tried = set()
+        for j in jobs.list():
+            m = j.get("meta") or {}
+            if (j.get("status") == "done" and m.get("kind") == "download" and m.get("market") == ws()
+                    and m.get("tf") == tf and m.get("since_ms", now_ms) <= start_ms
+                    and m.get("until_ms", 0) >= min(end_ms, now_ms) - 86_400_000):
+                tried.update(m.get("symbols") or [m.get("symbol")])
+        store = CandleStore(db_for(settings.db_path, ws()))
         try:
             for p in per_pair:
-                first = store.first_ts(exchange, p["symbol"], tf) if not p["candles"] else None
-                if first is not None and first >= end_ms:
-                    p["first"], p["first_text"] = first, clock.local(first / 1000)[:10]
+                if p["candles"]:
+                    continue
+                first = store.first_ts(exchange, p["symbol"], tf)
+                if first is not None:
+                    p["first_text"] = clock.local(first / 1000)[:10]
+                p["downloaded"] = p["symbol"] in tried
         finally:
             store.close()
-        return {"timeframe": tf, "start": int(start.timestamp() * 1000), "months": months, "pairs": per_pair,
+        return {"timeframe": tf, "start": start_ms, "months": months, "pairs": per_pair,
                 "strategies": strategies,
-                "missing": [p["symbol"] for p in per_pair if not p["candles"] and "first" not in p],
-                "later": [p["symbol"] for p in per_pair if "first" in p]}
+                "missing": [p["symbol"] for p in per_pair if not p["candles"] and not p["downloaded"]],
+                "later": [p["symbol"] for p in per_pair if not p["candles"] and p["downloaded"]]}
 
     @app.get("/api/replay/all")
     async def api_replay_all(request: Request, tf: str = "1h", month: str = "", months: int = 1,
@@ -329,16 +344,21 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
         since = (start - timedelta(milliseconds=WARMUP_BARS * TIMEFRAME_MS[tf])).strftime("%Y-%m-%d")
         until = min(_add_months(start, months), datetime.now(timezone.utc),
                     start + timedelta(milliseconds=MAX_BARS * TIMEFRAME_MS[tf])).strftime("%Y-%m-%d")
-        sym_args = [a for sym in pairs() for a in ("--symbol", sym)]
-        jobs.submit(f"Download {tf} for every {ws()} pair from {month}",
-                    [["download", "--since", since, "--until", until, "--market", ws(), "--exchange", exchange,
-                      "--timeframe", tf, *sym_args]],
-                    meta={"kind": "download", "by": user, "market": ws()})
+        since_ms, until_ms = _day_ms(since), _day_ms(until)
+        store = CandleStore(db_for(settings.db_path, ws()))
+        try:  # only the pairs with no prices for the period (all of them if none is missing)
+            syms = [s for s in pairs() if not store.count(exchange, s, tf, since_ms, until_ms)] or pairs()
+        finally:
+            store.close()
+        sym_args = [a for sym in syms for a in ("--symbol", sym)]
+        job_id = jobs.submit(f"Download {tf} for {len(syms)} {ws()} pairs from {month}",
+                             [["download", "--since", since, "--until", until, "--market", ws(),
+                               "--exchange", exchange, "--timeframe", tf, *sym_args]],
+                             meta={"kind": "download", "by": user, "market": ws(), "tf": tf, "symbols": syms,
+                                   "since_ms": since_ms, "until_ms": until_ms})
         cache.clear()
         q = f"symbol=*&tf={_q(tf)}&month={_q(month)}&months={months}&strategy={_q(strategy)}"
-        return RedirectResponse(f"/replay?{q}&msg=" + _q(f"Downloading {tf} prices for all {len(pairs())} pairs. "
-                                                          "Press Load again when it is done (see Recent jobs on "
-                                                          "the Overview page)."), status_code=303)
+        return RedirectResponse(f"/replay?{q}&download={job_id}", status_code=303)
 
     @app.get("/static/replay.js")
     def replay_js():
@@ -387,14 +407,15 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
             running = [j for j in jobs.list() if j["status"] == "running"
                        and j.get("meta", {}).get("kind") == "download"]
             ahead = running[0]["title"] if running else ""
+        syms = meta.get("symbols") or [meta["symbol"]]  # one pair, or All pairs' missing ones
         store = CandleStore(db_for(settings.db_path, meta.get("market", "spot")))
         try:
-            have = store.count(exchange, meta["symbol"], meta["tf"], meta["since_ms"], meta["until_ms"])
-            first = store.first_ts(exchange, meta["symbol"], meta["tf"]) if not have else None
+            have = sum(store.count(exchange, s, meta["tf"], meta["since_ms"], meta["until_ms"]) for s in syms)
+            first = store.first_ts(exchange, syms[0], meta["tf"]) if not have and len(syms) == 1 else None
         finally:
             store.close()
         out = download_status(job["status"], have, meta["since_ms"], meta["until_ms"], meta["tf"],
-                              job.get("error", ""), ahead)
+                              job.get("error", ""), ahead, len(syms))
         if first is not None and first >= meta["until_ms"]:  # nothing then: the coin was listed later
             out["first"] = first
             out["first_text"] = clock.local(first / 1000)[:10]
