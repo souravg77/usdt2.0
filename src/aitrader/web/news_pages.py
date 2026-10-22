@@ -205,10 +205,12 @@ def _feeds(f: dict, symbols: list[str] | None = None, name: str = "") -> str:
     if tiles:
         out += '<h2>Sentiment</h2><div class="stats">' + "".join(tiles) + "</div>"
     crypto = f.get("crypto_headlines") or []
-    lists = [("crypto_headlines", "Crypto headlines", crypto)]
+    bybit = f.get("bybit_announcements") or []
+    lists = [("bybit", "Bybit announcements", bybit), ("crypto_headlines", "Crypto headlines", crypto)]
     if symbols is not None:
-        mine = [i for i in crypto if _mentions(i.get("title", ""), symbols)]
+        mine = [i for i in bybit + crypto if _mentions(i.get("title", ""), symbols)]
         lists = [("mine", f"Headlines about the {name} pairs", mine),
+                 ("bybit", "Bybit announcements", bybit),
                  ("crypto_headlines", "Other crypto headlines", [i for i in crypto if i not in mine])]
     lists.append(("world_headlines", "World and economic headlines", f.get("world_headlines") or []))
     for _key, title, items in lists:
@@ -216,7 +218,7 @@ def _feeds(f: dict, symbols: list[str] | None = None, name: str = "") -> str:
             out += (f'<details class="card health"><summary>{title} ({len(items)})</summary><ul class="small">'
                     + "".join(f'<li>{_link(i["url"], i["title"])} <span class="muted">· {_e(i["source"])}'
                               f'{" · " + _ms(i["published"]) if i.get("published") else ""}</span></li>'
-                              for i in items[:40]) + "</ul></details>")
+                              for i in items[:100]) + "</ul></details>")
     if f.get("errors"):
         out += f'<p class="muted small">Not reachable this time: {_e(", ".join(f["errors"]))}</p>'
     return out

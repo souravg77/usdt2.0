@@ -18,6 +18,7 @@ import os
 import urllib.request
 
 from ..learn.extract import API_URL, DEFAULT_MODEL, anthropic_headers
+from .feeds import BYBIT_NEWS_DAYS
 
 RISKS = ("low", "normal", "elevated", "high")
 DEMAND = ("falling", "steady", "rising", "hype")
@@ -110,6 +111,8 @@ def _prompt(symbols: list[str], feeds: dict) -> str:
     return (f"Pairs: {', '.join(symbols)}\n\n"
             f"Crypto Fear & Greed index: {fg_text}\n"
             f"Trending in CoinGecko searches: {trend}\n\n"
+            f"Bybit announcements (the exchange we trade on; listings, delistings, maintenance, last "
+            f"{BYBIT_NEWS_DAYS} days):\n{lines(feeds.get('bybit_announcements', []), 40)}\n\n"
             f"Crypto headlines (last 24h):\n{lines(feeds.get('crypto_headlines', []), 25)}\n\n"
             f"World headlines (last 24h):\n{lines(feeds.get('world_headlines', []), 25)}\n\n"
             f"{_x_text(feeds.get('x'))}"
