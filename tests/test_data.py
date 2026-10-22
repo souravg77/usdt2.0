@@ -263,6 +263,24 @@ async def test_spot_pairs_keep_their_complete_history_a_chunk_at_a_time(fake_ccx
     assert store2.first_ts("bybit", "BTC/USDT", "1m") == 99 * 60_000
 
 
+async def test_top_up_fetches_only_the_newest_candles(fake_ccxt):
+    """Shawn's stale prices: a 4h candle reached paper trading 95 minutes after it closed, because
+    each collector pass filled history and holes for every chart before the next chart's newest
+    candle. ``top_up`` fetches only from the newest stored candle, so every chart is fresh first."""
+    import aitrader.data.downloader as dl
+
+    raw = [[i * 60_000, 1, 2, 0.5, 1.5, 1] for i in range(100)]
+    adapter = BybitAdapter(Settings(), client=fake_ccxt(raw), throttle=Throttle(1000, 1000))
+    store = CandleStore(":memory:")
+    store.upsert([Candle("bybit", "BTC/USDT", "1m", i * 60_000, 1, 2, 0.5, 1.5, 1)
+                  for i in (*range(10), *range(80, 90))])  # a hole from 10 to 79, newest at 89
+    dl._tried.clear()
+    assert await dl.top_up(adapter, store, "BTC/USDT", "1m") == 10  # 90..99, the hole left for later
+    assert store.count("bybit", "BTC/USDT", "1m", 10 * 60_000, 80 * 60_000) == 0
+    assert store.last_ts("bybit", "BTC/USDT", "1m") == 99 * 60_000
+    assert await dl.top_up(adapter, store, "BTC/USDT", "5m") is None  # nothing stored: download's job
+
+
 async def test_download_fetches_an_old_month_page_by_page(fake_ccxt):
     """Bybit answers a kline request that has only a start with its newest bars, so a past month
     came back empty; each page must ask for its own start-to-end window."""

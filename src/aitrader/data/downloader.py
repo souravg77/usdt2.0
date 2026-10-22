@@ -53,6 +53,19 @@ async def download(
                                 known={last} if last is not None else set())
 
 
+async def top_up(adapter: ExchangeAdapter, store: CandleStore, symbol: str, timeframe: str,
+                 drop_open_candle: bool = True) -> int | None:
+    """Only the candles since the newest stored one (fetched again, as ``download`` does): the
+    cheap first step of a collector pass, so every chart has its just-closed candle within a minute
+    or so, however long the history and hole filling after it takes. None when nothing is stored
+    yet (``download`` fetches the first history)."""
+    last = store.last_ts(adapter.name, symbol, timeframe)
+    if last is None:
+        return None
+    return await _fetch(adapter, store, symbol, timeframe, last, int(time.time() * 1000), drop_open_candle,
+                        known={last})
+
+
 async def deepen(adapter: ExchangeAdapter, store: CandleStore, symbols, timeframes, start_ms: int,
                  budget_s: float = 45.0, chunk_bars: int = 10_000) -> int:
     """Walk each pair's stored history back towards ``start_ms``, one chunk (``chunk_bars``

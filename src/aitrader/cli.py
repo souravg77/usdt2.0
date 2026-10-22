@@ -12,7 +12,7 @@ import time
 from datetime import datetime, timezone
 
 from .config import EXCHANGE, Settings
-from .data.downloader import deepen, download
+from .data.downloader import deepen, download, top_up
 from .data.feeds import LiveFeed
 from .data.quality import check_candles
 from .data.store import CandleStore
@@ -102,6 +102,7 @@ async def cmd_collect(s: Settings, args) -> int:
     fstore = CandleStore(futures_db_path(s.db_path))  # Futures AI's perpetual candles, apart from spot
     exchanges = args.exchange or EXCHANGES
     adapters = {ex: make_adapter(ex, s) for ex in exchanges}
+    backlog: dict[str, int] = {}  # where the history filling stopped last pass, per exchange
     try:
         while True:
             since = int(time.time() * 1000) - args.backfill_days * 86_400_000
@@ -147,18 +148,42 @@ async def cmd_collect(s: Settings, args) -> int:
                     ("futures", fstore, configured_symbols(s.symbols, market="futures",
                                                            keep=open_paper_symbols(PAPER_STATE, "futures")))]
             for ex, adapter in adapters.items():
+                began = time.monotonic()
+                # first every chart's newest candles (one request each), so paper trading reads a
+                # just-closed candle within a minute or so; the slower history and hole filling
+                # comes after, within a time budget, carrying on next pass where it stopped
+                todo, empty = [], []  # empty: charts with nothing stored yet (a new pair), filled first
                 for mkt, db, symbols in jobs:
                     source = adapter if mkt == "spot" else PerpCandles(adapter)
                     for sym in symbols:
                         for tf in s.timeframes:
+                            n = 0
                             try:
-                                # at least the candles a strategy needs on this timeframe (250 daily
-                                # candles are far more than --backfill-days)
-                                n = await download(source, db, sym, tf, min(since, history_start(tf)))
+                                n = await top_up(source, db, sym, tf)
                                 if n:
                                     log.info("%s %s %s %s +%d", ex, mkt, sym, tf, n)
                             except Exception as exc:
                                 log.warning("%s %s %s %s failed: %s", ex, mkt, sym, tf, exc)
+                            (empty if n is None else todo).append((mkt, db, source, sym, tf))
+                fresh_s = time.monotonic() - began
+                start = backlog.get(ex, 0) % max(1, len(todo))
+                done = 0
+                for i, (mkt, db, source, sym, tf) in enumerate(empty + todo[start:] + todo[:start]):
+                    if i >= len(empty) and time.monotonic() - began - fresh_s > args.backfill_budget:
+                        break
+                    try:
+                        # at least the candles a strategy needs on this timeframe (250 daily
+                        # candles are far more than --backfill-days)
+                        n = await download(source, db, sym, tf, min(since, history_start(tf)))
+                        if n:
+                            log.info("%s %s %s %s +%d", ex, mkt, sym, tf, n)
+                    except Exception as exc:
+                        log.warning("%s %s %s %s failed: %s", ex, mkt, sym, tf, exc)
+                    done += i >= len(empty)
+                backlog[ex] = start + done
+                log.info("%s pass: newest candles of %d charts in %.0fs, history of %d in %.0fs", ex,
+                         len(todo) + len(empty),
+                         fresh_s, done, time.monotonic() - began - fresh_s)
                 if args.spot_history_days > 0:  # Spot AI's pairs keep their complete history, a bit each pass
                     try:
                         await deepen(adapter, store, jobs[0][2], s.timeframes,
@@ -1613,6 +1638,8 @@ def build_parser() -> argparse.ArgumentParser:
     co.add_argument("--spot-history-days", type=int, default=1095,
                     help="Spot AI's pairs: keep this many days of history on every timeframe, fetched a bit "
                          "each pass (default 1095, 3 years; 0 = off)")
+    co.add_argument("--backfill-budget", type=float, default=120,
+                    help="seconds per pass for history and hole filling after the newest candles")
     co.add_argument("--history-budget", type=float, default=45,
                     help="seconds per pass spent fetching that older history")
 
