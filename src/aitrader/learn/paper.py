@@ -135,6 +135,7 @@ class PaperTrader:
         self._seen: dict = {}  # market -> newest candle close already evaluated (this process)
         self._logged = False  # the first pass after a start is always in the scan log
         self.scan_path = wallet.scan_request_path(state_path)  # the Scan now button's request
+        self.autoscan_path = wallet.autoscan_path(state_path)  # the Auto scan setting
         if os.path.exists(state_path):
             with open(state_path, encoding="utf-8") as fh:
                 self.state.update(json.load(fh))
@@ -353,31 +354,51 @@ class PaperTrader:
         return events
 
     def run(self, interval: float = 60.0, stop_after: int | None = None) -> None:
+        """A pass every ``interval`` seconds. With Auto scan on (the Scan log page) it also looks every
+        few seconds, and runs a pass as soon as the collector has stored a new candle."""
         from ..ops import Heartbeat
 
         beat = Heartbeat(self.events) if self.events is not None else None
         if self.events is not None:
             self.events.emit("start", "paper service started")
-        n = 0
+        n, last, seen = 0, None, None  # passes run, when the last began, candle databases' versions then
+        full = time.monotonic()  # when the last full scan (Scan now or Auto scan) ran
         try:
             while stop_after is None or n < stop_after:
-                try:
-                    ev = self.tick(manual=wallet.take_scan_request(self.scan_path))
-                    if any(ev.values()):
-                        log.info("paper tick: %s", {k: len(v) for k, v in ev.items()})
-                except Exception as exc:  # keep the service alive; the next tick retries
-                    log.exception("paper tick failed")
-                    if self.events is not None:
-                        self.events.emit("error", f"paper tick failed: {exc!r}", level="error")
-                if beat is not None:
-                    beat.beat(open=len(self.state["open"]))
-                n += 1
+                manual = wallet.take_scan_request(self.scan_path)
+                auto = wallet.autoscan(self.autoscan_path)
+                if manual is None and auto >= wallet.FULL_SCAN_SECONDS and time.monotonic() - full >= auto:
+                    manual = {"by": "", "auto": auto}  # Auto scan's full scan is due
+                if manual is not None:
+                    full = time.monotonic()
+                versions = self._versions()
+                if manual is not None or last is None or time.monotonic() - last >= interval - 0.5 or versions != seen:
+                    last, seen = time.monotonic(), versions
+                    try:
+                        ev = self.tick(manual=manual)
+                        if any(ev.values()):
+                            log.info("paper tick: %s", {k: len(v) for k, v in ev.items()})
+                    except Exception as exc:  # keep the service alive; the next tick retries
+                        log.exception("paper tick failed")
+                        if self.events is not None:
+                            self.events.emit("error", f"paper tick failed: {exc!r}", level="error")
+                    if beat is not None:
+                        beat.beat(open=len(self.state["open"]))
+                    n += 1
                 if stop_after is None or n < stop_after:
-                    self._wait(interval)
+                    left = max(0.0, interval - (time.monotonic() - last))
+                    self._wait(min(auto, left) if 0 < auto < wallet.FULL_SCAN_SECONDS else left)
         except BaseException as exc:
             if self.events is not None and not isinstance(exc, KeyboardInterrupt):
                 self.events.emit("crash", f"paper service stopped: {exc!r}", level="error")
             raise
+
+    def _versions(self) -> tuple:
+        """Both candle databases' write counters: unchanged means no new candle to look at."""
+        try:
+            return self.store.version(), self.futures_store.version()
+        except Exception:  # can't tell: treat it as new candles
+            return (time.monotonic(),)
 
     def _wait(self, interval: float) -> None:
         """Sleep until the next pass, waking early when someone presses Scan now."""
@@ -618,7 +639,9 @@ class PaperTrader:
             return
         row = {"at": now_ms, "strategies": strategies, "pairs": pairs, "blocked": blocked,
                "engines": {m: {"charts": checks_by[m], **self._pass_log[m]} for m in wallet.MARKETS}}
-        if manual is not None:
+        if manual is not None and manual.get("auto"):
+            row["auto"] = int(manual["auto"])
+        elif manual is not None:
             row["manual"] = str(manual.get("by") or "")
         elif not self._logged:
             row["started"] = True

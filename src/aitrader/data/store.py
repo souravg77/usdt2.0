@@ -102,6 +102,11 @@ class CandleStore:
             "SELECT COUNT(*) FROM candles WHERE exchange=? AND symbol=? AND timeframe=? AND ts>=? AND ts<?",
             (exchange, symbol, timeframe, start, end)).fetchone()[0]
 
+    def version(self) -> tuple[int, int]:
+        """Changes whenever a candle is written, by this connection or another process: a cheap
+        way to tell that nothing new arrived since the last look."""
+        return self.conn.execute("PRAGMA data_version").fetchone()[0], self.conn.total_changes
+
     def last_ts(self, exchange: str, symbol: str, timeframe: str) -> int | None:
         row = self.conn.execute(
             "SELECT MAX(ts) FROM candles WHERE exchange=? AND symbol=? AND timeframe=?",

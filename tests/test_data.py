@@ -318,3 +318,12 @@ async def test_history_before_a_new_listing_is_not_asked_every_minute(fake_ccxt)
     calls.clear()
     await download(adapter, store, "NEW/USDT", "1m", 0, 30 * 60_000)
     assert 0 not in calls  # not again right away
+
+
+def test_closed_since_tells_which_charts_have_a_new_candle():
+    """Auto scan fetches only the charts whose candle just closed: 1m each minute, 4h every 4 hours."""
+    from aitrader.data.downloader import closed_since
+
+    four_h = 4 * 3_600_000
+    assert closed_since("1m", 59_000, 61_000) and not closed_since("1m", 61_000, 65_000)
+    assert not closed_since("4h", four_h + 1, four_h + 3_600_000) and closed_since("4h", four_h - 1, four_h)

@@ -101,6 +101,35 @@ def take_scan_request(path: str) -> dict | None:
     return data if isinstance(data, dict) else {}
 
 
+# the Scan log's Auto scan choices, in seconds (0 = off). Under a minute: how often the paper trader
+# looks for a just-closed candle between its regular passes (and the collector fetches one); from
+# 5 minutes: how often it runs a full scan by itself, as if someone pressed Scan now
+AUTO_SCAN_SECONDS = (0, 5, 10, 15, 30, 300, 900, 1800, 3600, 7200, 14400)
+FULL_SCAN_SECONDS = 300  # choices from here on are full scans
+
+
+def autoscan_path(state_path: str) -> str:
+    return os.path.join(os.path.dirname(os.path.abspath(state_path)), "paper_autoscan.json")
+
+
+def autoscan(path: str) -> int:
+    """The Auto scan setting in seconds; 0 when it is off (the default)."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        n = int(data.get("seconds") or 0) if isinstance(data, dict) else 0
+    except (OSError, ValueError, TypeError):
+        return 0
+    return n if n in AUTO_SCAN_SECONDS else 0
+
+
+def set_autoscan(path: str, seconds: int, by: str = "") -> int:
+    if seconds not in AUTO_SCAN_SECONDS:
+        raise ValueError(f"auto scan must be one of {AUTO_SCAN_SECONDS} seconds")
+    _save_market(path, {"seconds": seconds, "by": by, "at": int(time.time() * 1000)})
+    return seconds
+
+
 FILTERS = ("ai", "teacher")
 
 

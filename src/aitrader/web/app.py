@@ -486,6 +486,26 @@ paper trading. Nothing trades real money.</p>
                     "minute or less; this page refreshes by itself.")
         return _control_post(request, csrf, act, back="/trading" if back == "/trading" else "/scan-log")
 
+    @app.post("/trading/paper/autoscan")
+    def trading_paper_autoscan(request: Request, csrf: str = Form(""), seconds: str = Form("0"),
+                               back: str = Form("/scan-log")):
+        def act(user):
+            from ..learn import wallet
+
+            try:
+                n = wallet.set_autoscan(wallet.autoscan_path(paths.paper_state), int(seconds), by=user)
+            except ValueError:
+                return "Pick one of the listed Auto scan times.", False
+            _event("paper_autoscan", f"auto scan set to {_every(n) or 'off'} by {user}")
+            if not n:
+                return "Auto scan is off: paper trading looks for new candles every minute."
+            if n >= wallet.FULL_SCAN_SECONDS:
+                return (f"Auto scan is on: every {_every(n)} paper trading scans every chart by itself, as if "
+                        "you pressed Scan now (Spot AI and Futures AI).")
+            return (f"Auto scan is on: paper trading looks for a just-closed candle every {_every(n)} "
+                    "(Spot AI and Futures AI), and the price collector fetches each chart's candle as it closes.")
+        return _control_post(request, csrf, act, back="/trading" if back == "/trading" else "/scan-log")
+
     def _event(kind: str, text: str, level: str = "info") -> None:
         from ..ops import EventLog
 
@@ -1586,11 +1606,41 @@ def _scan_steps(ws: str) -> str:
             "every one of the last 500 and the check that stopped it. The page refreshes every 30 seconds.</p></details>")
 
 
+def _every(seconds: int) -> str:
+    """5 -> "5 seconds", 60 -> "1 minute"; "" for 0 (off)."""
+    if not seconds:
+        return ""
+    if seconds % 60:
+        return f"{seconds} seconds"
+    if seconds % 3600:
+        return "1 minute" if seconds == 60 else f"{seconds // 60} minutes"
+    return "1 hour" if seconds == 3600 else f"{seconds // 3600} hours"
+
+
 def _scan_now_form(csrf: str, paths, back: str = "/scan-log") -> str:
-    """The Scan now button: the paper trader re-reads every chart's newest closed candle at once."""
+    """The Scan now button: the paper trader re-reads every chart's newest closed candle at once.
+    Below it the Auto scan choice: how often to look for a just-closed candle."""
     from ..learn import wallet
 
     waiting = os.path.exists(wallet.scan_request_path(paths.paper_state))
+    auto = wallet.autoscan(wallet.autoscan_path(paths.paper_state))
+    options = "".join(f'<option value="{n}"{" selected" if n == auto else ""}>{_every(n) or "Off"}</option>'
+                      for n in wallet.AUTO_SCAN_SECONDS)
+    auto_form = (f'<form method="post" action="/trading/paper/autoscan" class="row">{csrf}'
+                 f'<input type="hidden" name="back" value="{_e(back)}">'
+                 f'<label>Auto scan every <select name="seconds">{options}</select></label><button>Save</button>'
+                 '<span class="small muted">'
+                 + (f"On: every {_every(auto)} paper trading scans every chart by itself, as if Scan now was "
+                    "pressed, besides its usual check once a minute. "
+                    "Strategies still trade closed candles of the timeframes ticked on the Trading page."
+                    if auto >= wallet.FULL_SCAN_SECONDS else
+                    f"On: every {_every(auto)} paper trading looks for a candle that just closed and checks it "
+                    "straight away, and the price collector fetches each chart's candle as soon as it closes. "
+                    "Strategies still trade closed candles of the timeframes ticked on the Trading page."
+                    if auto else
+                    "Off: paper trading looks for new candles once a minute. 5 to 30 seconds checks each candle "
+                    "within seconds of its close; 5 minutes to 4 hours runs a full scan (like Scan now) that often.")
+                 + "</span></form>")
     return (f'<form method="post" action="/trading/paper/scan" class="row">{csrf}'
             f'<input type="hidden" name="back" value="{_e(back)}"><button>Scan now</button>'
             '<span class="small muted">'
@@ -1599,7 +1649,7 @@ def _scan_now_form(csrf: str, paths, back: str = "/scan-log") -> str:
                "Checks every strategy on every pair and ticked timeframe straight away, on the newest closed "
                "candle, instead of waiting for the next candle to close. A signal already handled is not "
                "taken twice.")
-            + "</span></form>")
+            + "</span></form>" + auto_form)
 
 
 def _idle_text(e: dict) -> str:
@@ -1642,7 +1692,9 @@ def _scans_table(paper: dict, ws: str, now_ms: int, limit: int = 60) -> str:
                     + (f'<b class="good">{e.get("opened", 0)} opened</b>' if e.get("opened") else "0 opened")
                     + (f' · <span class="warn">{e["skipped"]} skipped</span> ({_e(reasons)})' if e.get("skipped")
                        else "" if e.get("opened") else " · no signal"))
-        if "manual" in s:
+        if s.get("auto"):
+            what = f'<b>Auto scan</b> (every {_every(s["auto"])}) · ' + what
+        elif "manual" in s:
             what = f'<b>Scan now</b>{" by " + _e(s["manual"]) if s["manual"] else ""} · ' + what
         elif s.get("started"):
             what = "<b>paper trader started</b> · " + what

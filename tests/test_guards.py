@@ -610,6 +610,77 @@ def test_scan_now_rereads_every_chart_without_taking_a_signal_twice(tmp_path, mo
     assert client.post("/trading/paper/scan", data={"csrf": "x"}).status_code == 403
 
 
+def test_auto_scan_looks_every_few_seconds_but_only_passes_on_new_candles(tmp_path, monkeypatch):
+    """Shawn: an auto scan option with times, starting at 5 seconds."""
+    from fastapi.testclient import TestClient
+    from test_web import PW, login
+
+    from aitrader.config import Settings
+    from aitrader.data.store import CandleStore
+    from aitrader.learn import PaperTrader, paper
+    from aitrader.models import Candle
+    from aitrader.web import Auth, JobRunner, Paths, create_app
+
+    path = wallet.autoscan_path(str(tmp_path / "paper_state.json"))
+    assert wallet.autoscan(path) == 0  # off unless someone picks a time
+    assert wallet.set_autoscan(path, 5, by="shawn") == 5 and wallet.autoscan(path) == 5
+    with pytest.raises(ValueError):
+        wallet.set_autoscan(path, 7)
+
+    store = CandleStore(str(tmp_path / "c.db"))
+    other = CandleStore(str(tmp_path / "c.db"))  # the collector's own connection
+    trader = PaperTrader(store, str(tmp_path / "reg.json"), ["bybit"], ["BTC/USDT"],
+                         state_path=str(tmp_path / "paper_state.json"))
+    ticks, waits = [], []
+    monkeypatch.setattr(trader, "tick", lambda now_ms=None, manual=None: ticks.append(manual) or {})
+    clock = iter(range(0, 10_000))
+    monkeypatch.setattr(paper.time, "monotonic", lambda: next(clock))
+
+    def wait(seconds):
+        waits.append(seconds)
+        if len(waits) == 3:  # the collector stores a new candle
+            other.upsert([Candle("bybit", "BTC/USDT", "1m", 60_000, 1, 1, 1, 1, 1)])
+        if len(waits) > 8:
+            raise KeyboardInterrupt
+    monkeypatch.setattr(trader, "_wait", wait)
+    with pytest.raises(KeyboardInterrupt):
+        trader.run(interval=60)
+    assert waits[0] == 5  # looks every 5 seconds, not every minute
+    assert len(ticks) == 2  # the first pass, then only once a new candle was stored
+    # 5 minutes to 4 hours: a full scan by itself that often, besides the usual pass each minute
+    wallet.set_autoscan(path, 1800)
+    ticks.clear(), waits.clear()
+    clock = iter(range(0, 10_000_000, 600))  # 10 minutes per look at the clock
+    monkeypatch.setattr(paper.time, "monotonic", lambda: next(clock))
+    with pytest.raises(KeyboardInterrupt):
+        trader.run(interval=60)
+    assert waits[0] <= 60  # the regular minute, not 30 minutes
+    assert any(t and t.get("auto") == 1800 for t in ticks) and None in ticks
+    store.close()
+    other.close()
+
+    monkeypatch.chdir(tmp_path)
+    paths = Paths()
+    os.makedirs("data/learn")
+    client = TestClient(create_app(Settings(), Auth("admin", PW, "k"), JobRunner(str(tmp_path / "jobs"), env_file="none"),
+                                   paths))
+    login(client)
+    page = client.get("/scan-log").text
+    assert '<option value="5">5 seconds</option>' in page and "Off: paper trading looks" in page
+    csrf = page.split('name="csrf" value="')[1].split('"')[0]
+    r = client.post("/trading/paper/autoscan", data={"csrf": csrf, "seconds": "5"}, follow_redirects=False)
+    assert r.headers["location"].startswith("/scan-log?msg=Auto")
+    assert wallet.autoscan(wallet.autoscan_path(paths.paper_state)) == 5
+    page = client.get("/trading").text
+    assert '<option value="5" selected>5 seconds</option>' in page and "On: every 5 seconds" in page
+    assert '<option value="300">5 minutes</option>' in page and '<option value="900">15 minutes</option>' in page
+    assert '<option value="14400">4 hours</option>' in page and '<option value="1800">30 minutes</option>' in page
+    r = client.post("/trading/paper/autoscan", data={"csrf": csrf, "seconds": "3600"}, follow_redirects=False)
+    assert "every+1+hour" in r.headers["location"] or "every%201%20hour" in r.headers["location"]
+    r = client.post("/trading/paper/autoscan", data={"csrf": csrf, "seconds": "3"}, follow_redirects=False)
+    assert "bad=1" in r.headers["location"]
+
+
 def test_the_scan_log_says_why_an_engine_read_no_chart(tmp_path):
     """Shawn: Scan now showed Futures AI reading 0 charts with no reason."""
     from test_learn import EVERY_UP_BAR, fill_store, synthetic
