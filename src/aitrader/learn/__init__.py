@@ -12,14 +12,14 @@ testing the survivors on paper while the market runs.
 Nothing here can place a real order or unlock live trading.
 """
 
-from .extract import READ_OFF, Extraction, extract_strategies
+from .extract import Extraction, extract_strategies
 from .lab import Gate, evaluate
 from .paper import PaperConfig, PaperTrader, RetireRule
 from .registry import Entry, Registry, make_strategy
 from .rules import RuleError, RuleStrategy, spec_id, validate_spec
 
 __all__ = [
-    "READ_OFF", "Entry", "Extraction", "Gate", "PaperConfig", "PaperTrader", "Registry", "RetireRule",
+    "Entry", "Extraction", "Gate", "PaperConfig", "PaperTrader", "Registry", "RetireRule",
     "RuleError", "RuleStrategy", "evaluate", "extract_strategies",
     "make_strategy", "spec_id", "validate_spec",
 ]

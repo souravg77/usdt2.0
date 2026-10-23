@@ -1,9 +1,11 @@
 # How the agent learns strategies from books
 
-> **Reading new books is turned off.** `learn read` used Claude through the Anthropic API, which
-> the platform no longer uses; the local model is too small for it. Everything after the read step
-> (the backtest gate, paper trading, keep or retire) still runs, and `learn add-library` registers
-> the strategies already read from the supplied books.
+> **Books are read overnight by a local model.** `learn read` used Claude through the Anthropic
+> API, which the platform no longer uses. It now uses the local book model (`AITRADER_BOOK_MODEL`,
+> default `qwen2.5:3b`, in the `ollama` service), fed about 1,400 words at a time. Books uploaded on
+> the dashboard wait in a queue that the `books` service reads at night (`AITRADER_BOOK_HOURS`,
+> local time, default `0-6`). The model is small: a long book can take most of the night, and many
+> drafts fail the rule check and are dropped. Everything after the read step is unchanged.
 
 ```
 book (PDF) ──read──> draft strategies ──backtest gate──> paper trading ──results──> keep or retire
@@ -85,9 +87,9 @@ with `docker compose up -d` (it runs next to the collector).
 
 ## What you need
 
-- `learn read` is turned off: it needed Claude through the Anthropic API, which the platform no
-  longer uses, and the local model (the `ollama` service) is too small to write valid rules from a
-  book. `learn add-library` still registers the strategies already read from the supplied books.
+- The `ollama` service running for `learn read` (the book model downloads, about 2 GB, the first
+  time). Nothing leaves the server and nothing is paid per book. `learn read-queue` reads the next
+  book uploaded on the dashboard; the `books` service does that every night.
 - Enough history for the gate: download at least a year of candles for the timeframes the
   book's strategies use (`aitrader download --since 2024-01-01`).
 

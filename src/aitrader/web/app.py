@@ -291,17 +291,28 @@ data-tz-label="{_e(tz_label(now))}"{f' data-reload-ms="{int(refresh * 1000)}"' i
         user, token, redirect = guard(request)
         if redirect:
             return redirect
-        from ..learn import READ_OFF
+        from .. import llm
+        from ..learn import bookqueue
 
-        warn = f'<p class="warn">{_e(READ_OFF[0].upper() + READ_OFF[1:])}. Uploads are still added to the knowledge base.</p>'
+        window = bookqueue.window_text(bookqueue.hours())
+        rows = bookqueue.load(os.path.join(paths.books, "queue.json"))
         err = f'<p class="bad">{_e(error)}</p>' if error else ""
-        body = f"""{err}{warn}
+        body = f"""{err}
 <form method="post" action="/books" enctype="multipart/form-data" class="card">
 {_csrf(auth, token)}
-<p>Upload a trading book (PDF, Markdown or text, up to {MAX_UPLOAD // 2**20} MB). It is added to
-the knowledge base, where its passages can be searched (<code>aitrader kb search</code>).</p>
+<p>Upload a trading book (PDF, Markdown or text, up to {MAX_UPLOAD // 2**20} MB). It is added to the
+knowledge base straight away. Then, <b>overnight ({_e(window)} {_e(tz_label(time.time()))})</b>, the local model
+<code>{_e(llm.book_model_name())}</code> reads it and writes each concrete strategy as checked rules
+(long spot only, stop required, risk capped at 1%), which are backtested with fees and slippage;
+the ones that pass move to paper trading. Nothing trades real money.</p>
+<p class="small muted">The local model is small and slow: a long book can take most of the night, and
+many of its drafts fail the rule check and are dropped. A book started at night is finished even
+after {_e(window.split(" to ")[1])}; the next one waits for the next night.</p>
 <label>Book <input type="file" name="book" accept=".pdf,.md,.txt,application/pdf,text/plain" required></label>
+<label>Most strategies to keep <input type="number" name="max" value="12" min="1" max="30"></label>
+<label class="row"><input type="checkbox" name="test" value="1" checked> Backtest the new strategies</label>
 <button>Submit book</button></form>
+<h2>Books to read</h2>{_book_queue_table(rows)}
 <h2>Book jobs</h2>{_jobs_table(jobs.list())}"""
         return page("Submit a book", body, user, token)
 
@@ -320,9 +331,16 @@ the knowledge base, where its passages can be searched (<code>aitrader kb search
             path = await _save_upload(book, paths.books)
         except ValueError as exc:
             return RedirectResponse(f"/books?error={_q(str(exc))}", status_code=303)
-        steps = [["kb", "build", "--index", paths.kb_index]]  # reading it into strategies is off (READ_OFF)
-        job_id = jobs.submit(f"Book: {book.filename or os.path.basename(path)}", steps,
-                             {"book": path, "by": user})
+        from ..learn import bookqueue
+
+        try:
+            most = max(1, min(int(str(form.get("max", "12"))), 30))
+        except ValueError:
+            most = 12
+        job_id = jobs.submit(f"Book: {book.filename or os.path.basename(path)}",
+                             [["kb", "build", "--index", paths.kb_index]], {"book": path, "by": user})
+        bookqueue.add(path, by=user, max_strategies=most, test=bool(form.get("test")),
+                      path=os.path.join(paths.books, "queue.json"))
         return RedirectResponse(f"/jobs/{job_id}", status_code=303)
 
     @app.get("/jobs/{job_id}")
@@ -1101,6 +1119,29 @@ def _status_class(status: str) -> str:
     return {"done": "good", "paper": "good", "active": "good", "failed": "bad",
             "rejected": "bad", "retired": "muted", "archived": "muted", "shadow": "good",
             "live_eligible": "good", "live_enabled": "good", "under_review": "warn"}.get(status, "")
+
+
+def _book_queue_table(rows: list[dict]) -> str:
+    """The overnight book queue, newest first: what each book is doing or what came of it."""
+    if not rows:
+        return '<p class="muted">No books waiting.</p>'
+    cls = {"queued": "warn", "reading": "warn", "done": "good", "failed": "bad"}
+    text = {"queued": "waiting for the night", "reading": "reading now", "done": "done", "failed": "failed"}
+    out = "<table><tr><th>Added</th><th>Book</th><th>Status</th><th>Result</th></tr>"
+    for r in reversed(rows):
+        st = r.get("status", "")
+        result = r.get("summary") or ""
+        if st in ("reading", "failed"):  # where it is, or why it stopped: the end of its log
+            try:
+                with open(r.get("log", ""), encoding="utf-8", errors="replace") as fh:
+                    result = " · ".join(line.strip() for line in fh.readlines()[-2:]) or result
+            except OSError:
+                pass
+        out += (f'<tr><td class="small">{_ms(int(r.get("added", 0) * 1000))}</td>'
+                f'<td>{_e(os.path.basename(r.get("book", "")))}</td>'
+                f'<td><span class="badge {cls.get(st, "")}">{_e(text.get(st, st))}</span></td>'
+                f'<td class="small">{_e(result[:300])}</td></tr>')
+    return out + "</table>"
 
 
 def _jobs_table(jobs: list[dict]) -> str:

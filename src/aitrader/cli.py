@@ -612,7 +612,8 @@ def cmd_kb(_s: Settings, args) -> int:
 def cmd_learn(s: Settings, args) -> int:
     """The agent's own strategy pipeline: read a book, backtest the drafts, paper-trade survivors."""
     from .backtest import BacktestConfig
-    from .learn import READ_OFF, Entry, Registry, RuleError, evaluate, spec_id, PaperConfig, PaperTrader
+    from .learn import (Entry, Registry, RuleError, evaluate, extract_strategies, spec_id, PaperConfig,
+                        PaperTrader)
     from .learn.registry import UNTESTED
     from .strategies import STRATEGIES
 
@@ -645,8 +646,46 @@ def cmd_learn(s: Settings, args) -> int:
 
     cmd = args.learn_cmd
     if cmd == "read":
-        print(READ_OFF + " (`learn add-library` registers the strategies already read)", file=sys.stderr)
-        return 1
+        from . import llm
+        from .learn.extract import LOCAL_REPAIR_CHARS, LOCAL_WORDS_PER_PART, local_caller
+
+        print(f"reading {args.book} with the local model {llm.book_model_name()} (slow: many minutes "
+              "per part on one CPU core) ...", flush=True)
+        try:
+            ex = extract_strategies(args.book, local_caller(), max_strategies=args.max,
+                                    words_per_part=LOCAL_WORDS_PER_PART, repair_chars=LOCAL_REPAIR_CHARS,
+                                    progress=lambda s: print(f"  {s}", flush=True))
+        except Exception as exc:  # the local model unreachable, a broken file
+            print(f"could not read {args.book}: {type(exc).__name__}: {exc}", file=sys.stderr)
+            return 1
+        finally:
+            llm.unload(llm.book_model_name())  # its ~2.5 GB back before the backtests start
+        new = []
+        for spec in ex.specs:
+            e = Entry(id=spec_id(spec), kind="rule", name=spec["name"], spec=spec,
+                      source=f"{spec['source']['book']} {spec['source']['pages']}".strip())
+            if reg.add(e):
+                new.append(e)
+            print(f"  + {e.id:40} {e.source}\n      {spec['description'][:150]}")
+        for name, err in ex.rejected:
+            print(f"  - {name}: could not be written as rules ({err[:200]})")
+        for note in ex.notes:
+            print(f"  note {note[:300]}")
+        reg.save()
+        print(f"{len(new)} new strategies from \"{ex.book}\" -> {args.registry}", flush=True)
+        if args.test and new:
+            print("backtesting them:")
+            run_tests(new)
+        return 0
+    if cmd == "read-queue":
+        from .learn import bookqueue
+
+        if args.run:
+            bookqueue.serve(args.queue, args.registry)
+            return 0
+        row = bookqueue.run_next(args.queue, args.registry)
+        print("nothing queued" if row is None else f"{row['book']}: {row['status']} {row.get('summary', '')}")
+        return 0 if row is None or row["status"] == "done" else 1
     if cmd == "add-library":
         from .learn.library import library_specs
 
@@ -1728,10 +1767,14 @@ def build_parser() -> argparse.ArgumentParser:
     le.add_argument("--exchange", action="append", choices=EXCHANGES)
     le.add_argument("--symbol", action="append")
     le_sub = le.add_subparsers(dest="learn_cmd", required=True)
-    lr = le_sub.add_parser("read", help="turned off: reading a book needed the Anthropic API, which is no longer used")
+    lr = le_sub.add_parser("read", help="have the local book model read a book and draft strategies (slow)")
     lr.add_argument("book", help="PDF, Markdown or text file")
     lr.add_argument("--max", type=int, default=12, help="most strategies to keep from one book")
     lr.add_argument("--test", action="store_true", help="backtest the new drafts straight away")
+    lq = le_sub.add_parser("read-queue", help="read the next book uploaded on the dashboard; with --run, "
+                                              "the books service: read queued books at night")
+    lq.add_argument("--run", action="store_true", help="keep running, reading during AITRADER_BOOK_HOURS")
+    lq.add_argument("--queue", default="data/books/queue.json")
     ll = le_sub.add_parser("add-library", help="register the strategies already read from the supplied books")
     ll.add_argument("--book", help="only books whose title contains this")
     ll.add_argument("--test", action="store_true", help="backtest them straight away")

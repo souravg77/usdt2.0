@@ -58,11 +58,12 @@ services:
     command: ["news", "run"]
     depends_on: [ollama]
 
-  # The local AI model: Ollama serving a small open-source model (AITRADER_LOCAL_MODEL, default
-  # qwen2.5:1.5b, about 1 GB, downloaded on first use into the ollama_models volume). Only the
-  # app containers reach it; nothing is published. It gets the CPU only when the trading services
-  # don't need it (cpu_shares), and unloads the model 5 minutes after the last brief to give the
-  # memory back. Trader research, book reading and change requests needed Claude and are off.
+  # The local AI models: Ollama serving small open-source models, downloaded on first use into the
+  # ollama_models volume: the news brief's (AITRADER_LOCAL_MODEL, qwen2.5:1.5b, about 1 GB) and the
+  # night-time book reader's (AITRADER_BOOK_MODEL, qwen2.5:3b, about 2 GB; one loaded at a time).
+  # Only the app containers reach it; nothing is published. It gets the CPU only when the trading
+  # services don't need it (cpu_shares), and unloads a model 5 minutes after its last use to give
+  # the memory back. Trader research and change requests needed Claude and are off.
   ollama:
     image: ollama/ollama:0.35.1
     environment:
@@ -78,11 +79,20 @@ services:
       - no-new-privileges:true
     cap_drop: [ALL]
     cpu_shares: 256  # a quarter of the default weight: trading comes first on a busy core
-    mem_limit: 2g
+    mem_limit: 3g  # the 3B book model with its 6k-token context needs about 2.5 GB
     pids_limit: 256
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "3" }
+
+  # Reads the books uploaded on the dashboard, at night only (AITRADER_BOOK_HOURS, local time,
+  # default 0-6), with the local book model; the new strategies are backtested and the ones that
+  # pass go to paper trading. Idle the rest of the day.
+  books:
+    <<: *app
+    command: ["learn", "read-queue", "--run"]
+    depends_on: [ollama]
+    mem_limit: 1536m  # the backtests after a book (the model's memory is in the ollama service)
 
   # Paper-trades every strategy that passed `aitrader learn test`, with the calendar, market
   # context and AI filters. Never sends exchange orders.

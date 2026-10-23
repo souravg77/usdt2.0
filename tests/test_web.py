@@ -91,14 +91,20 @@ def test_submit_book_runs_the_pipeline(web):
     saved = job["meta"]["book"]
     assert saved.startswith("data/books/") and "/" not in saved[len("data/books/"):]
     assert re.search(r"evil-name\.md$", saved)
-    # the book is indexed into the knowledge base only: reading it into strategies is off
+    # indexed into the knowledge base now; read into strategies overnight by the local book model
     assert [s[0] for s in job["steps"]] == ["kb"]
+    from aitrader.learn import bookqueue
+
+    queued = bookqueue.load(os.path.join(paths.books, "queue.json"))
+    assert [(q["book"], q["max"], q["test"], q["status"]) for q in queued] == [(saved, 5, True, "queued")]
     assert job["status"] == "done", runner.log_text(job_id)
     assert json.load(open("data/kb/index.json"))["documents"]
     page = client.get(f"/jobs/{job_id}").text
     assert "done" in page and "aitrader kb build" in page
 
-    assert "reading books is turned off" in client.get("/books").text.lower()
+    page = client.get("/books").text
+    assert "overnight (00:00 to 06:00" in page and "qwen2.5:3b" in page
+    assert "Books to read" in page and "evil-name.md" in page and "waiting for the night" in page
 
 
 def test_rejects_bad_uploads(web):
