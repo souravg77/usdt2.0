@@ -1038,3 +1038,63 @@ def test_each_engine_trades_only_the_winners_its_own_view_picked(tmp_path):
     fut = {k.split("|")[0] for k in opened if k.endswith("|futures")}
     assert spot == {"win1h-up"} and fut == {"fwin1h-up"}
     store.close()
+
+
+def test_closing_by_hand_uses_the_price_now_and_wakes_the_trader(tmp_path):
+    """Shawn: quick trade close. A Close press closes at the live price the dashboard read (or the
+    newest 1-minute candle), not at the close of the trade's own candle, and wakes the trader at once."""
+    import time as _time
+
+    from aitrader.trade import Control
+
+    df = synthetic(n=900)
+    store = CandleStore(str(tmp_path / "c.db"))
+    fill_store(store, df)
+    reg_path = str(tmp_path / "reg.json")
+    reg = Registry(reg_path)
+    reg.add(Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR), status="paper"))
+    reg.save()
+    control = Control(str(tmp_path / "control.json"))
+    spot_only(str(tmp_path / "s.json"))
+    trader = PaperTrader(store, reg_path, ["bybit"], ["BTC/USDT"], state_path=str(tmp_path / "s.json"),
+                         control=control)
+    t = None
+    for i in range(600, 900):
+        t = int(df.ts.iloc[i]) + H
+        trader.tick(now_ms=t)
+        if any(p["filled"] for p in trader.state["open"].values()):
+            break
+    key, pos = next((k, p) for k, p in trader.state["open"].items() if p["filled"])
+    assert not trader._close_waiting()
+    # the live price at the press: used as the exit
+    now = t + 20 * 60_000
+    entry, stop = pos["entry"], pos["signal"]["stop"]
+    live = entry + 0.5 * (entry - stop)  # half a risk unit up
+    control.request_close(key, pos["signal"]["ts"], by="admin", price=live)
+    req = control.close_requests()[key]
+    req["price_at"] = now - 1000
+    control._save_one({key: req})
+    assert trader._close_waiting()
+    t0 = _time.monotonic()
+    trader._wait(30)  # wakes for it straight away
+    assert _time.monotonic() - t0 < 2
+    trader.tick(now_ms=now)
+    row = trader.state["trades"][-1]
+    assert row["exit_reason"] == "closed by hand" and row["exit"] == pytest.approx(live)
+    assert row["exit_ts"] == now - 1000 and 0.3 < row["r"] <= 0.5  # half a risk unit, less fees
+    assert not trader._close_waiting()
+
+    # no live price: the newest saved 1-minute candle
+    for i in range(i + 1, 900):
+        t = int(df.ts.iloc[i]) + H
+        trader.tick(now_ms=t)
+        if any(p["filled"] for p in trader.state["open"].values()):
+            break
+    key, pos = next((k, p) for k, p in trader.state["open"].items() if p["filled"])
+    one_min = t + 5 * 60_000
+    store.upsert([Candle("bybit", "BTC/USDT", "1m", one_min, 1, 1, 1, pos["entry"] * 1.01, 1)])
+    control.request_close(key, pos["signal"]["ts"], by="admin")
+    trader.tick(now_ms=one_min + 2 * 60_000)
+    row = trader.state["trades"][-1]
+    assert row["exit"] == pytest.approx(pos["entry"] * 1.01) and row["exit_ts"] == one_min + 60_000
+    store.close()

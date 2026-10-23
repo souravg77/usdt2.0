@@ -88,6 +88,9 @@ class PaperConfig:
     retire: RetireRule = field(default_factory=RetireRule)
 
 
+HAND_PRICE_MS = 120_000  # a live price sent with a Close press is used for this long
+
+
 def _asked_to_close(req: dict | None, pos: dict) -> bool:
     """A person's close request covers this open position (not a later one on the same key)."""
     if not isinstance(req, dict) or not pos:
@@ -372,7 +375,8 @@ class PaperTrader:
                 if manual is not None:
                     full = time.monotonic()
                 versions = self._versions()
-                if manual is not None or last is None or time.monotonic() - last >= interval - 0.5 or versions != seen:
+                if (manual is not None or last is None or time.monotonic() - last >= interval - 0.5
+                        or versions != seen or self._close_waiting()):
                     last, seen = time.monotonic(), versions
                     try:
                         ev = self.tick(manual=manual)
@@ -404,9 +408,9 @@ class PaperTrader:
         """Sleep until the next pass, waking early when someone presses Scan now."""
         end = time.monotonic() + interval
         while (left := end - time.monotonic()) > 0:
-            if os.path.exists(self.scan_path):
+            if os.path.exists(self.scan_path) or self._close_waiting():
                 return
-            time.sleep(min(2.0, left))
+            time.sleep(min(1.0, left))
 
     # ---- internals ------------------------------------------------------------------------------
 
@@ -426,6 +430,29 @@ class PaperTrader:
         db = self.futures_store if market == "futures" else self.store
         candles = [c for c in db.load(ex, sym, tf, start) if c.ts + step <= now_ms]
         return candles_to_frame(candles) if candles else None
+
+    def _price_now(self, ex, sym, market: str, now_ms: int, req: dict | None = None) -> tuple[float, int] | None:
+        """The freshest price for closing by hand: the live Bybit price the dashboard read when the
+        Close button was pressed (if under 2 minutes old), else the newest saved 1-minute candle's
+        close (the collector keeps it a minute or two behind). None when neither is there."""
+        if isinstance(req, dict) and req.get("price") and now_ms - int(req.get("price_at") or 0) <= HAND_PRICE_MS:
+            return float(req["price"]), int(req["price_at"])
+        for tf in ("1m", "5m", "15m"):
+            df = self._frame(ex, sym, tf, now_ms - 30 * TIMEFRAME_MS[tf], now_ms, market)
+            if df is not None and len(df):
+                return float(df["close"].iloc[-1]), int(df["ts"].iloc[-1]) + TIMEFRAME_MS[tf]
+        return None
+
+    def _close_waiting(self) -> bool:
+        """A person pressed Close or Close all: the paper trader acts on it straight away."""
+        if self.control is None:
+            return False
+        try:
+            asked = getattr(self.control, "close_all_requested", None)
+            one = getattr(self.control, "close_requests", None)
+            return bool((callable(asked) and asked() is not None) or (callable(one) and one()))
+        except Exception:
+            return False
 
     def _context(self, exchange: str, symbol: str, now_ms: int, side: str = "buy") -> float:
         """Size multiplier from the market-context and news filters (0 = no new entry). The
@@ -771,8 +798,9 @@ class PaperTrader:
             pos_mkt = "futures" if key.endswith(FUTURES_SUFFIX) or wallet.market_of(pos) == "futures" else "spot"
             if not closing and (breakers.get(pos_mkt) or {}).get("close"):  # the weekly loss limit
                 closing, reason = True, "weekly loss limit"
+            hand_req = None
             if _asked_to_close(close_one.get(key), pos):
-                closing, reason = True, "closed by hand"
+                closing, reason, hand_req = True, "closed by hand", close_one.get(key)
             if closing and not pos.get("filled"):
                 del self.state["open"][key]
                 events["closed"].append(key)
@@ -902,6 +930,17 @@ class PaperTrader:
                     pos["mark"] = float(df["close"].iloc[-1])  # the price it was marked at, for the page
                     continue
                 t.exit_reason = reason
+                # closed by hand or by the kill switch: at the price now, not the close of the
+                # trade's own candle (on 4h charts that could be hours old)
+                now_px = self._price_now(ex, sym, pos_mkt, now_ms, hand_req)
+                risk = abs(sig.entry - sig.stop)
+                if now_px and risk > 0 and now_px[1] > t.exit_ts + step:
+                    move = (t.exit - now_px[0]) if short else (now_px[0] - t.exit)
+                    t.r += move / risk
+                    t.exit, t.exit_ts = now_px[0], now_px[1]
+                    if mkt == "futures":  # isolated margin: never more than the margin lost
+                        per_r = risk * pos["units"]
+                        t.r = max(t.r, -(pos["units"] * pos["entry"] / pos.get("leverage", 1.0)) / per_r)
             pnl = t.r * abs(sig.entry - sig.stop) * pos["units"]
             self.state["equity"][entry_id] = equity + pnl
             row = {**_trade_dict(t), "key": key, "entry_id": entry_id, "units": pos["units"],

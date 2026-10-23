@@ -569,37 +569,64 @@ paper trading. Nothing trades real money.</p>
                     "sells. Resume when ready.")
         return _control_post(request, csrf, act)
 
+    async def _live_prices(keys, market: str) -> dict:
+        """symbol -> Bybit's live price now, for closing paper positions at it; {} when Bybit
+        doesn't answer (the paper trader then uses the newest saved 1-minute candle)."""
+        syms = sorted({(k.split("|") + ["", "", ""])[2] for k in keys} - {""})
+        if not syms:
+            return {}
+        try:
+            res = await feed_for(market).tickers(syms)
+        except Exception:
+            return {}
+        if res.get("source") != "live":
+            return {}
+        return {t["symbol"]: t.get("price") for t in res.get("tickers", []) if t.get("price")}
+
     @app.post("/trading/close-all")
-    def trading_close_all(request: Request, csrf: str = Form(""), market: str = Form("")):
+    async def trading_close_all(request: Request, csrf: str = Form(""), market: str = Form("")):
+        mine = (_workspace(_load_json(paths.paper_state), market).get("open", {})
+                if market in ("spot", "futures") else {})
+        _user, _token, redirect = guard(request)
+        live = await _live_prices(list(mine), market) if mine and not redirect else {}
+
         def act(user):
             if market in ("spot", "futures"):  # one workspace: each of its positions, as its own Close
                 ctl = _control()
                 name = "Futures AI" if market == "futures" else "Spot AI"
-                mine = _workspace(_load_json(paths.paper_state), market).get("open", {})
                 for key, pos in mine.items():
-                    ctl.request_close(key, (pos.get("signal") or {}).get("ts"), by=user)
+                    ctl.request_close(key, (pos.get("signal") or {}).get("ts"), by=user,
+                                      price=live.get((key.split("|") + ["", "", ""])[2]))
                 _event("close_all", f"close all {name} paper positions ({len(mine)}) asked from the dashboard by {user}",
                        "warning")
-                return (f"Closing all {len(mine)} {name} paper positions at the last closed candle's price; they'll be "
-                        "gone within a minute. The other engine's positions are not touched.")
+                return (f"Closing all {len(mine)} {name} paper positions now, at "
+                        + ("Bybit's live price" if live else "the newest saved price")
+                        + "; they'll be gone in a few seconds. The other engine's positions are not touched.")
             _control().request_close_all(by=user)
             _event("close_all", f"close all open paper positions asked from the dashboard by {user}", "warning")
-            return ("Closing every open paper position at the last closed candle's price; they'll be gone within "
-                    "a minute. Paper trading keeps running.")
+            return ("Closing every open paper position now, at the newest saved price; they'll be gone in a few "
+                    "seconds. Paper trading keeps running.")
         return _control_post(request, csrf, act)
 
     @app.post("/trading/close-one")
-    def trading_close_one(request: Request, csrf: str = Form(""), key: str = Form("")):
+    async def trading_close_one(request: Request, csrf: str = Form(""), key: str = Form("")):
+        paper = _load_json(paths.paper_state)
+        pos = (paper.get("open") or {}).get(key) if isinstance(paper, dict) else None
+        _user, _token, redirect = guard(request)
+        from ..learn import wallet
+
+        mkt = "futures" if key.endswith("|futures") or wallet.market_of(pos or {}) == "futures" else "spot"
+        live = await _live_prices([key], mkt) if pos is not None and not redirect else {}
+
         def act(user):
-            paper = _load_json(paths.paper_state)
-            pos = (paper.get("open") or {}).get(key) if isinstance(paper, dict) else None
             if pos is None:
                 return "That position isn't open any more.", False
-            _control().request_close(key, (pos.get("signal") or {}).get("ts"), by=user)
             _entry_id, _ex, sym, tf = (key.split("|") + ["", "", "", ""])[:4]
+            _control().request_close(key, (pos.get("signal") or {}).get("ts"), by=user, price=live.get(sym))
             _event("close_one", f"close paper position {key} asked from the dashboard by {user}", "warning")
-            return (f"Closing the {sym} {tf} position at the last closed candle's price; it'll be gone within a "
-                    "minute. The others stay open.")
+            return (f"Closing the {sym} {tf} position now, at "
+                    + (f"Bybit's live price {live[sym]:g}" if live.get(sym) else "the newest saved price")
+                    + "; it'll be gone in a few seconds. The others stay open.")
         return _control_post(request, csrf, act)
 
     def _ws_market(market: str) -> str:

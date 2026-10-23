@@ -15,11 +15,14 @@ import time
 
 from ..config import EXCHANGE
 from ..data.store import CandleStore
+from ..models import TIMEFRAME_MS
 
 log = logging.getLogger(__name__)
 
 CACHE_S = 1.0
 LIMIT = 500  # enough history for the 200-bar EMA on the chart
+RELOAD_S = 300.0  # reload Bybit's market list for an unknown coin at most this often
+MAX_SINGLE = 20  # pairs asked for one by one when the all-tickers answer lacks them
 HISTORY_LIMIT = 1000  # older candles per request when the chart is scrolled back (Bybit's page size)
 
 
@@ -30,6 +33,7 @@ class LiveMarket:
         self._client, self._clock = client, clock
         self._cache: dict[tuple, tuple[float, dict]] = {}
         self._locks: dict[tuple, asyncio.Lock] = {}
+        self._reloaded = -RELOAD_S  # when the market list was last reloaded for a new coin
 
     def client(self):
         if self._client is None:
@@ -102,17 +106,39 @@ class LiveMarket:
                 # refuse the whole call when a single pair isn't listed, and the cards then froze
                 # on the collector's hourly candles
                 raw = await asyncio.wait_for(self.client().fetch_tickers(), timeout=8)
+                missing = [s for s in symbols if self._name(s) not in raw]
+                if missing:  # most often a coin listed after the market list was loaded (a new top gainer)
+                    raw = {**raw, **await self._fetch_missing(missing)}
                 rows = [{"symbol": s, "price": t.get("last"), "change": t.get("percentage"),
                          "high": t.get("high"), "low": t.get("low"), "volume": t.get("quoteVolume"),
                          **({"funding": _funding(t)} if self.perp else {})}
                         for s in symbols if (t := raw.get(self._name(s)))]
                 if not rows:
                     raise LookupError("none of the pairs came back")
-                return {"source": "live", "tickers": rows}
+                got = {r["symbol"] for r in rows}
+                return {"source": "live", "tickers": rows + self._saved_tickers([s for s in symbols if s not in got])}
             except Exception as exc:
                 log.warning("live tickers failed, using saved prices: %s: %s", type(exc).__name__, exc)
                 return {"source": "database", "note": _why(exc), "tickers": self._saved_tickers(symbols)}
         return await self._cached(("t", tuple(symbols)), fetch)
+
+    async def _fetch_missing(self, symbols: list[str]) -> dict:
+        """Tickers of pairs Bybit's all-tickers answer didn't name: the market list is reloaded (at
+        most every few minutes) so newly listed coins are known, then each is asked for by itself."""
+        client = self.client()
+        if self._clock() - self._reloaded > RELOAD_S and any(self._name(s) not in (client.markets or {}) for s in symbols):
+            self._reloaded = self._clock()
+            try:
+                await asyncio.wait_for(client.load_markets(True), timeout=15)
+            except Exception as exc:
+                log.warning("reloading Bybit's market list failed: %s", exc)
+        out = {}
+        for s in symbols[:MAX_SINGLE]:
+            try:
+                out[self._name(s)] = await asyncio.wait_for(client.fetch_ticker(self._name(s)), timeout=5)
+            except Exception as exc:
+                log.info("no live ticker for %s: %s", s, exc)
+        return out
 
     def _name(self, symbol: str) -> str:
         """The ccxt market name: BTC/USDT, or BTC/USDT:USDT for the perpetual."""
@@ -126,20 +152,29 @@ class LiveMarket:
         except Exception:
             return []
         try:
-            rows = store.load(self.exchange, symbol, timeframe)[-limit:]
+            # only the recent end: a pair's full history (years of 1-minute candles) is slow to read
+            step = TIMEFRAME_MS.get(timeframe)
+            since = int(time.time() * 1000) - 4 * limit * step if step else None
+            rows = store.load(self.exchange, symbol, timeframe, since)[-limit:]
         finally:
             store.close()
         return [[c.ts, c.open, c.high, c.low, c.close, c.volume] for c in rows]
 
     def _saved_tickers(self, symbols: list[str]) -> list[dict]:
+        """The collector's newest saved prices: the last close of the shortest timeframe it keeps
+        for the pair (1m when it can), and the 24-hour change from its hourly candles."""
         out = []
         for s in symbols:
             day = self._saved(s, "1h", 25)
-            if day:
-                base = day[0][1]
-                out.append({"symbol": s, "price": day[-1][4],
-                            "change": (day[-1][4] / base - 1) * 100 if base else None,
-                            "high": max(r[2] for r in day), "low": min(r[3] for r in day), "volume": None})
+            last = next((rows[-1] for tf in ("1m", "5m", "15m", "30m", "1h", "4h", "1d")
+                         if (rows := self._saved(s, tf, 1))), None)
+            if not last:
+                continue
+            base = day[0][1] if day else None
+            out.append({"symbol": s, "price": last[4],
+                        "change": (last[4] / base - 1) * 100 if base else None,
+                        "high": max(r[2] for r in day) if day else None,
+                        "low": min(r[3] for r in day) if day else None, "volume": None})
         return out
 
     async def close(self) -> None:

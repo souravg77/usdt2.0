@@ -139,10 +139,14 @@ class Control:
             json.dump(data, fh)
         os.replace(tmp, self._one_path())
 
-    def request_close(self, key: str, signal_ts: int | None = None, by: str = "") -> dict:
-        """Close the position ``key`` that opened on ``signal_ts`` (not a later one on the same key)."""
+    def request_close(self, key: str, signal_ts: int | None = None, by: str = "",
+                      price: float | None = None) -> dict:
+        """Close the position ``key`` that opened on ``signal_ts`` (not a later one on the same key),
+        at ``price`` (the live price when the button was pressed) when there is one."""
         data = self.close_requests()
         data[key] = {"at": time.time(), "by": by, "signal_ts": signal_ts}
+        if price:
+            data[key].update(price=float(price), price_at=int(time.time() * 1000))
         self._save_one(data)
         return data[key]
 
