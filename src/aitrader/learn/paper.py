@@ -266,7 +266,7 @@ class PaperTrader:
                                     # ago is history, not a missed trade, so it isn't listed as one
                                     continue
                                 self._log_signal(key, sig, "stale prices",
-                                                 f"the candle closed {late / 60_000:.0f} min ago")
+                                                 f"the candle closed {late / 60_000:.0f} min ago", market=mkt)
                                 events["filtered"].append(key)
                                 continue
                             legs = self._legs(key, sig, sym, {m: m == mkt for m in wallet.MARKETS}, events)
@@ -749,12 +749,15 @@ class PaperTrader:
             log.info("paper signal %s entry~%.6g stop %.6g ai p=%s size x%.2f regime %s", k, sig.entry, sig.stop,
                      pos["ai_prob"], pos["size_mult"], (pos["regime"] or {}).get("label"))
 
-    def _log_signal(self, key: str, sig: Signal, skipped: str, detail: str = "") -> None:
+    def _log_signal(self, key: str, sig: Signal, skipped: str, detail: str = "",
+                    market: str | None = None) -> None:
         """Every signal and what became of it (``skipped`` says why; empty means opened), so the
-        dashboard can say why no trade opened."""
+        dashboard can say why no trade opened. ``market`` is the engine when it is known before the
+        signal has its legs (a Futures long's plain key and buy side would read as Spot)."""
+        market = market or ("futures" if key.endswith(FUTURES_SUFFIX) or sig.side is Side.SELL else "spot")
         counts = getattr(self, "_pass_log", None)
         if counts is not None:
-            c = counts["futures" if key.endswith(FUTURES_SUFFIX) or sig.side is Side.SELL else "spot"]
+            c = counts[market]
             if skipped:
                 c["skipped"] += 1
                 c["why"][skipped] = c["why"].get(skipped, 0) + 1
@@ -762,7 +765,7 @@ class PaperTrader:
                 c["opened"] += 1
         log_ = self.state.setdefault("signals", [])
         log_.append({"ts": sig.ts, "key": key, "side": sig.side.value, "entry": sig.entry, "stop": sig.stop,
-                     "skipped": skipped, "detail": detail})
+                     "skipped": skipped, "detail": detail, "market": market})
         del log_[:-500]
 
     def _mark_signal(self, key: str, ts: int, skipped: str, detail: str = "") -> None:

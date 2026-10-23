@@ -98,6 +98,17 @@ def test_take_sequential_frees_the_slot():
     assert take_sequential(f, [False, True, True, True]).tolist() == [False, True, False, True]
 
 
+def test_take_sequential_keeps_markets_apart():
+    # rows out of order, two markets and two strategies: each (strategy, market) holds its own slot
+    f = pd.DataFrame({"strategy": ["s", "s", "t", "s", "s", "t"], "exchange": "x",
+                      "symbol": ["A", "B", "A", "A", "B", "A"], "timeframe": "1h",
+                      "signal_ts": [2, 0, 0, 0, 2, 2], "entry_ts": [3, 1, 1, 1, 3, 3],
+                      "exit_ts": [9, 9, 2, 5, 9, 9]})
+    assert take_sequential(f).tolist() == [False, True, True, True, False, True]
+    cat = f.astype({c: "category" for c in ("strategy", "exchange", "symbol", "timeframe")})
+    assert take_sequential(cat).tolist() == take_sequential(f).tolist()
+
+
 def test_filter_learns_a_real_edge_and_beats_the_rules():
     model, rep = train(planted())
     t = rep["test"]

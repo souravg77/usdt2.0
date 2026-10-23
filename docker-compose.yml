@@ -86,7 +86,9 @@ services:
       AITRADER_WEB_TRUST_PROXY: "true"
     ports:
       - "127.0.0.1:8080:8080"
-    mem_limit: 2g  # book jobs (kb build, learn read) run inside this container
+    # book jobs (kb build, learn read) and AI filter training run inside this container. 4g is the
+    # whole of a 4 GB server: a runaway job can push the host into its OOM killer (paper, collector)
+    mem_limit: 4g
 
   # HTTPS in front of the dashboard: on your local network by IP (own certificate), or on a
   # domain (Let's Encrypt). Set AITRADER_SITE and AITRADER_TLS in .env (deploy/Caddyfile).
@@ -177,7 +179,7 @@ services:
     security_opt:
       - no-new-privileges:true
     cap_drop: [ALL]
-    mem_limit: 2g
+    mem_limit: 4g  # room for AI training runs; on a 4 GB server this is all of it (see web)
     pids_limit: 512
     restart: unless-stopped
     logging:
