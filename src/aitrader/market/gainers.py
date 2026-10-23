@@ -7,7 +7,9 @@
 Each scanner has its own switch on the Pairs page, its own count and its own window (1h, 4h or 24h).
 A pair must not be a stablecoin or a leveraged token, must have at least ``MIN_TURNOVER`` USDT of
 24h turnover, and its bid/ask spread must be at most ``MAX_SPREAD_PCT``. The candidates (the
-``CANDIDATES`` biggest 24h risers that pass) are then scored, in the open:
+``CANDIDATES`` biggest 24h risers that pass; on a 1h or 4h window the ``CANDIDATES_SHORT`` most
+traded that pass, whatever their 24h change, since a coin down on the day can be the hour's best
+riser) are then scored, in the open:
 
     score = rise over the window (%)
             + 2 x (relative volume - 1), capped at +6   (last hour's volume / the 24h hourly average)
@@ -41,6 +43,7 @@ WINDOWS = ("1h", "4h", "24h")
 DEFAULT_WINDOW = "24h"
 MAX_SPREAD_PCT = 0.2
 CANDIDATES = 40
+CANDIDATES_SHORT = 80  # 1h/4h window: the most traded pairs are checked, up or down on the day
 PUMP_1H_PCT, PUMP_24H_PCT = 15.0, 60.0
 DEFAULT_TOP = 10
 MIN_TOP, MAX_TOP = 3, 30
@@ -116,9 +119,11 @@ def _spread_pct(t: dict) -> float | None:
 
 
 def pick(markets: dict, tickers: dict, top: int = DEFAULT_TOP, min_turnover: float = MIN_TURNOVER,
-         market: str = "futures", max_spread: float = MAX_SPREAD_PCT) -> list[dict]:
-    """The ``top`` biggest 24h risers that pass the filters, before scoring. ``markets`` and
-    ``tickers`` are ccxt's ``load_markets`` / ``fetch_tickers`` results for that market."""
+         market: str = "futures", max_spread: float = MAX_SPREAD_PCT, window: str = "24h") -> list[dict]:
+    """The ``top`` biggest 24h risers that pass the filters, before scoring; on a 1h or 4h
+    ``window`` the ``top`` most traded that pass, up or down on the day (their 1h/4h rise is read
+    from candles afterwards). ``markets`` and ``tickers`` are ccxt's ``load_markets`` /
+    ``fetch_tickers`` results for that market."""
     rows = []
     for sym, m in markets.items():
         if market == "spot":
@@ -140,6 +145,9 @@ def pick(markets: dict, tickers: dict, top: int = DEFAULT_TOP, min_turnover: flo
             continue
         rows.append({"symbol": pair, "contract": sym, "change": round(float(change), 2), "turnover": float(turnover),
                      "price": t.get("last"), "spread": None if spread is None else round(spread, 4)})
+    if window in ("1h", "4h"):
+        rows.sort(key=lambda r: r["turnover"], reverse=True)
+        return rows[:max(1, int(top))]
     rows.sort(key=lambda r: r["change"], reverse=True)
     return [r for r in rows if r["change"] > 0][:max(1, int(top))]
 
@@ -226,7 +234,8 @@ async def refresh(client, path: str = DEFAULT_PATH, top: int | None = None, now_
         perp_limits.save(perp_limits.from_markets(markets), limits_path, now_ms)
     tickers = await client.fetch_tickers()
     rows = []
-    for r in pick(markets, tickers, top=CANDIDATES, market=market):
+    short = window in ("1h", "4h")
+    for r in pick(markets, tickers, top=CANDIDATES_SHORT if short else CANDIDATES, market=market, window=window):
         try:
             r = enrich(r, await client.fetch_ohlcv(r["contract"], "1h", limit=26))
         except Exception as exc:  # one coin's candles failing must not stop the scan
