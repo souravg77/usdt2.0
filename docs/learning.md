@@ -1,5 +1,10 @@
 # How the agent learns strategies from books
 
+> **Reading new books is turned off.** `learn read` used Claude through the Anthropic API, which
+> the platform no longer uses; the local model is too small for it. Everything after the read step
+> (the backtest gate, paper trading, keep or retire) still runs, and `learn add-library` registers
+> the strategies already read from the supplied books.
+
 ```
 book (PDF) ──read──> draft strategies ──backtest gate──> paper trading ──results──> keep or retire
               Claude      rule specs          lab              paper loop
@@ -80,9 +85,9 @@ with `docker compose up -d` (it runs next to the collector).
 
 ## What you need
 
-- `ANTHROPIC_API_KEY` in `.env` for `learn read`. Only book text goes to the API. Reading a
-  60-page book costs a few cents to a few tens of cents, depending on the model
-  (`AITRADER_LLM_MODEL`, default `claude-sonnet-5-5`).
+- `learn read` is turned off: it needed Claude through the Anthropic API, which the platform no
+  longer uses, and the local model (the `ollama` service) is too small to write valid rules from a
+  book. `learn add-library` still registers the strategies already read from the supplied books.
 - Enough history for the gate: download at least a year of candles for the timeframes the
   book's strategies use (`aitrader download --since 2024-01-01`).
 

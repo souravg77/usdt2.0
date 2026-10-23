@@ -1,6 +1,6 @@
 """Have an LLM read a book and draft rule specs from it.
 
-The book is split into parts with page markers and sent to the Claude API with the rule
+The book is split into parts with page markers and sent to a capable model with the rule
 language (``rules.grammar_help``). The model must answer through a tool whose input is a list
 of rule specs, each citing the page and quote it came from, listing the gaps it had to fill
 ("decisions") and what it could not code ("uncodable"). Every spec is then checked by
@@ -9,16 +9,16 @@ invalid is dropped and reported. The book text is treated as data: the system pr
 model to ignore instructions inside it, and the validator rejects anything outside the rule
 language whatever the model writes.
 
-Needs ``ANTHROPIC_API_KEY``. The model is ``AITRADER_LLM_MODEL`` (default claude-sonnet-5-5).
+Turned off (``READ_OFF``): the model was Claude through the Anthropic API, which this platform no
+longer uses, and the local model (``aitrader.llm``) is too small to turn a book into valid rules.
+``extract_strategies`` takes the model as a ``Caller``, so a capable one can be plugged in again.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import os
 import re
-import urllib.request
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -27,18 +27,8 @@ from .rules import RuleError, grammar_help, validate_spec
 
 log = logging.getLogger(__name__)
 
-API_URL = "https://api.anthropic.com/v1/messages"
-
-
-def anthropic_headers(key: str, workspace: str | None = None) -> dict:
-    """Request headers; ``ANTHROPIC_WORKSPACE_ID`` is sent for keys not scoped to a workspace."""
-    workspace = (os.environ.get("ANTHROPIC_WORKSPACE_ID", "") if workspace is None else workspace).strip()
-    headers = {"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json",
-               "user-agent": "aitrader"}
-    if workspace:
-        headers["anthropic-workspace-id"] = workspace
-    return headers
-DEFAULT_MODEL = "claude-sonnet-5-5"
+READ_OFF = ("reading books is turned off: it needed Claude through the Anthropic API, which this platform "
+            "no longer uses, and the local model is too small to write valid strategy rules from a book")
 WORDS_PER_PART = 30_000
 
 TOOL = {
@@ -109,29 +99,6 @@ class Extraction:
 
 
 Caller = Callable[[str, list[dict]], dict]  # (system, messages) -> tool input
-
-
-def claude_caller(api_key: str | None = None, model: str | None = None,
-                  max_tokens: int = 8000, timeout: float = 300) -> Caller:
-    key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
-    if not key:
-        raise RuntimeError("ANTHROPIC_API_KEY is not set; add it to .env to let the agent read books")
-    model = model or os.environ.get("AITRADER_LLM_MODEL", DEFAULT_MODEL)
-
-    def call(system: str, messages: list[dict]) -> dict:
-        body = json.dumps({
-            "model": model, "max_tokens": max_tokens, "system": system, "messages": messages,
-            "tools": [TOOL], "tool_choice": {"type": "tool", "name": TOOL["name"]},
-        }).encode()
-        req = urllib.request.Request(API_URL, data=body, method="POST", headers=anthropic_headers(key))
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read())
-        for block in data.get("content", []):
-            if block.get("type") == "tool_use" and block.get("name") == TOOL["name"]:
-                return block.get("input") or {}
-        raise RuntimeError(f"model did not call {TOOL['name']}: stop_reason={data.get('stop_reason')}")
-
-    return call
 
 
 def book_parts(path: str, words_per_part: int = WORDS_PER_PART) -> tuple[str, list[str]]:

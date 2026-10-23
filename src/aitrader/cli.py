@@ -492,7 +492,7 @@ async def _print_derivs(symbols: list[str]) -> int:
 
 
 def cmd_news(s: Settings, args) -> int:
-    """News and web search: free feeds plus Claude's web-search brief (see aitrader.news)."""
+    """News: free feeds plus the local model's brief (see aitrader.news)."""
     import time
 
     from .news import NewsFilter, load_latest, update
@@ -529,10 +529,10 @@ def cmd_news(s: Settings, args) -> int:
                     due = time.time() - last_brief >= 3600
             if due:
                 symbols = args.symbol or both_engines()  # the gainers change through the day
-                out = update(symbols, events=events, max_searches=args.max_searches)
+                out = update(symbols, events=events)
                 last_brief = time.time()
                 b = out["brief"]
-                print(f"news: market risk {b['market_risk']}, {b['searches']} web searches" if b
+                print(f"news: market risk {b['market_risk']} ({b['model']})" if b
                       else f"news: feeds saved, no AI brief ({out['brief_error']})", flush=True)
                 if args.news_cmd == "update":
                     return 0 if b else 1
@@ -568,12 +568,8 @@ def cmd_change(s: Settings, args) -> int:
 
 
 def cmd_research(s: Settings, args) -> int:
-    """Trader-research log (aitrader.news.research). Research input only: never changes trading."""
-    import time
-
+    """Trader-research log (aitrader.news.research). Its search is turned off; `show` still reads it."""
     from .news import research
-    from .ops import EventLog
-    from .ops.secrets import apply_to_env
 
     if args.research_cmd == "show":
         rows = [f for f in research.load() if not args.family or f["family"] in args.family]
@@ -582,16 +578,8 @@ def cmd_research(s: Settings, args) -> int:
                   f"\n    {f['credibility']}")
         print(f"{len(rows)} findings (research only: they never change trading, risk or strategy status)")
         return 0
-    events = EventLog(service="research")
-    hours = args.every_hours or float(os.environ.get("AITRADER_RESEARCH_EVERY_HOURS", "168") or 168)
-    while True:
-        apply_to_env()  # a key saved on the Settings page is used from the next run on
-        out = research.update(families=args.family, max_searches=args.max_searches, events=events)
-        print(f"research: {len(out['added'])} new of {out['found']} findings, {out['searches']} web searches"
-              + (f" ({out['error']})" if out["error"] else ""), flush=True)
-        if args.research_cmd == "update":
-            return 1 if out["error"] else 0
-        time.sleep(max(1.0, hours) * 3600)
+    print(research.OFF, file=sys.stderr)  # the saved findings stay readable with `research show`
+    return 1
 
 
 def cmd_kb(_s: Settings, args) -> int:
@@ -624,8 +612,7 @@ def cmd_kb(_s: Settings, args) -> int:
 def cmd_learn(s: Settings, args) -> int:
     """The agent's own strategy pipeline: read a book, backtest the drafts, paper-trade survivors."""
     from .backtest import BacktestConfig
-    from .learn import (Entry, Registry, RuleError, claude_caller, evaluate, extract_strategies,
-                        spec_id, PaperConfig, PaperTrader)
+    from .learn import READ_OFF, Entry, Registry, RuleError, evaluate, spec_id, PaperConfig, PaperTrader
     from .learn.registry import UNTESTED
     from .strategies import STRATEGIES
 
@@ -658,30 +645,8 @@ def cmd_learn(s: Settings, args) -> int:
 
     cmd = args.learn_cmd
     if cmd == "read":
-        try:
-            caller = claude_caller()
-        except RuntimeError as exc:
-            print(exc, file=sys.stderr)
-            return 1
-        print(f"reading {args.book} ...")
-        ex = extract_strategies(args.book, caller, max_strategies=args.max)
-        new = []
-        for spec in ex.specs:
-            e = Entry(id=spec_id(spec), kind="rule", name=spec["name"], spec=spec,
-                      source=f"{spec['source']['book']} {spec['source']['pages']}".strip())
-            if reg.add(e):
-                new.append(e)
-            print(f"  + {e.id:40} {e.source}\n      {spec['description'][:150]}")
-        for name, err in ex.rejected:
-            print(f"  - {name}: could not be written as rules ({err[:200]})")
-        for note in ex.notes:
-            print(f"  note {note[:300]}")
-        reg.save()
-        print(f"{len(new)} new strategies from \"{ex.book}\" -> {args.registry}")
-        if args.test and new:
-            print("backtesting them:")
-            run_tests(new)
-        return 0
+        print(READ_OFF + " (`learn add-library` registers the strategies already read)", file=sys.stderr)
+        return 1
     if cmd == "add-library":
         from .learn.library import library_specs
 
@@ -1715,14 +1680,13 @@ def build_parser() -> argparse.ArgumentParser:
     bt.add_argument("--months", type=int, default=12, help="months of the results calendar to print")
     bt.add_argument("--final", action="store_true", help="also run the untouched final test period")
 
-    nw = sub.add_parser("news", help="world and crypto news: feeds plus the AI's web-search brief")
+    nw = sub.add_parser("news", help="world and crypto news: feeds plus the local AI model's brief")
     nw.add_argument("news_cmd", choices=["update", "run", "show"])
     nw.add_argument("--symbol", action="append")
     nw.add_argument("--every-hours", type=float, default=None,
                     help="for run: hours between briefs (default AITRADER_NEWS_EVERY_HOURS or 4)")
-    nw.add_argument("--max-searches", type=int, default=None, help="web searches per brief (default 6)")
 
-    ch = sub.add_parser("change", help="change requests: Claude writes a change and opens a GitHub pull request")
+    ch = sub.add_parser("change", help="change requests (turned off: they needed the Anthropic API)")
     ch_sub = ch.add_subparsers(dest="change_cmd", required=True)
     ch_sub.add_parser("list", help="every change request with its status")
     chr_ = ch_sub.add_parser("run", help="run one saved request (the dashboard does this)")
@@ -1730,11 +1694,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     rs = sub.add_parser("research", help="trader-research log: public reports on our strategy families "
                                          "(research only, never changes trading)")
-    rs.add_argument("research_cmd", choices=["update", "run", "show"])
+    rs.add_argument("research_cmd", choices=["update", "run", "show"], help="update and run are turned off")
     rs.add_argument("--family", action="append", help="limit to a strategy family (repeatable)")
-    rs.add_argument("--every-hours", type=float, default=None,
-                    help="for run: hours between searches (default AITRADER_RESEARCH_EVERY_HOURS or 168)")
-    rs.add_argument("--max-searches", type=int, default=None, help="web searches per run (default 8)")
     rs.add_argument("--limit", type=int, default=50, help="for show: findings to print")
 
     ca = sub.add_parser("calendar", help="show upcoming high-impact events and the current decision")
@@ -1767,7 +1728,7 @@ def build_parser() -> argparse.ArgumentParser:
     le.add_argument("--exchange", action="append", choices=EXCHANGES)
     le.add_argument("--symbol", action="append")
     le_sub = le.add_subparsers(dest="learn_cmd", required=True)
-    lr = le_sub.add_parser("read", help="have Claude read a book and draft strategies (needs ANTHROPIC_API_KEY)")
+    lr = le_sub.add_parser("read", help="turned off: reading a book needed the Anthropic API, which is no longer used")
     lr.add_argument("book", help="PDF, Markdown or text file")
     lr.add_argument("--max", type=int, default=12, help="most strategies to keep from one book")
     lr.add_argument("--test", action="store_true", help="backtest the new drafts straight away")

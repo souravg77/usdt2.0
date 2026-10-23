@@ -1,5 +1,9 @@
 """Change requests: describe a change to the platform in plain words; Claude writes the code and
-opens a GitHub pull request. Nothing on the server changes until you merge it and run the
+opens a GitHub pull request.
+
+Turned off (``OFF``): Claude was reached through the Anthropic API, which this platform no longer
+uses. The requests already made stay listed on the Change requests page. ``run_request`` takes the
+model as a ``Caller``, so a capable one can be plugged in again. Nothing on the server changes until you merge it and run the
 installer, so every change still passes your review.
 
 How it works, without git or a shell on the server:
@@ -201,25 +205,8 @@ How to work:
 
 Caller = Callable[[str, list[dict]], dict]
 
-
-def claude_tools_caller(api_key: str | None = None, model: str | None = None, max_tokens: int = 16000,
-                        timeout: float = 600) -> Caller:
-    from ..learn.extract import API_URL, DEFAULT_MODEL, anthropic_headers
-
-    key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
-    if not key:
-        raise ChangeError("ANTHROPIC_API_KEY is not set; save it on the dashboard's Settings page")
-    model = model or os.environ.get("AITRADER_LLM_MODEL", DEFAULT_MODEL)
-
-    def call(system: str, messages: list[dict]) -> dict:
-        body = {"model": model, "max_tokens": max_tokens, "system": system, "messages": messages,
-                "tools": TOOLS}
-        req = urllib.request.Request(API_URL, data=json.dumps(body).encode(), method="POST",
-                                     headers=anthropic_headers(key))
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read())
-
-    return call
+OFF = ("change requests are turned off: Claude wrote them through the Anthropic API, which this platform "
+       "no longer uses, and the local model is far too small to change code")
 
 
 def check_path(path: str, write: bool = False) -> str:
@@ -345,7 +332,9 @@ def run_saved(req_id: str, root: str = DEFAULT_DIR, gh: GitHub | None = None, ca
     save(req, root)
     try:
         gh = gh or GitHub(os.environ.get("GITHUB_TOKEN", ""), os.environ.get("GITHUB_REPO") or DEFAULT_REPO)
-        req = run_request(req, gh, call or claude_tools_caller())
+        if call is None:
+            raise ChangeError(OFF)
+        req = run_request(req, gh, call)
     except Exception as exc:
         log.exception("change request %s failed", req_id)
         req.update(status="failed", error=str(exc)[:500])

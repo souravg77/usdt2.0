@@ -49,22 +49,40 @@ services:
     <<: *app
     command: ["context", "collect", "--interval", "900"]
 
-  # World and crypto news: free feeds (fear & greed, trending coins, headlines) plus a brief
-  # from Claude, which searches the web (wars, regulation, hacks, demand, coming coin events).
-  # Needs the Anthropic key (Settings page) for the brief; every AITRADER_NEWS_EVERY_HOURS (4).
+  # World and crypto news: free feeds (fear & greed, trending coins, Bybit announcements,
+  # headlines) plus a brief from the local AI model (ollama service): world events, regulation,
+  # hacks, demand and coming coin events, as far as the feeds name them. No web search and no
+  # API key; every AITRADER_NEWS_EVERY_HOURS (4).
   news:
     <<: *app
     command: ["news", "run"]
+    depends_on: [ollama]
 
-  # Trader-research log: Claude searches Reddit, TradingView, blogs and papers for public reports
-  # on our strategy families (Research page). Research input only: it never changes trading, risk
-  # or a strategy's status. Needs the Anthropic key; every AITRADER_RESEARCH_EVERY_HOURS (168).
-  #   docker compose --profile research up -d research
-  research:
-    <<: *app
-    profiles: ["research"]
-    command: ["research", "run"]
-    mem_limit: 512m
+  # The local AI model: Ollama serving a small open-source model (AITRADER_LOCAL_MODEL, default
+  # qwen2.5:1.5b, about 1 GB, downloaded on first use into the ollama_models volume). Only the
+  # app containers reach it; nothing is published. It gets the CPU only when the trading services
+  # don't need it (cpu_shares), and unloads the model 5 minutes after the last brief to give the
+  # memory back. Trader research, book reading and change requests needed Claude and are off.
+  ollama:
+    image: ollama/ollama:0.35.1
+    environment:
+      OLLAMA_KEEP_ALIVE: 5m
+      OLLAMA_NUM_PARALLEL: "1"
+      OLLAMA_MAX_LOADED_MODELS: "1"
+    volumes:
+      - ollama_models:/root/.ollama
+    restart: unless-stopped
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    cpu_shares: 256  # a quarter of the default weight: trading comes first on a busy core
+    mem_limit: 2g
+    pids_limit: 256
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
 
   # Paper-trades every strategy that passed `aitrader learn test`, with the calendar, market
   # context and AI filters. Never sends exchange orders.
@@ -190,3 +208,4 @@ volumes:
   caddy_data:
   caddy_config:
   claude_signin:
+  ollama_models:

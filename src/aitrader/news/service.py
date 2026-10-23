@@ -1,8 +1,9 @@
-"""The ``news`` service: read the free feeds, let Claude search the web, save the brief.
+"""The ``news`` service: read the free feeds, let the local model write the brief, save it.
 
 The latest brief is ``data/news/latest.json`` (read by the dashboard and the trading filter);
-every brief is also appended to ``data/news/history.jsonl``. Without an Anthropic key the feeds
-are still saved and shown, but there is no AI brief and the filter does nothing.
+every brief is also appended to ``data/news/history.jsonl``. When the local model can't be reached
+(the ``ollama`` service isn't running) the feeds are still saved and shown, but there is no AI
+brief and the filter does nothing.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import os
 import time
 
 from . import feeds as feeds_mod
-from .brief import poster, write_brief
+from .brief import write_brief
 from .sites import load_sites
 
 log = logging.getLogger(__name__)
@@ -41,8 +42,8 @@ def x_reader(news_dir: str = DEFAULT_DIR):
     return XReader(os.path.join(news_dir, "x.json")) if os.environ.get("X_BEARER_TOKEN") else None
 
 
-def update(symbols: list[str], news_dir: str = DEFAULT_DIR, fetch=None, post=None,
-           now_ms: int | None = None, events=None, max_searches: int | None = None, x="auto") -> dict:
+def update(symbols: list[str], news_dir: str = DEFAULT_DIR, fetch=None, chat=None,
+           now_ms: int | None = None, events=None, x="auto") -> dict:
     now_ms = now_ms or int(time.time() * 1000)
     data = feeds_mod.gather(fetch or feeds_mod.fetch_url, now_ms)
     data["sites"] = load_sites(news_dir)
@@ -56,9 +57,7 @@ def update(symbols: list[str], news_dir: str = DEFAULT_DIR, fetch=None, post=Non
             data["errors"].append(f"X: {_why(exc)}")
     out = {"generated": now_ms, "symbols": symbols, "feeds": data, "brief": None, "brief_error": ""}
     try:
-        post = post or poster()
-        kw = {"max_searches": max_searches} if max_searches else {}
-        out["brief"] = write_brief(symbols, data, post, **kw)
+        out["brief"] = write_brief(symbols, data, chat)
     except Exception as exc:
         out["brief_error"] = _why(exc)
         log.warning("news brief failed: %s", out["brief_error"])
@@ -71,9 +70,9 @@ def update(symbols: list[str], news_dir: str = DEFAULT_DIR, fetch=None, post=Non
 
 def _why(exc: Exception) -> str:
     text = str(exc)
-    if hasattr(exc, "read"):  # urllib HTTPError: the API's own message says what is wrong
+    if hasattr(exc, "read"):  # urllib HTTPError: Ollama's own message says what is wrong
         try:
-            text = json.loads(exc.read()).get("error", {}).get("message", text)
+            text = json.loads(exc.read()).get("error", text)
         except Exception:
             pass
     return f"{type(exc).__name__}: {text}"[:400]
@@ -114,4 +113,4 @@ def _emit(events, out: dict, previous: dict) -> None:
     text += f". {b['market_risk_why']}"
     if risky:
         text += f" High risk on {', '.join(risky)}: no new buys there."
-    events.emit("news", text, level=level, searches=b.get("searches", 0))
+    events.emit("news", text, level=level, model=b.get("model", ""))

@@ -7,14 +7,10 @@ order it can cause is the kill switch selling what the executors bought.
 ## What it does
 
 - **Submit a book.** Upload a PDF, Markdown or text file (up to 50 MB). Two things happen in the
-  background, one job at a time, and the job page shows live output:
-  1. `kb build`: the book becomes searchable in the knowledge base.
-  2. `learn read <book> --test`: the agent reads the whole book. It writes each concrete
-     strategy as checked rules (long spot only, stop required, risk capped at 1%) and backtests
-     them with fees and slippage. Strategies that pass move to paper trading, and the `paper`
-     service starts trading them on its next tick.
-
-  Step 2 needs `ANTHROPIC_API_KEY` in `.env`. Without it, the page says so and only step 1 runs.
+  background, and the job page shows live output: `kb build` makes the book searchable in the
+  knowledge base. Turning a book into strategies (`learn read`) is turned off: it needed Claude
+  through the Anthropic API, which the platform no longer uses, and the local model is too small
+  for it.
 - **Overview.** Shows the mode and whether live orders are locked. It lists every strategy with
   its status, out-of-sample backtest result, paper result and last status change; click one to
   see its rules, sources and history. It also shows the AI trade filter (active model and
@@ -27,18 +23,16 @@ order it can cause is the kill switch selling what the executors bought.
   "Check the gate now" button. The page refreshes every minute. See
   [live-trading.md](live-trading.md).
 
-- **Change requests.** Describe a change in plain words; Claude reads the code on GitHub, writes
-  the change and opens a pull request. Nothing changes on the server until you merge it and run the
-  installer. Needs an Anthropic key and a GitHub token on Settings. See
+- **Change requests.** Turned off: Claude wrote them through the Anthropic API, which the platform
+  no longer uses. The page still lists the requests made before. See
   [change-requests.md](change-requests.md).
 - **Research.** The trader-research log: public reports from traders and researchers (Reddit,
   TradingView, blogs, exchange and quant research, papers) about the strategy families the
   platform runs. Each finding has its URL, source, the date found, the source's date when known,
   the family, the claim in one sentence, the evidence type (anecdote, backtest shown, live record
   shown, peer-reviewed, other) and a credibility note; filter by family and evidence type.
-  "Search the web now" runs `aitrader research update` (Claude with web search; needs
-  `ANTHROPIC_API_KEY`). The optional `research` service (`docker compose --profile research up -d
-  research`) searches every `AITRADER_RESEARCH_EVERY_HOURS` (default 168). Findings are kept in
+  New searches are turned off: they used Claude's web search through the Anthropic API, which
+  the platform no longer uses, and the local model can't search the web. Findings are kept in
   `data/news/research.jsonl`, one per URL. **They are research inputs only:** nothing that trades
   reads them, so they never change trading, risk limits or a strategy's status. Votes,
   testimonials and win-rate screenshots are not evidence of profit; an idea from here still has

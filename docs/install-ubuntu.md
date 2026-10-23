@@ -147,7 +147,7 @@ Delete `caddy-root.crt` from the server afterwards: `rm ~/AI_crypto_trader/caddy
 
 ## 5. Fill in the rest of the settings
 
-**Easiest: the dashboard's Settings page.** Paste your Anthropic key, your real Bybit key (spot
+**Easiest: the dashboard's Settings page.** Paste your real Bybit key (spot
 trade only; it shows your balance and is used only once you go live) and Telegram bot there. Each key is checked before it is saved, stored encrypted, and the services
 that use it restart by themselves. The same page shows the health check and has a **Start
 setup** button that does step 6 for you.
@@ -161,7 +161,7 @@ nano .env        # save with Ctrl+O, Enter; exit with Ctrl+X
 
 | Setting | When | What |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | to let the agent read books | from console.anthropic.com |
+| `AITRADER_LOCAL_MODEL` | the local AI model for the news brief | default `qwen2.5:1.5b` (any Ollama model) |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | alerts on your phone | docs/live-trading.md, step 2 |
 | `AITRADER_SYMBOLS` | which coins | default: the 20 most traded coins against USDT (see `TOP_PAIRS` in src/aitrader/config.py) |
 

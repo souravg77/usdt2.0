@@ -1,7 +1,7 @@
 """The admin's Settings page: API keys, first-time setup and the health check.
 
-Keys entered here are checked first (Bybit keys with the exchange, the Anthropic key and the
-Telegram bot with their APIs), then stored encrypted (``ops.secrets``) and never shown again,
+Keys entered here are checked first (Bybit keys with the exchange, the Telegram bot, X and
+GitHub with their APIs), then stored encrypted (``ops.secrets``) and never shown again,
 only their last 4 characters. A real-account Bybit key is accepted only without withdrawal
 rights and with an IP whitelist, the same rule as for user accounts.
 
@@ -26,8 +26,6 @@ from .app import _csrf, _e, _q
 from ..clock import local
 
 GROUPS = [
-    ("anthropic", "Anthropic (Claude)", "Lets the agent read trading books and write strategies. "
-     "Get a key at console.anthropic.com, under API keys."),
     ("bybit", "Bybit real account", "Shows your real Bybit balance on the Trading page (read only) and is "
      "used by the live pilot. Paper trading needs no key. The key must be Read-Write with SPOT trade "
      "ticked (and Contracts, for futures shorts), no withdrawals or transfers, and bound to this server's IP. Saving it "
@@ -42,42 +40,6 @@ GROUPS = [
      "Settings, Developer settings, Fine-grained tokens: only this repository, permissions Contents and "
      "Pull requests set to Read and write, nothing else. Nothing changes until you merge a pull request."),
 ]
-
-
-def _api_error(exc) -> str:
-    """Anthropic's own error message from an HTTPError body (never contains the key)."""
-    try:
-        return str(json.loads(exc.read())["error"]["message"])[:200]
-    except Exception:
-        return ""
-
-
-def check_anthropic(key: str, workspace: str = "", opener=urllib.request.urlopen) -> None:
-    """Reject only when Anthropic says the key is bad; anything else means 'couldn't check'."""
-    from ..learn.extract import anthropic_headers
-
-    if not key.startswith("sk-ant-"):
-        raise KeyRejected("that isn't an Anthropic API key: it should start with sk-ant- (create one "
-                          "at console.anthropic.com, Settings, API keys)")
-    req = urllib.request.Request("https://api.anthropic.com/v1/models?limit=1",
-                                 headers=anthropic_headers(key, workspace))
-    try:
-        with opener(req, timeout=15) as resp:
-            json.loads(resp.read())
-    except Exception as exc:
-        code = getattr(exc, "code", None)
-        detail = _api_error(exc) if code else ""
-        if code == 401:
-            raise KeyRejected("Anthropic says this key is invalid; copy it again, or create a new "
-                              "one at console.anthropic.com") from None
-        if code == 400 and "workspace" in detail.lower():
-            raise KeyRejected("this key isn't tied to a workspace, so the agent can't use it as is. "
-                              "Either create a new key inside a workspace (console.anthropic.com, "
-                              "Settings, Workspaces, open Default, API keys), or paste the workspace "
-                              "ID (starts with wrkspc_) in the Workspace ID box with this key"
-                              + (" (the workspace ID given was refused)" if workspace else "")) from None
-        what = f"HTTP {code}" if code else type(exc).__name__
-        raise KeyUnverified(f"Anthropic didn't confirm the key ({what}{': ' + detail if detail else ''})") from None
 
 
 def check_telegram(token: str, chat_id: str, opener=urllib.request.urlopen) -> None:
@@ -131,7 +93,7 @@ def check_github(token: str, repo: str, opener=urllib.request.urlopen) -> None:
 
 def add_settings_routes(app, *, settings, auth, paths, jobs, keys_secret: str, page, guard,
                         checkers: dict | None = None) -> None:
-    checkers = {"anthropic": check_anthropic, "telegram": check_telegram, "bybit": verify_keys, "x": check_x,
+    checkers = {"telegram": check_telegram, "bybit": verify_keys, "x": check_x,
                 "github": check_github, **(checkers or {})}
     store_path = getattr(paths, "keys_store", secrets.DEFAULT_PATH)
 
@@ -167,12 +129,7 @@ def add_settings_routes(app, *, settings, auth, paths, jobs, keys_secret: str, p
         """Run the group's check. Returns '' when confirmed, or the reason it couldn't run;
         raises KeyRejected when the service refuses, ValueError when something is missing."""
         try:
-            if group == "anthropic":
-                if not values["ANTHROPIC_API_KEY"]:
-                    raise ValueError("paste the Anthropic API key too")
-                await asyncio.to_thread(checkers["anthropic"], values["ANTHROPIC_API_KEY"],
-                                        values["ANTHROPIC_WORKSPACE_ID"])
-            elif group == "telegram":
+            if group == "telegram":
                 if not (values["TELEGRAM_BOT_TOKEN"] and values["TELEGRAM_CHAT_ID"]):
                     raise ValueError("Telegram needs both the bot token and the chat ID")
                 await asyncio.to_thread(checkers["telegram"], values["TELEGRAM_BOT_TOKEN"],

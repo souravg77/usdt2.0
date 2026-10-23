@@ -88,11 +88,11 @@ docker compose run --rm collector kb search "how does proof of work stop double 
 
 Re-run `kb build` whenever you add a book. Identical files are only indexed once.
 
-To have the agent turn a book into strategies and test them (needs `ANTHROPIC_API_KEY` in `.env`,
-see [learning.md](learning.md)):
+Turning a new book into strategies (`learn read`) is turned off (see [learning.md](learning.md)).
+To test the strategies already read from the supplied books and paper-trade the survivors:
 
 ```bash
-docker compose run --rm collector learn read data/books/your-book.pdf --test
+docker compose run --rm collector learn add-library --test
 docker compose run --rm collector learn list
 docker compose up -d        # starts the paper service next to the collector
 docker compose logs -f paper
