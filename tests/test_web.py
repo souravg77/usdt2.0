@@ -564,7 +564,8 @@ def test_open_positions_follow_the_live_price(tmp_path, monkeypatch):
         async def tickers(self, symbols):
             self.asked.append(symbols)
             return {"source": "live", "tickers": [{"symbol": "BTC/USDT", "price": 103.0},
-                                                  {"symbol": "ETH/USDT", "price": 48.0}]}
+                                                  {"symbol": "ETH/USDT", "price": 48.0},
+                                                  {"symbol": "SOL/USDT", "price": 9.5}]}
 
     fake = FakeLive()
     paths = Paths(paper_state="data/learn/paper_state.json")
@@ -588,17 +589,20 @@ def test_open_positions_follow_the_live_price(tmp_path, monkeypatch):
                                    "cost": 50.1, "stop": 95.0, "status": "open"}}}, open("data/trade/live_state.json", "w"))
     # the Spot AI workspace (the default view): the spot long and the live spot buy
     r = client.get("/api/positions").json()
-    assert r["source"] == "live" and fake.asked[-1] == ["BTC/USDT"]  # only filled ones
+    assert r["source"] == "live" and fake.asked[-1] == ["BTC/USDT", "SOL/USDT"]
     assert r["rows"] == {"paper|a|bybit|BTC/USDT|1h": 6.0,  # (103 - 100) x 2
                          "live|k": 1.4}  # 103 x 0.5 - 50.1
     assert r["total"] == 7.4
-    assert r["prices"] == {"paper|a|bybit|BTC/USDT|1h": 103.0, "live|k": 103.0}
+    # Shawn: a position waiting to fill shows the real price too, but no profit (nothing bought yet)
+    assert r["prices"] == {"paper|a|bybit|BTC/USDT|1h": 103.0, "paper|c|bybit|SOL/USDT|1h": 9.5,
+                           "live|k": 103.0}
     page = client.get("/trading").text
     # the price now and the stop loss with how far away it is
     for cell in ("<th>Price now</th>", "<th>Stop loss</th>", 'data-px="paper|a|bybit|BTC/USDT|1h"',
                  # the take-profit
                  "<th>Take profit</th>", 'data-tp="paper|a|bybit|BTC/USDT|1h" data-level="110"', "no fixed target"):
         assert cell in page, cell
+    assert 'data-px="paper|c|bybit|SOL/USDT|1h"' in page and "(waiting)" in page
     for cell in ('data-pos="paper|a|bybit|BTC/USDT|1h"', 'data-pos="live|k"', 'data-pos="total"',
                  '<script src="/static/positions.js" defer></script>'):
         assert cell in page, cell
