@@ -977,6 +977,13 @@ def test_engine_limits_and_stale_candles_stop_new_entries(tmp_path):
     trader2.tick(now_ms=int(df.ts.iloc[650]) + H + 2 * H)
     assert not trader2.state["open"] and trader2.state.get("signals")
     assert all(s["skipped"] == "stale prices" for s in trader2.state["signals"])
+    # each engine's skip says which engine it was: a Futures long's plain key and buy side once
+    # put it on the Spot AI page
+    from aitrader.web.app import _workspace
+
+    assert sorted(s["market"] for s in trader2.state["signals"]) == ["futures"] * 3 + ["spot"] * 3  # a, b, c
+    for ws in ("spot", "futures"):
+        assert [s["market"] for s in _workspace(trader2.state, ws)["signals"]] == [ws] * 3
     late.close()
 
 

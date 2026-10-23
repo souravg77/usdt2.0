@@ -1301,6 +1301,8 @@ def _workspace(state: dict, ws: str) -> dict:
         return {}
 
     def mine(row: dict) -> bool:
+        if row.get("market") in wallet.MARKETS:  # a signal logged with its engine
+            return row["market"] == ws
         if str(row.get("key", "")).endswith("|futures"):
             return ws == "futures"
         return wallet.market_of(row) == ws
