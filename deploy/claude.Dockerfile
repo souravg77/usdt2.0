@@ -9,8 +9,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends git curl ca-cer
     && pip install --no-cache-dir "pytest>=8" "pytest-asyncio>=0.23" "httpx>=0.27"
 
 USER trader
-# the native installer puts the claude command in ~/.local/bin
-RUN curl -fsSL https://claude.ai/install.sh | bash
+# the native installer puts the claude command in ~/.local/bin. The sign-in folder exists in the
+# image, owned by trader, so the claude_config volume made from it is writable (a volume made for a
+# folder the image lacks belongs to root, and the sign-in can't be saved)
+RUN curl -fsSL https://claude.ai/install.sh | bash && mkdir -p /home/trader/.claude-config
 ENV PATH=/home/trader/.local/bin:$PATH \
     CLAUDE_CONFIG_DIR=/home/trader/.claude-config \
     PYTHONPATH=/work/src
