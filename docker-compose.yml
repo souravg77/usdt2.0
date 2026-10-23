@@ -166,7 +166,7 @@ services:
       - ./:/work
       - /dev/null:/work/.env:ro  # the keys and passwords stay out of sight
       - ./data:/work/data:ro
-      - claude_config:/home/trader/.claude-config  # its sign-in and settings
+      - claude_signin:/home/trader/.claude-config  # its sign-in and settings
     environment:
       DISABLE_AUTOUPDATER: "1"  # updated by rebuilding the image; its files are read-only
     read_only: true
@@ -187,4 +187,4 @@ services:
 volumes:
   caddy_data:
   caddy_config:
-  claude_config:
+  claude_signin:

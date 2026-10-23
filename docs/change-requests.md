@@ -52,7 +52,7 @@ docker compose --profile claude up -d claude                 # starts Remote Con
 ```
 
 The session then shows up under **Remote Control** in the Claude app and on claude.ai. Its sign-in is
-kept in the `claude_config` volume, so a restart doesn't ask again. Stop it with
+kept in the `claude_signin` volume, so a restart doesn't ask again. Stop it with
 `docker compose --profile claude stop claude`; see what it printed with `docker compose logs claude`.
 
 It can run the tests (`python -m pytest -q`). It can't push to GitHub unless you sign in to GitHub
