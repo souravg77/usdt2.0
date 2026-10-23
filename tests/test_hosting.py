@@ -125,8 +125,13 @@ def test_compose_is_hardened():
         assert "no-new-privileges:true" in svc.get("security_opt", []), name
         assert svc.get("mem_limit"), name
     builders = [name for name, svc in services.items() if "build" in svc]
-    assert builders == ["collector"]  # one build per image tag, or parallel builds collide
-    assert all(svc["image"] == "aitrader:latest" for n, svc in services.items() if n != "caddy")
+    assert builders == ["collector", "claude"]  # one build per image tag, or parallel builds collide
+    assert all(svc["image"] == "aitrader:latest" for n, svc in services.items() if n not in ("caddy", "claude"))
+    # Claude Code's own container: never the keys (no env_file, .env hidden), the data read-only
+    claude = services["claude"]
+    assert claude["profiles"] == ["claude"] and "env_file" not in claude
+    assert "/dev/null:/work/.env:ro" in claude["volumes"] and "./data:/work/data:ro" in claude["volumes"]
+    assert not any("docker.sock" in v for v in claude["volumes"])
     assert services["web"]["ports"] == ["127.0.0.1:8080:8080"]  # only Caddy faces the network
     assert services["web"]["environment"]["AITRADER_WEB_TRUST_PROXY"] == "true"
     assert services["web"]["environment"]["AITRADER_DB_PATH"]
@@ -136,7 +141,7 @@ def test_compose_is_hardened():
     for name, svc in services.items():
         env = svc.get("environment") or {}
         assert str(env.get("AITRADER_LIVE_UNLOCKED", "false")).lower() != "true", name
-        if name != "caddy":
+        if name not in ("caddy", "claude"):
             assert env.get("AITRADER_DB_PATH") == "/app/data/aitrader.db", name
 
 
