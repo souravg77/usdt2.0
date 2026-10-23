@@ -94,18 +94,18 @@ def take_sequential(frame: pd.DataFrame, mask=None) -> np.ndarray:
     taken = np.zeros(len(frame), bool)
     if not len(frame):
         return taken
-    order = np.lexsort((frame["signal_ts"].to_numpy(),
-                        frame["timeframe"].astype(str).to_numpy(),
-                        frame["symbol"].astype(str).to_numpy(),
-                        frame["exchange"].astype(str).to_numpy(),
-                        frame["strategy"].astype(str).to_numpy()))
-    keys = frame[["strategy", "exchange", "symbol", "timeframe"]].astype(str).agg("|".join, axis=1).to_numpy()
+    # one integer per (strategy, exchange, symbol, timeframe): positions never interact across them.
+    # (A "a|b|c|d" text key per row needed well over a gigabyte for a million rows: every
+    # `ai retrain` on the 2 GB server was killed for running out of memory.)
+    key = frame.groupby(["strategy", "exchange", "symbol", "timeframe"], sort=False,
+                        observed=True, dropna=False).ngroup().to_numpy()
+    order = np.lexsort((frame["signal_ts"].to_numpy(), key))
     entry, exit_ = frame["entry_ts"].to_numpy(), frame["exit_ts"].to_numpy()
-    busy: dict[str, int] = {}
+    busy = np.full(key.max() + 1, -1, dtype=np.int64)
     for j in order:
-        if mask[j] and entry[j] > busy.get(keys[j], -1):
+        if mask[j] and entry[j] > busy[key[j]]:
             taken[j] = True
-            busy[keys[j]] = exit_[j]
+            busy[key[j]] = exit_[j]
     return taken
 
 
