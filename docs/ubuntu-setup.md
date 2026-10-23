@@ -88,8 +88,9 @@ docker compose run --rm collector kb search "how does proof of work stop double 
 
 Re-run `kb build` whenever you add a book. Identical files are only indexed once.
 
-Turning a new book into strategies (`learn read`) is turned off (see [learning.md](learning.md)).
-To test the strategies already read from the supplied books and paper-trade the survivors:
+Upload a book on the dashboard's Submit a book page and the `books` service reads it overnight
+with the local model (see [learning.md](learning.md)). To test the strategies already read from
+the supplied books and paper-trade the survivors:
 
 ```bash
 docker compose run --rm collector learn add-library --test

@@ -125,12 +125,64 @@ def test_extract_validates_and_repairs(tmp_path):
     assert ex.notes and len(calls) == 2
 
 
-def test_reading_a_book_is_turned_off(tmp_path, capsys):
-    """It needed Claude through the Anthropic API, which the platform no longer uses."""
+def test_read_a_book_with_the_local_model(tmp_path, monkeypatch, capsys):
+    """`learn read` reads in small parts with the local book model, then gives its memory back."""
+    import aitrader.learn.extract as extract_mod
+    from aitrader import llm
     from aitrader.cli import main
 
-    assert main(["learn", "--registry", str(tmp_path / "r.json"), "read", "book.pdf"]) == 1
-    assert "turned off" in capsys.readouterr().err and not (tmp_path / "r.json").exists()
+    book = tmp_path / "book.md"
+    book.write_text("\n\n".join(f"Page {i}: buy when the close is above the open. " * 60 for i in range(20)))
+    asked, unloaded = [], []
+
+    def fake(system, messages):
+        asked.append(messages[-1]["content"])
+        return {"strategies": [dict(EVERY_UP_BAR, name=f"up_bar_{len(asked)}",
+                                    source={"book": "t", "pages": "p. 1", "quote": "buy"}, decisions=[])]}
+
+    monkeypatch.setattr(extract_mod, "local_caller", lambda: fake)
+    monkeypatch.setattr(llm, "unload", unloaded.append)
+    reg = str(tmp_path / "r.json")
+    assert main(["learn", "--registry", reg, "read", str(book), "--max", "2"]) == 0
+    out = capsys.readouterr().out
+    assert len(asked) > 1 and "part 1 of" in out  # the local model's small parts, not one 30,000-word part
+    assert "2 new strategies" in out and len(Registry(reg).entries) == 2
+    assert unloaded == [llm.book_model_name()]
+
+
+def test_book_queue_reads_at_night_only(tmp_path, monkeypatch):
+    from datetime import datetime
+
+    from aitrader.clock import zone
+    from aitrader.learn import bookqueue
+
+    q = str(tmp_path / "queue.json")
+    row = bookqueue.add(str(tmp_path / "a.pdf"), by="admin", max_strategies=99, test=True, path=q)
+    assert row["status"] == "queued" and row["max"] == 30 and row["log"].endswith("a.log")
+    assert bookqueue.hours({}) == (0, 6) and bookqueue.hours({"AITRADER_BOOK_HOURS": "22-5"}) == (22, 5)
+    assert bookqueue.hours({"AITRADER_BOOK_HOURS": "nonsense"}) == (0, 6)
+
+    def at(h):
+        return datetime(2026, 10, 23, h, 30, tzinfo=zone()).timestamp()
+
+    assert bookqueue.is_night(at(2), (0, 6)) and not bookqueue.is_night(at(12), (0, 6))
+    assert bookqueue.is_night(at(23), (22, 5)) and bookqueue.is_night(at(1), (22, 5))
+    assert not bookqueue.is_night(at(6), (22, 5))
+    ran = []
+
+    class Done:
+        returncode = 0
+
+    def run(cmd, stdout, **kw):
+        ran.append(cmd)
+        stdout.write("reading ...\n3 new strategies from \"A\" -> r.json\nbacktesting them:\n")
+        return Done()
+
+    done = bookqueue.run_next(q, "r.json", run=run)
+    assert done["status"] == "done" and done["summary"] == '3 new strategies from "A" -> r.json'
+    assert ran[0][1:] == ["-m", "aitrader.cli", "learn", "--registry", "r.json", "read", str(tmp_path / "a.pdf"),
+                          "--max", "30", "--test"]
+    assert bookqueue.load(q)[0]["status"] == "done" and bookqueue.run_next(q, run=run) is None
 
 
 # ---- backtest gate and paper trading -------------------------------------------------------------

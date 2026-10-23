@@ -6,11 +6,11 @@ order it can cause is the kill switch selling what the executors bought.
 
 ## What it does
 
-- **Submit a book.** Upload a PDF, Markdown or text file (up to 50 MB). Two things happen in the
-  background, and the job page shows live output: `kb build` makes the book searchable in the
-  knowledge base. Turning a book into strategies (`learn read`) is turned off: it needed Claude
-  through the Anthropic API, which the platform no longer uses, and the local model is too small
-  for it.
+- **Submit a book.** Upload a PDF, Markdown or text file (up to 50 MB). `kb build` makes it
+  searchable in the knowledge base straight away (the job page shows live output). The book then
+  waits in the "Books to read" list until night (`AITRADER_BOOK_HOURS`, default 00:00 to 06:00),
+  when the `books` service has the local model read it (`learn read --test`): each strategy becomes
+  checked rules and is backtested; the ones that pass move to paper trading.
 - **Overview.** Shows the mode and whether live orders are locked. It lists every strategy with
   its status, out-of-sample backtest result, paper result and last status change; click one to
   see its rules, sources and history. It also shows the AI trade filter (active model and

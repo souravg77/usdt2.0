@@ -9,9 +9,10 @@ invalid is dropped and reported. The book text is treated as data: the system pr
 model to ignore instructions inside it, and the validator rejects anything outside the rule
 language whatever the model writes.
 
-Turned off (``READ_OFF``): the model was Claude through the Anthropic API, which this platform no
-longer uses, and the local model (``aitrader.llm``) is too small to turn a book into valid rules.
-``extract_strategies`` takes the model as a ``Caller``, so a capable one can be plugged in again.
+The model is the local book model (``aitrader.llm``, Qwen2.5 3B by default), run overnight from
+the book queue (``learn.bookqueue``). It is small, so a book goes in parts of about
+``LOCAL_WORDS_PER_PART`` words and many of its drafts fail the validator: those are dropped, never
+traded. ``extract_strategies`` takes the model as a ``Caller``, so a bigger one can be plugged in.
 """
 
 from __future__ import annotations
@@ -27,9 +28,9 @@ from .rules import RuleError, grammar_help, validate_spec
 
 log = logging.getLogger(__name__)
 
-READ_OFF = ("reading books is turned off: it needed Claude through the Anthropic API, which this platform "
-            "no longer uses, and the local model is too small to write valid strategy rules from a book")
-WORDS_PER_PART = 30_000
+WORDS_PER_PART = 30_000  # for a model with a long context
+LOCAL_WORDS_PER_PART = 1_400  # the local model's 6k-token context also holds the rule language and the answer
+LOCAL_REPAIR_CHARS = 3_000  # the failed drafts sent back for one repair, cut to fit that context
 
 TOOL = {
     "name": "submit_strategies",
@@ -105,8 +106,13 @@ def book_parts(path: str, words_per_part: int = WORDS_PER_PART) -> tuple[str, li
     """Read a PDF/Markdown/text book into parts of about ``words_per_part`` words, each page
     prefixed with a marker like ``[p. 12]`` so the model can cite pages."""
     title, pages = read_document(path)
-    parts, buf, count = [], [], 0
+    pieces = []  # a page longer than a part (a Markdown or text book is often one long "page") is cut
     for label, text in pages:
+        words = text.split()
+        for i in range(0, max(len(words), 1), words_per_part):
+            pieces.append((label, " ".join(words[i:i + words_per_part]) if len(words) > words_per_part else text))
+    parts, buf, count = [], [], 0
+    for label, text in pieces:
         n = len(text.split())
         if buf and count + n > words_per_part:
             parts.append("\n\n".join(buf))
@@ -118,12 +124,22 @@ def book_parts(path: str, words_per_part: int = WORDS_PER_PART) -> tuple[str, li
     return title, parts
 
 
+def local_caller() -> Caller:
+    """The local book model, answering in ``TOOL``'s shape."""
+    from .. import llm
+
+    return llm.book_caller(TOOL["input_schema"])
+
+
 def extract_strategies(path: str, caller: Caller, max_strategies: int = 12,
-                       words_per_part: int = WORDS_PER_PART) -> Extraction:
+                       words_per_part: int = WORDS_PER_PART, repair_chars: int = 20_000,
+                       progress: Callable[[str], None] | None = None) -> Extraction:
     title, parts = book_parts(path, words_per_part)
     result = Extraction(book=title)
     names: set[str] = set()
     for n, part in enumerate(parts, 1):
+        if progress:
+            progress(f"part {n} of {len(parts)}")
         header = f'Book: "{title}" (part {n} of {len(parts)})'
         messages = [{"role": "user", "content": f"{header}\n\n<book>\n{part}\n</book>\n\n"
                      "Submit the strategies this part describes."}]
@@ -135,7 +151,7 @@ def extract_strategies(path: str, caller: Caller, max_strategies: int = 12,
         if bad:  # one repair round with the validator's errors
             fix = "\n".join(f"- {name}: {err}" for name, err, _ in bad)
             repair = messages + [
-                {"role": "assistant", "content": json.dumps({"strategies": [d for _, _, d in bad]})[:20000]},
+                {"role": "assistant", "content": json.dumps({"strategies": [d for _, _, d in bad]})[:repair_chars]},
                 {"role": "user", "content": "These specs broke the rule language. Fix them and submit "
                  f"only the corrected ones (drop any that can't be fixed):\n{fix}"},
             ]
