@@ -113,9 +113,16 @@ def headlines(feeds: list[tuple[str, str]], fetch=fetch_url, now_ms: int | None 
     return items, errors
 
 
+def _ms(v) -> int | None:
+    return int(v) if str(v or "").isdigit() else None
+
+
 def bybit_announcements(fetch=fetch_url, now_ms: int | None = None, days: int = BYBIT_NEWS_DAYS) -> list[dict]:
-    """Every Bybit announcement of the last ``days`` days, newest first, page by page: title, link,
-    published (ms), source ("Bybit: <kind>"), kind, tags and a short description."""
+    """Bybit's news and events, newest first, page by page: every announcement of the last ``days``
+    days (news, listings, delistings, maintenance, campaigns) plus the events still running that
+    were announced before. Each has title, link, published (ms), source ("Bybit: <kind>"), kind,
+    tags, a short description, and for an event its window: starts and ends (ms; None otherwise,
+    since Bybit gives plain news a start equal to its end)."""
     now_ms = now_ms or int(time.time() * 1000)
     out, seen = [], set()
     for page in range(1, BYBIT_NEWS_PAGES + 1):
@@ -123,13 +130,14 @@ def bybit_announcements(fetch=fetch_url, now_ms: int | None = None, days: int = 
         if data.get("retCode") not in (0, None):
             raise ValueError(f"Bybit said {data.get('retMsg') or data.get('retCode')}")
         rows = (data.get("result") or {}).get("list") or []
-        old = False
         for r in rows:
             url, title = str(r.get("url") or ""), " ".join(str(r.get("title") or "").split())
-            when = r.get("publishTime") or r.get("dateTimestamp")
-            when = int(when) if str(when or "").isdigit() else None
-            if when is not None and now_ms - when > days * DAY_MS:
-                old = True
+            when = _ms(r.get("publishTime") or r.get("dateTimestamp"))
+            starts, ends = _ms(r.get("startDateTimestamp")), _ms(r.get("endDateTimestamp"))
+            if not (starts and ends and ends > starts):
+                starts = ends = None  # plain news: no event window
+            running = ends is not None and ends > now_ms
+            if when is not None and now_ms - when > days * DAY_MS and not running:
                 continue
             if not title or not url.startswith("https://") or url in seen:
                 continue
@@ -137,8 +145,9 @@ def bybit_announcements(fetch=fetch_url, now_ms: int | None = None, days: int = 
             kind = str((r.get("type") or {}).get("title") or "Announcement")[:60]
             out.append({"title": title[:300], "url": url[:500], "published": when, "source": f"Bybit: {kind}",
                         "kind": kind, "tags": [str(t)[:40] for t in (r.get("tags") or [])][:8],
-                        "description": " ".join(str(r.get("description") or "").split())[:300]})
-        if old or len(rows) < 50:  # reached the older ones, or the last page
+                        "description": " ".join(str(r.get("description") or "").split())[:300],
+                        "starts": starts, "ends": ends})
+        if len(rows) < 50:  # the last page (an event still running can be on any page, so read them all)
             break
     out.sort(key=lambda i: i["published"] or 0, reverse=True)
     return out

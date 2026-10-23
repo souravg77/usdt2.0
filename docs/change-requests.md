@@ -1,5 +1,9 @@
 # Changing the platform by chatting
 
+> **The dashboard's Change requests are turned off.** Claude wrote them through the Anthropic API,
+> which the platform no longer uses; the local model is far too small to change code. The page
+> still lists the requests made before. Claude Code on the server (below) is separate and still works.
+
 There are two ways to change the platform without opening a task with Claude elsewhere.
 
 | | Change requests page | Claude Code on the server |

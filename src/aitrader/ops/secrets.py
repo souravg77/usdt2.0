@@ -36,8 +36,6 @@ class Field:
 
 
 FIELDS = [
-    Field("ANTHROPIC_API_KEY", "Anthropic API key", "anthropic"),
-    Field("ANTHROPIC_WORKSPACE_ID", "Workspace ID (only if Anthropic asks for one)", "anthropic", secret=False),
     Field("BYBIT_API_KEY", "Real-account API key", "bybit"),
     Field("BYBIT_API_SECRET", "Real-account API secret", "bybit"),
     Field("TELEGRAM_BOT_TOKEN", "Bot token", "telegram"),

@@ -42,19 +42,22 @@ class XError(RuntimeError):
 
 
 def coin_terms(symbol: str) -> list[str]:
-    base = symbol.split("/")[0].upper()
+    base = re.sub(r"^1000+(?=[A-Z])", "", symbol.split("/")[0].upper())  # Bybit's 1000PEPE is PEPE
     return [base, *COIN_WORDS.get(base, [])]
 
 
 def mentions(text: str, symbols: list[str]) -> list[str]:
-    """Pairs a post talks about: $TICKER, #TICKER, the ticker as a word, or the coin's name."""
+    """Pairs a text talks about: $TICKER, #TICKER, the ticker as a word, Bybit's TICKERUSDT, or the
+    coin's name. A one-letter ticker counts only as $X, #X, X/USDT or XUSDT, or every "Q3" or "M&A"
+    would match."""
     low = text.lower()
     out = []
     for s in symbols:
         terms = coin_terms(s)
-        tick = terms[0]
-        if (re.search(rf"(?<![A-Za-z0-9])[$#]?{re.escape(tick)}(?![A-Za-z0-9])", text)
-                or any(re.search(rf"\b{re.escape(w)}\b", low) for w in terms[1:])):
+        tick = re.escape(terms[0])
+        word = (rf"(?<![A-Za-z0-9])[$#]{tick}(?![A-Za-z0-9])|\b{tick}/?USDT\b" if len(terms[0]) < 2
+                else rf"(?<![A-Za-z0-9])[$#]?{tick}(?:USDT)?(?![A-Za-z0-9])")
+        if re.search(word, text) or any(re.search(rf"\b{re.escape(w)}\b", low) for w in terms[1:]):
             out.append(s)
     return out
 

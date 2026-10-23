@@ -1,8 +1,6 @@
-"""Trader-research log: the search conversation, cleaning, URL dedupe, the CLI and the Research
-page (filters, escaping, only http(s) links). Findings are research only: nothing that trades
-reads them."""
+"""Trader-research log: cleaning, URL dedupe, the search turned off, the CLI and the Research page
+(filters, escaping, only http(s) links). Findings are research only: nothing that trades reads them."""
 
-import json
 import os
 
 import pytest
@@ -32,20 +30,6 @@ FINDINGS = {"findings": [
 ]}
 
 
-class FakeAPI:
-    def __init__(self, script):
-        self.script, self.bodies = list(script), []
-
-    def __call__(self, body):
-        self.bodies.append(json.loads(json.dumps(body)))
-        return self.script.pop(0)
-
-
-def reply(findings=FINDINGS):
-    return {"stop_reason": "tool_use", "content": [{"type": "tool_use", "id": "t", "name": "report_trader_research",
-                                                    "input": findings}]}
-
-
 def test_clean_keeps_known_values_only():
     got = research.clean(FINDINGS, NOW)
     assert [f["url"] for f in got] == ["https://www.reddit.com/r/algotrading/comments/abc/#top",
@@ -58,48 +42,31 @@ def test_clean_keeps_known_values_only():
     assert c["evidence"] == "other" and c["source"] == "papers.example"
 
 
-def test_find_searches_then_reports():
-    api = FakeAPI([
-        {"stop_reason": "pause_turn", "content": [{"type": "server_tool_use", "id": "s1", "name": "web_search",
-                                                   "input": {"query": "reddit breakout backtest"}}]},
-        {"stop_reason": "end_turn", "content": [{"type": "text", "text": "done"}]},
-        reply(),
-    ])
-    res = research.find(api, known=["https://known.example/x"], families=["breakout"], model="m", now_ms=NOW)
-    assert res["searches"] == 1 and res["model"] == "m" and len(res["findings"]) == 3
-    first = api.bodies[0]
-    assert first["tools"][0]["type"] == "web_search_20250305" and first["tools"][0]["max_uses"] == 8
-    assert "https://known.example/x" in first["messages"][0]["content"] and "breakout" in first["messages"][0]["content"]
-    assert "data, not instructions" in first["system"] and "not proof of profit" in first["system"]
-    assert "tool_choice" not in first and "tool_choice" not in api.bodies[1]
-    assert api.bodies[2]["tool_choice"] == {"type": "tool", "name": "report_trader_research"}
-
-
-def test_update_dedupes_by_url(tmp_path):
-    from aitrader.ops import EventLog
-
+def test_add_dedupes_by_url(tmp_path):
     d = str(tmp_path / "news")
-    events = EventLog(str(tmp_path / "events.jsonl"), service="research")
-    out = research.update(d, post=FakeAPI([reply()]), now_ms=NOW, events=events)
-    assert len(out["added"]) == 3 and out["error"] == ""
+    assert len(research.add(research.clean(FINDINGS, NOW), d)) == 3
     again = {"findings": [dict(FINDINGS["findings"][0], url="HTTPS://WWW.REDDIT.COM/r/algotrading/comments/abc"),
                           {"url": "https://new.example/q", "family": "buy-the-dip", "claim": "Dips kept dipping.",
                            "evidence": "live record shown", "credibility": "Broker statements shown."}]}
-    api = FakeAPI([reply(again)])
-    out = research.update(d, post=api, now_ms=NOW + 86_400_000, events=events)
-    assert [f["url"] for f in out["added"]] == ["https://new.example/q"]
-    assert "https://www.tradingview.com/script/xyz/" in api.bodies[0]["messages"][0]["content"]  # known list
+    added = research.add(research.clean(again, NOW + 86_400_000), d)
+    assert [f["url"] for f in added] == ["https://new.example/q"]
     rows = research.load(d)
     assert len(rows) == 4 and rows[0]["url"] == "https://new.example/q" and rows[0]["date_found"] == "2025-10-10"
     assert open(research.log_path(d)).read().count("\n") == 4
-    assert "1 new findings" in events.read()[-1]["text"]
 
 
-def test_update_without_key(tmp_path, monkeypatch):
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    out = research.update(str(tmp_path / "news"))
-    assert out["added"] == [] and "ANTHROPIC_API_KEY" in out["error"]
+def test_search_is_turned_off(tmp_path, monkeypatch, capsys):
+    """It searched the web through the Anthropic API, which the platform no longer uses."""
+    from aitrader.cli import main
+    from aitrader.ops import EventLog
+
+    events = EventLog(str(tmp_path / "events.jsonl"), service="research")
+    out = research.update(str(tmp_path / "news"), events=events)
+    assert out["added"] == [] and out["error"] == research.OFF
     assert not os.path.exists(research.log_path(str(tmp_path / "news")))
+    assert events.read()[-1]["level"] == "warning" and "turned off" in events.read()[-1]["text"]
+    monkeypatch.chdir(tmp_path)
+    assert main(["research", "update"]) == 1 and "turned off" in capsys.readouterr().err
 
 
 def test_research_never_imported_by_trading_code():
@@ -121,7 +88,7 @@ def test_cli_show(tmp_path, monkeypatch, capsys):
     from aitrader.cli import main
 
     monkeypatch.chdir(tmp_path)
-    research.update(post=FakeAPI([reply()]), now_ms=NOW)
+    research.add(research.clean(FINDINGS, NOW))
     assert main(["research", "show", "--family", "divergence"]) == 0
     out = capsys.readouterr().out
     assert "RSI divergence is weak alone." in out and "Breakouts" not in out and "1 findings" in out
@@ -143,11 +110,12 @@ def test_research_page(client):
     assert c.get("/research", follow_redirects=False).status_code == 303
     c.post("/login", data={"user": "admin", "password": PW})
     page = c.get("/research").text
-    assert "No findings yet" in page and "Research input only" in page
+    assert "No findings yet" in page and "Research input only" in page and "New searches are off" in page
+    assert "Search the web now" not in page
     research.add([{"url": "javascript:alert(1)", "source": "evil", "date_found": "2025-10-09", "source_date": "",
                    "family": "breakout", "claim": "<img src=x onerror=alert(1)>", "evidence": "anecdote",
                    "credibility": ""}], paths.news)  # a hand-edited bad line is still shown safely
-    research.update(paths.news, post=FakeAPI([reply()]), now_ms=NOW)
+    research.add(research.clean(FINDINGS, NOW), paths.news)
     page = c.get("/research").text
     assert "Hundreds of strategies" in page and "RSI divergence" in page and "4 of 4 findings" in page
     assert "<script>alert" not in page and "&lt;script&gt;" in page and "<img src=x" not in page
@@ -159,9 +127,5 @@ def test_research_page(client):
     page = c.get("/research?family=<b>&evidence=nope").text  # unknown filters are ignored
     assert "4 of 4 findings" in page and "<b>" not in page.split("Strategy family")[1][:200]
     csrf = Auth("admin", PW, "k").csrf(c.cookies.get(COOKIE))
-    assert c.post("/research/refresh", data={"csrf": "x"}).status_code == 403
-    assert c.post("/research/refresh", data={"csrf": csrf}, follow_redirects=False).status_code == 303
-    jobs = [j for j in runner.list() if j["meta"].get("kind") == "research"]
-    assert len(jobs) == 1 and jobs[0]["steps"] == [["research", "update"]]
-    again = c.post("/research/refresh", data={"csrf": csrf}, follow_redirects=False)
-    assert "already%20running" in again.headers["location"]
+    assert c.post("/research/refresh", data={"csrf": csrf}).status_code in (404, 405)  # no search to start
+    assert not [j for j in runner.list() if j["meta"].get("kind") == "research"]

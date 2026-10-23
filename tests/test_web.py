@@ -74,7 +74,7 @@ def test_overview_shows_lock_strategies_and_escapes(web):
     assert "PAPER" in r.text and "DEMO" not in r.text and "did not pass the backtest gate" in r.text  # ladder state
 
 
-def test_submit_book_runs_the_pipeline(web, monkeypatch):
+def test_submit_book_runs_the_pipeline(web):
     client, auth, runner, paths = web
     token = login(client)
     files = {"book": ("../../evil name.md", b"# Book\n\n" + b"Buy when RSI crosses 30. " * 20, "text/markdown")}
@@ -91,21 +91,14 @@ def test_submit_book_runs_the_pipeline(web, monkeypatch):
     saved = job["meta"]["book"]
     assert saved.startswith("data/books/") and "/" not in saved[len("data/books/"):]
     assert re.search(r"evil-name\.md$", saved)
-    # no API key: the book is indexed into the knowledge base only
+    # the book is indexed into the knowledge base only: reading it into strategies is off
     assert [s[0] for s in job["steps"]] == ["kb"]
     assert job["status"] == "done", runner.log_text(job_id)
     assert json.load(open("data/kb/index.json"))["documents"]
     page = client.get(f"/jobs/{job_id}").text
     assert "done" in page and "aitrader kb build" in page
 
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
-    monkeypatch.setattr(runner, "command", lambda step: ["true"])
-    r = client.post("/books", files=files, data={"max": "50", "test": "1", "csrf": csrf},
-                    follow_redirects=False)
-    job = runner.get(r.headers["location"].rsplit("/", 1)[1])
-    read = job["steps"][1]
-    assert read[:4] == ["learn", "--registry", paths.registry, "read"]
-    assert read[-3:] == ["--max", "30", "--test"]
+    assert "reading books is turned off" in client.get("/books").text.lower()
 
 
 def test_rejects_bad_uploads(web):

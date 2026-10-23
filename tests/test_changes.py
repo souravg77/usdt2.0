@@ -143,22 +143,21 @@ def client(tmp_path, monkeypatch):
     return TestClient(app), runner, paths
 
 
-def test_change_requests_page(client, monkeypatch):
+def test_change_requests_page(client, tmp_path):
+    """Turned off (they needed the Anthropic API): the page lists the old requests, takes no new one."""
     c, runner, paths = client
     assert c.get("/changes", follow_redirects=False).status_code == 303
     c.post("/login", data={"user": "admin", "password": PW})
-    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
-    assert "Save the" in c.get("/changes").text and "GitHub token" in c.get("/changes").text
-    monkeypatch.setenv("GITHUB_TOKEN", "t")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
-    csrf = Auth("admin", PW, "k").csrf(c.cookies.get(COOKIE))
-    assert c.post("/changes", data={"csrf": "x", "text": "hi"}).status_code == 403
-    r = c.post("/changes", data={"csrf": csrf, "text": "<script>alert(1)</script> add a chart"},
-               follow_redirects=False)
-    assert r.status_code == 303 and "Sent" in r.headers["location"]
-    jobs = [j for j in runner.list() if j["meta"].get("kind") == "change"]
-    assert len(jobs) == 1 and jobs[0]["steps"][0][:2] == ["change", "run"]
+    changes.new_request("<script>alert(1)</script> add a chart", by="admin", root=paths.changes)
     page = c.get("/changes").text
-    assert "&lt;script&gt;" in page and "<script>alert" not in page and "Nothing changes on this server" in page
-    again = c.post("/changes", data={"csrf": csrf, "text": "more"}, follow_redirects=False)
-    assert "already" in again.headers["location"]
+    assert "Change requests are turned off" in page and "<textarea" not in page
+    assert "&lt;script&gt;" in page and "<script>alert" not in page
+    csrf = Auth("admin", PW, "k").csrf(c.cookies.get(COOKIE))
+    assert c.post("/changes", data={"csrf": csrf, "text": "hi"}).status_code == 405
+    assert not [j for j in runner.list() if j["meta"].get("kind") == "change"]
+
+
+def test_running_a_saved_request_says_it_is_off(tmp_path):
+    req = changes.new_request("add a chart", by="admin", root=str(tmp_path))
+    out = changes.run_saved(req["id"], root=str(tmp_path), gh=object())
+    assert out["status"] == "failed" and "turned off" in out["error"]

@@ -125,12 +125,12 @@ def test_extract_validates_and_repairs(tmp_path):
     assert ex.notes and len(calls) == 2
 
 
-def test_claude_caller_needs_key(monkeypatch):
-    from aitrader.learn import claude_caller
+def test_reading_a_book_is_turned_off(tmp_path, capsys):
+    """It needed Claude through the Anthropic API, which the platform no longer uses."""
+    from aitrader.cli import main
 
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
-        claude_caller()
+    assert main(["learn", "--registry", str(tmp_path / "r.json"), "read", "book.pdf"]) == 1
+    assert "turned off" in capsys.readouterr().err and not (tmp_path / "r.json").exists()
 
 
 # ---- backtest gate and paper trading -------------------------------------------------------------

@@ -1,5 +1,5 @@
-"""News and web search: free feeds, the AI brief (web search + report tool), the news filter, the
-paper trader honouring it, and the News page."""
+"""News: free feeds, the local AI model's brief, the news filter, the paper trader honouring it,
+and the News page."""
 
 import json
 
@@ -19,6 +19,8 @@ SYMS = ["BTC/USDT", "ETH/USDT"]
 RSS = b"""<?xml version="1.0"?><rss><channel>
 <item><title>Bitcoin ETF inflows jump</title><link>https://news.example/etf</link>
 <pubDate>Thu, 09 Oct 2025 08:00:00 GMT</pubDate></item>
+<item><title>Ethereum exchange hack drains a hot wallet</title><link>https://news.example/hack</link>
+<pubDate>Thu, 09 Oct 2025 07:00:00 GMT</pubDate></item>
 <item><title>Old story</title><link>https://news.example/old</link><pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate></item>
 <item><title>No link</title></item>
 </channel></rss>"""
@@ -64,6 +66,7 @@ def test_feeds_gather_and_fail_soft():
     by = got["bybit_announcements"]
     assert [b["title"] for b in by] == ["New Listing: XYZ/USDT", "Bybit Will Delist the ETHFI/USDT Spot Trading Pair"]
     assert by[1]["source"] == "Bybit: Delistings" and by[1]["tags"] == ["Spot"] and by[1]["published"] == 1_759_990_000_000
+    assert by[0]["starts"] is None and by[0]["ends"] is None  # plain news: no event window
     assert feeds.gather(lambda u: b"{}" if "bybit" in u else fake_fetch(u), NOW)["bybit_announcements"] == []
     bad = feeds.gather(lambda u: b'{"retCode": 10006, "retMsg": "Too many visits"}' if "bybit" in u
                        else fake_fetch(u), NOW)
@@ -92,45 +95,76 @@ def test_clean_keeps_known_values_only():
     assert c["pairs"][0]["risk"] == "normal"
 
 
-class FakeAPI:
-    """Search, pause, then finish without the tool: the brief asks for it."""
+class FakeChat:
+    """The local model: answers every call with ``answer`` and keeps what it was asked."""
 
-    def __init__(self, script):
-        self.script, self.bodies = list(script), []
+    def __init__(self, answer=REPORT):
+        self.answer, self.calls = answer, []
 
-    def __call__(self, body):
-        self.bodies.append(body)
-        return self.script.pop(0)
+    def __call__(self, system, user, schema):
+        self.calls.append({"system": system, "user": user, "schema": schema})
+        return self.answer
 
 
-def test_write_brief_searches_then_reports():
-    api = FakeAPI([
-        {"stop_reason": "pause_turn", "content": [{"type": "server_tool_use", "id": "s1", "name": "web_search",
-                                                   "input": {"query": "bitcoin news"}}]},
-        {"stop_reason": "end_turn", "content": [{"type": "server_tool_use", "id": "s2", "name": "web_search",
-                                                 "input": {"query": "war"}}, {"type": "text", "text": "done"}]},
-        {"stop_reason": "tool_use", "content": [{"type": "tool_use", "id": "t", "name": "report_market_news",
-                                                 "input": REPORT}]},
-    ])
-    b = write_brief(SYMS, feeds.gather(fake_fetch, NOW), api, model="m")
-    assert b["searches"] == 2 and b["market_risk"] == "elevated" and b["model"] == "m"
-    first = api.bodies[0]
-    assert first["tools"][0]["type"] == "web_search_20250305" and first["tools"][0]["max_uses"] == 6
-    assert "Extreme Fear" in first["messages"][0]["content"] and "Border clashes" in first["messages"][0]["content"]
-    assert "Bybit Will Delist the ETHFI/USDT" in first["messages"][0]["content"]
-    assert "tool_choice" not in first and "tool_choice" not in api.bodies[1]
-    assert len(api.bodies[1]["messages"]) == 2  # paused turn sent back unchanged
-    assert api.bodies[2]["tool_choice"] == {"type": "tool", "name": "report_market_news"}
-    assert all("force" not in m for body in api.bodies for m in body["messages"])
+def test_write_brief_asks_the_local_model(monkeypatch):
+    monkeypatch.setenv("AITRADER_LOCAL_MODEL", "tiny:1b")
+    chat = FakeChat()
+    b = write_brief(SYMS, feeds.gather(fake_fetch, NOW), chat)
+    assert b["market_risk"] == "elevated" and b["model"] == "tiny:1b" and b["searches"] == 0
+    asked = chat.calls[0]
+    assert "Extreme Fear" in asked["user"] and "Border clashes" in asked["user"]
+    assert "Bybit Will Delist the ETHFI/USDT" in asked["user"]
+    assert asked["user"].startswith("Pairs: BTC/USDT, ETH/USDT\n") and b["pairs"][1]["risk"] == "high"
+    # only the pairs the feeds name go to the model; one it wasn't asked about keeps no news,
+    # whatever the model says of it (REPORT rates ETH high risk)
+    quiet = feeds.gather(fake_fetch, NOW)
+    quiet["crypto_headlines"] = [h for h in quiet["crypto_headlines"] if "Ethereum" not in h["title"]]
+    chat = FakeChat()
+    b = write_brief(SYMS, quiet, chat)
+    assert chat.calls[0]["user"].startswith("Pairs: BTC/USDT\n")
+    assert [p["symbol"] for p in b["pairs"]] == SYMS  # every pair is in the brief all the same
+    assert b["pairs"][1]["risk"] == "normal" and b["pairs"][1]["why"] == "no news found"
+    # the model sees no links and is asked for none: a link it gave would be made up
+    assert "https://" not in asked["user"] and "url" not in json.dumps(asked["schema"])
+    assert "sources" not in json.dumps(asked["schema"])
+
+
+def test_bybit_events_still_running_are_kept_with_their_dates():
+    day = 86_400_000
+    rows = {"retCode": 0, "result": {"list": [
+        {"title": "Delisting of ZZZUSDT Perpetual Contract", "url": "https://announcements.bybit.com/z",
+         "type": {"title": "Delistings"}, "description": "Bybit will be delisting the ZZZUSDT Perpetual Contract.",
+         "publishTime": NOW - day, "startDateTimestamp": NOW - day, "endDateTimestamp": NOW - day},
+        {"title": "Trading Competition", "url": "https://announcements.bybit.com/c", "type": {"title": "Latest Campaigns"},
+         "publishTime": NOW - 10 * day, "startDateTimestamp": NOW - 10 * day, "endDateTimestamp": NOW + 5 * day},
+        {"title": "Old campaign", "url": "https://announcements.bybit.com/o", "type": {"title": "Latest Campaigns"},
+         "publishTime": NOW - 20 * day, "startDateTimestamp": NOW - 20 * day, "endDateTimestamp": NOW - 9 * day}]}}
+    got = feeds.bybit_announcements(lambda u: json.dumps(rows).encode(), NOW)
+    assert [g["title"] for g in got] == ["Delisting of ZZZUSDT Perpetual Contract", "Trading Competition"]
+    assert got[0]["ends"] is None and got[1]["ends"] == NOW + 5 * day
+    from aitrader.news.brief import _prompt, mentioned
+
+    f = {"bybit_announcements": got}
+    assert mentioned(["ZZZ/USDT", "BTC/USDT"], f) == ["ZZZ/USDT"]
+    prompt = _prompt(["ZZZ/USDT"], f)
+    assert "- [Delistings] Delisting of ZZZUSDT Perpetual Contract: Bybit will be delisting" in prompt
+    assert "- [Latest Campaigns] Trading Competition (runs " in prompt
+
+
+def test_brief_pairs_are_the_ones_the_feeds_name():
+    from aitrader.news.brief import mentioned
+
+    f = {"crypto_headlines": [{"title": "Bitcoin ETF jumps; Q3 GDP beats, M&A up"}, {"title": "$Q rallies"}],
+         "trending": [{"symbol": "PEPE"}], "bybit_announcements": [{"title": "Bybit Will Delist ETHFI/USDT"}]}
+    syms = ["BTC/USDT", "ETH/USDT", "Q/USDT", "M/USDT", "1000PEPE/USDT", "SOL/USDT", "ETHFI/USDT"]
+    assert mentioned(syms, f) == ["BTC/USDT", "Q/USDT", "1000PEPE/USDT", "ETHFI/USDT"]
 
 
 def test_update_saves_and_filter_decides(tmp_path):
     from aitrader.ops import EventLog
 
     events = EventLog(str(tmp_path / "events.jsonl"), service="news")
-    api = FakeAPI([{"stop_reason": "tool_use", "content": [{"type": "tool_use", "id": "t",
-                                                            "name": "report_market_news", "input": REPORT}]}])
-    out = update(SYMS, str(tmp_path / "news"), fetch=fake_fetch, post=api, now_ms=NOW, events=events)
+    out = update(SYMS, str(tmp_path / "news"), fetch=fake_fetch, chat=FakeChat(), now_ms=NOW, events=events)
     assert out["brief"]["market_risk"] == "elevated"
     assert (tmp_path / "news" / "history.jsonl").read_text().count("\n") == 1
     ev = events.read()[-1]
@@ -143,10 +177,10 @@ def test_update_saves_and_filter_decides(tmp_path):
     assert stale.allow_entries and stale.size_multiplier == 1 and "stale" in stale.reasons[0]
 
 
-def test_update_without_key_keeps_feeds(tmp_path, monkeypatch):
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+def test_update_without_the_local_model_keeps_feeds(tmp_path, monkeypatch):
+    monkeypatch.setenv("AITRADER_LLM_URL", "http://127.0.0.1:9")  # nothing listens there
     out = update(SYMS, str(tmp_path / "news"), fetch=fake_fetch, now_ms=NOW)
-    assert out["brief"] is None and "ANTHROPIC_API_KEY" in out["brief_error"]
+    assert out["brief"] is None and "URLError" in out["brief_error"]
     assert out["feeds"]["fear_greed"]["value"] == 22
     d = NewsFilter(str(tmp_path / "news")).decide("BTC/USDT", NOW)
     assert d.allow_entries and d.size_multiplier == 1
@@ -185,12 +219,11 @@ def client(tmp_path, monkeypatch):
 def test_news_page(client, monkeypatch):
     c, runner, paths = client
     monkeypatch.setattr(feeds, "DAY_MS", 10**15)  # the sample Bybit announcements count as recent
+    monkeypatch.setattr("aitrader.news.brief.mentioned", lambda syms, _f: syms)  # the sample news is old
     assert c.get("/news", follow_redirects=False).status_code == 303
     c.post("/login", data={"user": "admin", "password": PW})
     assert "No news yet" in c.get("/news").text
-    api = FakeAPI([{"stop_reason": "tool_use", "content": [{"type": "tool_use", "id": "t",
-                                                            "name": "report_market_news", "input": REPORT}]}])
-    update(SYMS, paths.news, fetch=fake_fetch, post=api)
+    update(SYMS, paths.news, fetch=fake_fetch, chat=FakeChat())
     page = c.get("/news").text
     assert "Border clashes escalate" in page and "ETH/USDT: new buys paused" in page
     assert "<summary>Bybit announcements (3)</summary>" in page and "Bybit: Delistings" in page
@@ -240,6 +273,11 @@ class FakeX:
 
 def test_mentions():
     assert mentions("Dogecoin to the moon! $BTC too", ["BTC/USDT", "DOGE/USDT", "ETH/USDT"]) == ["BTC/USDT", "DOGE/USDT"]
+    # Bybit writes pairs as XYZUSDT: a delisting of a pair we trade must be seen
+    assert mentions("Delisting of VELODROMEUSDT Perpetual Contract", ["VELODROME/USDT", "VELO/USDT"]) == \
+        ["VELODROME/USDT"]
+    assert mentions("Listing of QUSDT; Q3 results", ["Q/USDT"]) == ["Q/USDT"]
+    assert mentions("Q3 results, M&A", ["Q/USDT", "M/USDT"]) == []
     assert mentions("ethereal vibes, SOLAR power", ["ETH/USDT", "SOL/USDT"]) == []
     assert mentions("#SOL and ether", ["ETH/USDT", "SOL/USDT"]) == ["ETH/USDT", "SOL/USDT"]
 
@@ -280,10 +318,9 @@ def test_x_client_needs_token(monkeypatch):
 def test_brief_gets_x_posts(tmp_path):
     fake = FakeX()
     r = XReader(str(tmp_path / "news" / "x.json"), XClient("tok", get=fake))
-    api = FakeAPI([{"stop_reason": "tool_use", "content": [{"type": "tool_use", "id": "t",
-                                                            "name": "report_market_news", "input": REPORT}]}])
-    update(SYMS, str(tmp_path / "news"), fetch=fake_fetch, post=api, x=r)
-    prompt = api.bodies[0]["messages"][0]["content"]
+    chat = FakeChat()
+    update(SYMS, str(tmp_path / "news"), fetch=fake_fetch, chat=chat, x=r)
+    prompt = chat.calls[0]["user"]
     assert "@elonmusk" in prompt and "Dogecoin to the moon" in prompt and "Big ETH upgrade" in prompt
 
 
@@ -350,11 +387,10 @@ def test_news_sites(client, tmp_path):
     c.post("/news/sites", data={"csrf": csrf, "site": "https://decrypt.co/news"})
     c.post("/news/sites", data={"csrf": csrf, "site": "coinmarketcap.com", "remove": "1"})
     assert load_sites(paths.news) == [s for s in DEFAULT_SITES if s != "coinmarketcap.com"] + ["decrypt.co/news"]
-    api = FakeAPI([{"stop_reason": "tool_use", "content": [{"type": "tool_use", "id": "t",
-                                                            "name": "report_market_news", "input": REPORT}]}])
-    update(SYMS, paths.news, fetch=fake_fetch, post=api, x=None)
-    prompt = api.bodies[0]["messages"][0]["content"]
-    assert "Check these news sites first" in prompt and "decrypt.co/news" in prompt and "coinmarketcap" not in prompt
+    chat = FakeChat()
+    update(SYMS, paths.news, fetch=fake_fetch, chat=chat, x=None)
+    prompt = chat.calls[0]["user"]
+    assert "News sites you trust most" in prompt and "decrypt.co/news" in prompt and "coinmarketcap" not in prompt
 
 
 def test_news_page_shows_the_workspace_pairs(client, monkeypatch):
@@ -365,9 +401,8 @@ def test_news_page_shows_the_workspace_pairs(client, monkeypatch):
 
     c, _runner, paths = client
     c.post("/login", data={"user": "admin", "password": PW})
-    api = FakeAPI([{"stop_reason": "tool_use", "content": [{"type": "tool_use", "id": "t",
-                                                            "name": "report_market_news", "input": REPORT}]}])
-    update(SYMS, paths.news, fetch=fake_fetch, post=api)
+    monkeypatch.setattr("aitrader.news.brief.mentioned", lambda syms, _f: syms)  # the sample news is old
+    update(SYMS, paths.news, fetch=fake_fetch, chat=FakeChat())
     page = c.get("/news").text
     assert "Spot AI workspace" in page and "<b>BTC/USDT</b>" in page and "<b>ETH/USDT</b>" in page
     wallet.set_market(wallet.market_path("data/learn/paper_state.json"), True)

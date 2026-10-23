@@ -227,8 +227,8 @@ data-tz-label="{_e(tz_label(now))}"{f' data-reload-ms="{int(refresh * 1000)}"' i
                       report_path=paths.report)
     add_news_routes(app, settings=settings, auth=auth, jobs=jobs, page=page, guard=guard, news_dir=paths.news,
                     paper_state=paths.paper_state)
-    add_research_routes(app, auth=auth, jobs=jobs, page=page, guard=guard, news_dir=paths.news)
-    add_change_routes(app, auth=auth, jobs=jobs, page=page, guard=guard, changes_dir=paths.changes)
+    add_research_routes(app, page=page, guard=guard, news_dir=paths.news)
+    add_change_routes(app, page=page, guard=guard, changes_dir=paths.changes)
     add_pair_routes(app, settings=settings, auth=auth, jobs=jobs, page=page, guard=guard, ranking_path=paths.pairs,
                     paper_state=paths.paper_state, report_path=paths.report)
     add_replay_routes(app, settings=settings, auth=auth, jobs=jobs, page=page, guard=guard,
@@ -291,21 +291,16 @@ data-tz-label="{_e(tz_label(now))}"{f' data-reload-ms="{int(refresh * 1000)}"' i
         user, token, redirect = guard(request)
         if redirect:
             return redirect
-        has_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
-        warn = "" if has_key else (
-            '<p class="bad">No Anthropic API key yet, so the agent can\'t read books. Add it on the '
-            '<a href="/settings">Settings</a> page. Uploads are still added to the knowledge base.</p>')
+        from ..learn import READ_OFF
+
+        warn = f'<p class="warn">{_e(READ_OFF[0].upper() + READ_OFF[1:])}. Uploads are still added to the knowledge base.</p>'
         err = f'<p class="bad">{_e(error)}</p>' if error else ""
         body = f"""{err}{warn}
 <form method="post" action="/books" enctype="multipart/form-data" class="card">
 {_csrf(auth, token)}
-<p>Upload a trading book (PDF, Markdown or text, up to {MAX_UPLOAD // 2**20} MB). The agent
-reads it in full, writes each concrete strategy as checked rules (long spot only, stop required,
-risk capped at 1%), then backtests them with fees and slippage. Strategies that pass move to
-paper trading. Nothing trades real money.</p>
+<p>Upload a trading book (PDF, Markdown or text, up to {MAX_UPLOAD // 2**20} MB). It is added to
+the knowledge base, where its passages can be searched (<code>aitrader kb search</code>).</p>
 <label>Book <input type="file" name="book" accept=".pdf,.md,.txt,application/pdf,text/plain" required></label>
-<label>Most strategies to keep <input type="number" name="max" value="12" min="1" max="30"></label>
-<label class="row"><input type="checkbox" name="test" value="1" checked> Backtest the new strategies straight away</label>
 <button>Submit book</button></form>
 <h2>Book jobs</h2>{_jobs_table(jobs.list())}"""
         return page("Submit a book", body, user, token)
@@ -318,24 +313,14 @@ paper trading. Nothing trades real money.</p>
         form = await request.form()
         if not auth.check_csrf(token, str(form.get("csrf", ""))):
             return PlainTextResponse("bad form token; reload the page", status_code=403)
-        book, test = form.get("book"), str(form.get("test", ""))
-        try:
-            max = int(str(form.get("max", "12")))
-        except ValueError:
-            max = 12
+        book = form.get("book")
         if book is None or isinstance(book, str):
             return RedirectResponse(f"/books?error={_q('Choose a file to upload.')}", status_code=303)
         try:
             path = await _save_upload(book, paths.books)
         except ValueError as exc:
             return RedirectResponse(f"/books?error={_q(str(exc))}", status_code=303)
-        steps = [["kb", "build", "--index", paths.kb_index]]
-        if os.environ.get("ANTHROPIC_API_KEY"):
-            read = ["learn", "--registry", paths.registry, "read", path,
-                    "--max", str(min(max_val(max), 30))]
-            if test:
-                read.append("--test")
-            steps.append(read)
+        steps = [["kb", "build", "--index", paths.kb_index]]  # reading it into strategies is off (READ_OFF)
         job_id = jobs.submit(f"Book: {book.filename or os.path.basename(path)}", steps,
                              {"book": path, "by": user})
         return RedirectResponse(f"/jobs/{job_id}", status_code=303)
@@ -1040,13 +1025,6 @@ NAV = [("/", "Overview"), ("/markets", "Markets"), ("/pairs", "Pairs"), ("/tradi
        ("/replay", "Replay"), ("/teacher", "Teacher"),
        ("/news", "News"), ("/research", "Research"), ("/reports", "Reports"), ("/books", "Submit a book"), ("/changes", "Change requests"), ("/admin/users", "Users"),
        ("/settings", "Settings")]
-
-
-def max_val(v) -> int:
-    try:
-        return max(1, int(v))
-    except (TypeError, ValueError):
-        return 12
 
 
 async def _save_upload(upload: UploadFile, folder: str) -> str:

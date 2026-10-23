@@ -1,8 +1,8 @@
 """The News page: what the agent knows about the world and each pair right now.
 
-It shows the AI's web-search brief (market risk, world events, each pair's demand, risk and
-coming events, with source links), the Fear & Greed index, trending coins and the latest
-headlines. "Search now" queues ``aitrader news update`` as a job.
+It shows the local AI model's brief (market risk, world events, each pair's demand, risk and
+coming events), the Fear & Greed index, trending coins and the latest headlines. "Update now"
+queues ``aitrader news update`` as a job.
 """
 
 from __future__ import annotations
@@ -53,12 +53,12 @@ def add_news_routes(app, *, settings, auth, jobs, page, guard, news_dir: str = D
         body = f'<p class="good">{_e(msg)}</p>' if msg else ""
         body += f'<p class="bad">{_e(error)}</p>' if error else ""
         if job:
-            body += ('<p class="warn">The AI is searching the web now; this page refreshes by itself. '
+            body += ('<p class="warn">The AI is reading the news now; this page refreshes by itself. '
                      f'<a href="/jobs/{_e(job["id"])}">Follow the job</a></p>')
         name, syms = workspace()
         body += (f'<p class="small muted">{name} workspace: news about the {len(syms)} {name} pairs'
                  f'{" (the Futures top gainers)" if name == "Futures AI" else ""}, plus world, economic and '
-                 'fundamental news. Each search covers both engines\' pairs.</p>')
+                 'fundamental news. Each update covers both engines\' pairs.</p>')
         body += _top(auth, token, latest, job, NewsFilter(news_dir, cache_s=0), syms)
         if latest:
             body += _brief(latest.get("brief"), syms, name)
@@ -111,21 +111,21 @@ def add_news_routes(app, *, settings, auth, jobs, page, guard, news_dir: str = D
         if not auth.check_csrf(token, csrf):
             return PlainTextResponse("bad form token; reload the page", status_code=403)
         if running():
-            return RedirectResponse("/news?error=" + _q("a search is already running"), status_code=303)
-        jobs.submit("News: search the web", [["news", "update"]], meta={"kind": "news", "by": user})
-        return RedirectResponse("/news?msg=" + _q("Searching the web. The brief appears here in a minute or two."),
-                                status_code=303)
+            return RedirectResponse("/news?error=" + _q("a news update is already running"), status_code=303)
+        jobs.submit("News: read the feeds and write the brief", [["news", "update"]], meta={"kind": "news", "by": user})
+        return RedirectResponse("/news?msg=" + _q("Reading the feeds. The local AI model takes a few minutes to "
+                                                  "write the brief."), status_code=303)
 
 
 def _top(auth, token, latest: dict, job, flt: NewsFilter, symbols: list[str]) -> str:
     b = (latest or {}).get("brief")
     if not latest:
-        state = "No news yet. The news service writes a brief every few hours; or search now."
+        state = "No news yet. The news service writes a brief every few hours; or update now."
     elif not b:
         state = (f"Feeds read {_ms(latest.get('generated'))}, but the AI brief failed: "
-                 f"{latest.get('brief_error') or 'unknown error'}. It needs the Anthropic key on Settings.")
+                 f"{latest.get('brief_error') or 'unknown error'}. It needs the ollama service running.")
     else:
-        state = f"Last brief {_ms(latest.get('generated'))} · {b.get('searches', 0)} web searches."
+        state = f"Last brief {_ms(latest.get('generated'))} · written by {b.get('model') or 'the AI'}."
     disabled = " disabled" if job else ""
     effects = []
     for s in symbols:
@@ -139,7 +139,7 @@ def _top(auth, token, latest: dict, job, flt: NewsFilter, symbols: list[str]) ->
             f'<p class="small muted">{_e(state)} The news can only make the agent more careful: high risk '
             'pauses new buys, elevated risk halves their size. It never buys because of a headline.</p>'
             f'<form method="post" action="/news/refresh" class="row">{_csrf(auth, token)}'
-            f'<button{disabled}>Search the web now</button></form></div>')
+            f'<button{disabled}>Update now</button></form></div>')
 
 
 def _link(url: str, text: str = "source") -> str:
@@ -166,8 +166,8 @@ def _brief(b: dict | None, symbols: list[str] | None = None, name: str = "") -> 
         out += "</table>"
     pairs = [p for p in b.get("pairs", []) if symbols is None or p["symbol"] in symbols]
     if symbols is not None and not pairs:
-        return out + (f'<h2>{_e(name)} pairs</h2><p class="muted">The last search had nothing on these pairs yet '
-                      f'({_e(", ".join(symbols)) or "none"}); press Search the web now.</p>')
+        return out + (f'<h2>{_e(name)} pairs</h2><p class="muted">The last brief had nothing on these pairs yet '
+                      f'({_e(", ".join(symbols)) or "none"}); press Update now.</p>')
     out += (f"<h2>{_e(name + ' pairs' if name else 'Pairs')}</h2><table><tr><th>Pair</th><th>Risk</th><th>Demand</th><th>Sentiment</th>"
             "<th>Why</th><th>Coming events</th></tr>")
     for p in pairs:
@@ -229,8 +229,8 @@ def _sites_section(auth, token, sites: list[str]) -> str:
         f'<span class="tick-chip">{_link("https://" + x, x)} <form method="post" action="/news/sites" class="inline">'
         f'{_csrf(auth, token)}<input type="hidden" name="site" value="{_e(x)}"><input type="hidden" name="remove" '
         'value="1"><button class="ghost small" aria-label="remove">×</button></form></span>' for x in sites)
-    return ('<h2 id="sites">News sites</h2><div class="card"><p class="muted small">The AI checks these sites first '
-            'in every news update, then searches the rest of the web.</p>'
+    return ('<h2 id="sites">News sites</h2><div class="card"><p class="muted small">The AI weighs headlines from '
+            'these sites higher. It reads only the news feeds\' headlines: it can\'t open the sites or search the web.</p>'
             f'<div class="chips">{chips or "<span class=muted>none</span>"}</div>'
             f'<form method="post" action="/news/sites" class="row">{_csrf(auth, token)}'
             '<input name="site" placeholder="www.example.com/crypto" aria-label="news site address">'
