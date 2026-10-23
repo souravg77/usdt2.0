@@ -270,3 +270,47 @@ def test_chart_scrolls_back_through_older_candles(world):
     r = client.get(f"/api/market/history?symbol=BTC/USDT&tf=1h&before={cut}").json()
     assert r["source"] == "database" and r["candles"] and all(c[0] < cut for c in r["candles"])
     assert len(r["candles"]) == 20
+
+
+def test_live_prices_find_newly_listed_coins_and_fall_back_to_the_newest_candle(tmp_path):
+    """Shawn: Futures positions showed "-" for BTR and BZ (new perpetuals) with "saved price
+    (Bybit didn't answer)". A coin missing from the all-tickers answer gets the market list
+    reloaded and its own ticker; a coin Bybit doesn't answer for shows the newest saved candle."""
+    import asyncio
+    import time as _time
+
+    from aitrader.data.store import CandleStore
+    from aitrader.models import Candle
+    from aitrader.web.live import LiveMarket
+
+    class Client:
+        markets = {"BTC/USDT:USDT": {}}
+        reloads = 0
+
+        async def fetch_tickers(self, symbols=None):
+            return {"BTC/USDT:USDT": {"last": 60_000.0}}
+
+        async def load_markets(self, reload=False):
+            Client.reloads += 1
+            self.markets = {**self.markets, "BTR/USDT:USDT": {}}
+            return self.markets
+
+        async def fetch_ticker(self, name):
+            if name not in self.markets:
+                raise KeyError(name)
+            return {"last": 0.061}
+
+    db = str(tmp_path / "f.db")
+    store = CandleStore(db)
+    now = int(_time.time() * 1000) // 60_000 * 60_000
+    store.upsert([Candle("bybit", "BZ/USDT", "1m", now - 120_000, 1, 1, 1, 104.9, 1),
+                  Candle("bybit", "BZ/USDT", "4h", now - 4 * 3_600_000 * 2, 1, 1, 1, 99.0, 1)])
+    store.close()
+    feed = LiveMarket(db, perp=True, client=Client())
+    res = asyncio.run(feed.tickers(["BTC/USDT", "BTR/USDT", "BZ/USDT"]))
+    prices = {t["symbol"]: t["price"] for t in res["tickers"]}
+    assert res["source"] == "live" and prices == {"BTC/USDT": 60_000.0, "BTR/USDT": 0.061, "BZ/USDT": 104.9}
+    assert Client.reloads == 1
+    feed._cache.clear()
+    asyncio.run(feed.tickers(["BZ/USDT", "BTC/USDT"]))
+    assert Client.reloads == 1  # BZ is still unknown, but the list isn't reloaded again within minutes
