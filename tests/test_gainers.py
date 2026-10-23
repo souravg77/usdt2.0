@@ -62,7 +62,8 @@ def test_pick_keeps_liquid_perp_risers_with_or_without_a_spot_listing():
 
 def test_switch_refresh_and_configured_symbols(tmp_path):
     path = str(tmp_path / "gainers.json")
-    env = {"AITRADER_GAINERS_FILE": path}
+    env = {"AITRADER_GAINERS_FILE": path, "AITRADER_SPOT_GAINERS_FILE": str(tmp_path / "spot.json"),
+           "AITRADER_SQUEEZE_FILE": str(tmp_path / "squeeze.json")}  # never the live lists
     assert gainers.symbols(path) == [] and not gainers.due(path)
     gainers.switch(True, top=3, path=path)
     assert gainers.due(path, now_ms=NOW)  # on, no list yet
@@ -184,7 +185,8 @@ def test_spot_scanner_scores_and_flags_pumps(tmp_path):
     fut = str(tmp_path / "fut.json")
     gainers.switch(True, top=3, path=fut)
     asyncio.run(gainers.refresh(FakePerps(), fut, now_ms=NOW))
-    env = {"AITRADER_GAINERS_FILE": fut, "AITRADER_SPOT_GAINERS_FILE": path}
+    env = {"AITRADER_GAINERS_FILE": fut, "AITRADER_SPOT_GAINERS_FILE": path,
+           "AITRADER_SQUEEZE_FILE": str(tmp_path / "squeeze.json")}  # never the live list
     fixed = ["ETH/USDT"]
     assert pairs.configured_symbols(fixed, env=env, now_ms=NOW + 1, market="spot") == ["ETH/USDT", "BTC/USDT", "WIF/USDT"]
     # Futures AI trades only its gainers while that list is on (plus pairs it still holds)

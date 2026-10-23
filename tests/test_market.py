@@ -294,13 +294,15 @@ def test_token_filters():
 def test_configured_symbols_falls_back_to_the_fixed_list(tmp_path):
     fixed = ["BTC/USDT", "ETH/USDT"]
     path = str(tmp_path / "ranking.json")
-    ranked = {"AITRADER_PAIRS": "ranked", "AITRADER_PAIRS_TOP": "2"}
-    assert pairs.configured_symbols(fixed, env={}, path=path) == fixed  # default: fixed list
+    # the scanners' lists in tmp_path, never the live ones under data/pairs
+    off = {f"AITRADER_{k}_FILE": str(tmp_path / f"{k.lower()}.json") for k in ("GAINERS", "SPOT_GAINERS", "SQUEEZE")}
+    ranked = {**off, "AITRADER_PAIRS": "ranked", "AITRADER_PAIRS_TOP": "2"}
+    assert pairs.configured_symbols(fixed, env=off, path=path) == fixed  # default: fixed list
     assert pairs.configured_symbols(fixed, env=ranked, path=path, now_ms=NOW) == fixed  # missing
     pairs.save_ranking({"generated": NOW, "pairs": [{"symbol": s} for s in ("SOL/USDT", "XRP/USDT", "ADA/USDT")]},
                        path)
     assert pairs.configured_symbols(fixed, env=ranked, path=path, now_ms=NOW + H) == ["SOL/USDT", "XRP/USDT"]
-    assert pairs.configured_symbols(fixed, env={}, path=path, now_ms=NOW) == fixed  # not turned on
+    assert pairs.configured_symbols(fixed, env=off, path=path, now_ms=NOW) == fixed  # not turned on
     stale = NOW + 49 * H
     assert pairs.configured_symbols(fixed, env=ranked, path=path, now_ms=stale) == fixed
     assert pairs.configured_symbols(fixed, env={**ranked, "AITRADER_PAIRS_MAX_AGE_HOURS": "72"}, path=path,
