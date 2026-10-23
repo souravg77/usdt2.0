@@ -596,6 +596,8 @@ def test_open_positions_follow_the_live_price(tmp_path, monkeypatch):
                  "<th>Take profit</th>", 'data-tp="paper|a|bybit|BTC/USDT|1h" data-level="110"', "no fixed target"):
         assert cell in page, cell
     assert 'data-px="paper|c|bybit|SOL/USDT|1h"' in page and "(waiting)" in page
+    # Shawn: how much USDT each trade took, where a phone shows it (under the market name)
+    assert "200.00 USDT in" in page and "50.10 USDT in" in page and "waiting to fill" in page
     for cell in ('data-pos="paper|a|bybit|BTC/USDT|1h"', 'data-pos="live|k"', 'data-pos="total"',
                  '<script src="/static/positions.js" defer></script>'):
         assert cell in page, cell
@@ -610,6 +612,7 @@ def test_open_positions_follow_the_live_price(tmp_path, monkeypatch):
                  "exit rule: close_below_ema20"):
         assert cell in page, cell
     assert 'data-pos="live|k"' not in page and 'data-pos="paper|a|' not in page
+    assert "margin 150.00 USDT" in page  # a perpetual: its margin (no leverage saved: 1x)
     js = client.get("/static/positions.js")
     assert js.status_code == 200 and "/api/positions" in js.text
     assert live_position_usdt(paper, {}, {})["rows"] == {}  # no price: cells keep what they showed
