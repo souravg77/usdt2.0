@@ -38,7 +38,30 @@ ever pushes `change/...` branches. If your GitHub plan offers branch protection 
 private repositories, turn on "require a pull request" for `main`. Delete the token on GitHub if
 you stop using this page.
 
-## Claude Code on the server, from your phone
+## Claude Code in its own Docker container (recommended)
+
+The `claude` service runs Claude Code in a container of its own. It can read and change the code
+(on a branch) and read `./data` (trades, settings, the event log), but it **cannot see `.env`**, so
+no key or password ever reaches it, and it can't run Docker or touch the trading services.
+
+```bash
+cd ~/AI_crypto_trader
+docker compose --profile claude build claude                 # once, and again after each install
+docker compose --profile claude run --rm claude claude       # once: sign in (opens a link), trust /work, then /exit
+docker compose --profile claude up -d claude                 # starts Remote Control and keeps it running
+```
+
+The session then shows up under **Remote Control** in the Claude app and on claude.ai. Its sign-in is
+kept in the `claude_config` volume, so a restart doesn't ask again. Stop it with
+`docker compose --profile claude stop claude`; see what it printed with `docker compose logs claude`.
+
+It can run the tests (`python -m pytest -q`). It can't push to GitHub unless you sign in to GitHub
+inside it; without that, it explains what it found and the fix goes through a pull request as usual.
+
+## Claude Code directly on the server, from your phone
+
+The same, without Docker. It can then read `.env` and run any command you approve, so prefer the
+container above.
 
 This gives you a full Claude Code session working in `~/AI_crypto_trader`, which you drive from
 the Claude app or claude.ai.

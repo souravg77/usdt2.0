@@ -145,6 +145,46 @@ services:
     command: ["trade", "run", "--mode", "live", "--exchange", "bybit"]
     restart: "no"
 
+  # Claude Code, driven from the Claude app through Remote Control, in its own container: it sees
+  # the code (to read and change it on a branch) and ./data read-only (logs, trades, settings), but
+  # not .env, so it never sees your keys or passwords, and it can't run Docker or touch the other
+  # services. Sign in once, then start it (docs/change-requests.md):
+  #   docker compose --profile claude build claude
+  #   docker compose --profile claude run --rm claude claude      # sign in, trust the folder, /exit
+  #   docker compose --profile claude up -d claude
+  claude:
+    profiles: ["claude"]
+    build:
+      context: .
+      dockerfile: deploy/claude.Dockerfile
+    image: aitrader-claude:latest
+    pull_policy: never
+    command: ["claude", "remote-control"]
+    stdin_open: true
+    tty: true
+    volumes:
+      - ./:/work
+      - /dev/null:/work/.env:ro  # the keys and passwords stay out of sight
+      - ./data:/work/data:ro
+      - claude_config:/home/trader/.claude-config  # its sign-in and settings
+    environment:
+      DISABLE_AUTOUPDATER: "1"  # updated by rebuilding the image; its files are read-only
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m
+      - /home/trader/.cache:size=256m,uid=${AITRADER_UID:-1000},gid=${AITRADER_UID:-1000}
+      - /home/trader/.local/state:size=64m,uid=${AITRADER_UID:-1000},gid=${AITRADER_UID:-1000}
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    mem_limit: 2g
+    pids_limit: 512
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
 volumes:
   caddy_data:
   caddy_config:
+  claude_config:
