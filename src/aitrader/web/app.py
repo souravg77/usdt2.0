@@ -1574,7 +1574,9 @@ def _usdt_cell(x: float | None, bold: bool = False, pos_id: str = "") -> str:
 
 
 def _open_symbols(paper: dict, execs: dict) -> list[str]:
-    out = [(k.split("|") + ["", "", ""])[2] for k, p in paper.get("open", {}).items() if p.get("filled")]
+    """The symbols to price live: every paper position, also one still waiting to fill (its row
+    shows the price and how far the stop is, though it has no profit yet), and open live ones."""
+    out = [(k.split("|") + ["", "", ""])[2] for k in paper.get("open", {})]
     for st in execs.values():
         out += [p.get("symbol", "") for p in st.get("positions", {}).values() if p.get("status") == "open"]
     return [s for s in out if s]
