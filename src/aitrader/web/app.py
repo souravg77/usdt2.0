@@ -1876,10 +1876,17 @@ def _trading_stats(c: dict, settings, paths: Paths, paper: dict, events: list[di
         trading = ("Paused", "warn")
     else:
         trading = ("Running", "good")
-    trades = paper.get("trades", [])
-    pnl = sum(t.get("pnl_usdt", 0) for t in trades)
-    in_paper = _trading_count(paths, ws)
     from ..learn import wallet
+
+    # the P&L of the wallet as it is now: a restart from the dashboard starts it again from zero
+    since = wallet.load(wallet.wallet_path(paths.paper_state, ws))["since"]
+    every = paper.get("trades", [])
+    trades = [t for t in every if t.get("exit_ts", 0) >= since]
+    pnl = sum(t.get("pnl_usdt", 0) for t in trades)
+    opens = (paper.get("open") or {}).values()
+    filled = sum(1 for p in opens if p.get("filled", True))
+    waiting = len(opens) - filled  # signalled; it fills when its entry candle has closed
+    in_paper = _trading_count(paths, ws)
 
     if not c["killed"] and not c["paused"] and not wallet.engines(wallet.engines_path(paths.paper_state))[ws]:
         trading = (f"{'Futures' if ws == 'futures' else 'Spot'} AI off", "warn")
@@ -1889,7 +1896,9 @@ def _trading_stats(c: dict, settings, paths: Paths, paper: dict, events: list[di
         *([] if ws == "futures" else [_account_tile(acct)]),  # the real spot balance: Spot workspace only
         ("Strategies trading", str(in_paper), "good" if in_paper else "warn", "in paper trading"),
         (f"{'Futures' if ws == 'futures' else 'Spot'} AI paper P&L", f"{pnl:+,.2f}", "good" if pnl > 0 else "bad" if pnl < 0 else "",
-         f"{len(paper.get('open', {}))} open · {len(trades)} closed"),
+         f"{filled} open" + (f" · {waiting} waiting to fill" if waiting else "") + f" · {len(trades)} closed"
+         + (f" since the wallet restart {_ms(since)}; all time {sum(t.get('pnl_usdt', 0) for t in every):+,.2f} "
+            f"over {len(every)} trades" if since and len(every) > len(trades) else "")),
     ]
     return '<div class="stats">' + "".join(
         f'<div class="stat"><span class="k">{_e(k)}</span><span class="v {cls}">{_e(v)}</span>'

@@ -655,3 +655,22 @@ def test_open_positions_say_which_indicators_took_the_trade(tmp_path):
                    "reason": "EMA stack up, HH/HL, pullback to EMA20 held"}}}}
     html = _positions_table(paper, {}, futures_view=True, why=names)
     assert "Why (indicators)" in html and "pullback to EMA20 held" in html and "Indicators: " in html
+
+
+def test_paper_pnl_tile_counts_from_the_wallet_restart(tmp_path):
+    from aitrader.learn import wallet
+    from aitrader.web.app import _trading_stats
+
+    paths = Paths(registry=str(tmp_path / "reg.json"), paper_state=str(tmp_path / "paper_state.json"))
+    c = {"killed": False, "paused": False}
+    paper = {"trades": [{"exit_ts": 1_000, "pnl_usdt": -2_000.0, "side": "buy"},
+                        {"exit_ts": 5_000, "pnl_usdt": 25.5, "side": "buy"}],
+             "open": {"a": {"filled": True}, "b": {"filled": False}}}
+    # never restarted: every trade counts
+    html = _trading_stats(c, Settings(), paths, paper, [], {}, "spot")
+    assert "-1,974.50" in html and "1 open · 1 waiting to fill · 2 closed" in html and "all time" not in html
+    # restarted after the big loss: the tile starts again, the lifetime total is still shown
+    wallet.save(wallet.wallet_path(paths.paper_state, "spot"), 10_000.0, now_ms=2_000)
+    html = _trading_stats(c, Settings(), paths, paper, [], {}, "spot")
+    assert "+25.50" in html and "-1,974.50" not in html.split("all time")[0]
+    assert "1 closed since the wallet restart" in html and "all time -1,974.50 over 2 trades" in html
