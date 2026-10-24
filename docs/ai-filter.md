@@ -23,6 +23,13 @@ on the command line (`aitrader ai --market futures retrain`, `aitrader learn tea
 The ML strategies (`ml_boosted`, `ml_classifier`) already train on whichever engine's candles they
 trade, so their models are separate too. The models made before this split stay Spot AI's.
 
+The strategy test is separate too. `aitrader learn test --market futures` backtests the strategies
+Futures AI trades on the perpetuals' candles, with perp fees and funding. A strategy only Futures AI
+trades (a short twin, a Futures pick) takes that result as its backtest and moves on it; Spot AI's
+`learn test` leaves those out. A long both engines trade keeps its spot result and status, with
+Futures AI's own result beside it (`backtest_futures`), and Futures AI's "Keep the best" ranks on that
+one (the button runs the Futures test first).
+
 ## What it learns from
 
 `aitrader ai dataset` backtests the strategies and writes one row per signal to

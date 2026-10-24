@@ -113,3 +113,44 @@ def test_cli_trains_futures_ai_on_the_perpetuals(tmp_path, monkeypatch, capsys):
     assert "short-up" not in set(spot.get("strategy", []))
     assert main(["--env-file", "none", "learn", "teach-off", "--market", "futures", "--by", "t"]) == 0
     assert "Futures AI" in capsys.readouterr().out
+
+
+def test_futures_ai_has_its_own_strategy_test(tmp_path, monkeypatch, capsys):
+    from aitrader.learn.keep import keep_top
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("AITRADER_FUTURES_DB_PATH", raising=False)
+    fstore = CandleStore("data/aitrader_futures.db")  # only the perpetuals have candles
+    fill_store(fstore, synthetic(n=3000, seed=7), sym="SOL/USDT")
+    fstore.close()
+    CandleStore("data/aitrader.db").close()
+    reg = Registry("data/learn/registry.json")
+    reg.add(Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR), status="paper",
+                  backtest={"out_of_sample": {"trades": 50, "expectancy_r": 0.4}}))
+    reg.add(Entry(id="short-up", kind="short", name="short: up_bar",
+                  spec={"base_id": "up", "base_kind": "rule", "base_name": "up_bar",
+                        "base_spec": validate_spec(EVERY_UP_BAR)}))
+    reg.save()
+    assert main(["--env-file", "none", "learn", "test", "--market", "futures"]) == 0
+    out = capsys.readouterr().out
+    assert "Futures AI: backtesting on the perpetuals" in out
+    reg = Registry("data/learn/registry.json")
+    short = reg.get("short-up")
+    # the short twin is Futures AI's alone: its perpetual test is its backtest and moves it
+    assert short.backtest_futures["markets"][0]["symbol"] == "SOL/USDT"
+    assert short.backtest == short.backtest_futures and short.status != "research"
+    assert main(["--env-file", "none", "learn", "test", "--paper", "--market", "futures", "up"]) == 0
+    reg = Registry("data/learn/registry.json")
+    up = reg.get("up")
+    # the shared long keeps its spot result and status; Futures AI's own result sits beside it
+    assert up.status == "paper" and up.backtest["out_of_sample"]["expectancy_r"] == 0.4
+    assert up.backtest_futures["market"] == "futures" and up.backtest_futures["markets"][0]["symbol"] == "SOL/USDT"
+    # Spot AI's test leaves the short twin out
+    assert main(["--env-file", "none", "learn", "test", "short-up"]) == 0
+    assert "Spot AI never trades them" in capsys.readouterr().out
+    # each engine ranks on its own test
+    up.backtest_futures = {"out_of_sample": {"trades": 50, "expectancy_r": -0.9}, "failed": ["bad"]}
+    spot = keep_top(reg, 10, market="spot")
+    fut = keep_top(reg, 10, market="futures")
+    assert [k["score"] > 0 for k in spot["kept"] if k["id"] == "up"] == [True]
+    assert [(k["score"] < 0, k["passed"]) for k in fut["kept"] if k["id"] == "up"] == [(True, False)]

@@ -18,8 +18,9 @@ the paper trader still retires one that loses too much. The rest leave paper tra
 ``BENCHED``; a later run can bring one back if it climbs into the top ``n``. Strategies retired
 for poor paper results stay retired. Open paper positions are still managed until they close.
 
-Each engine has its own ranking (``market``): Spot AI ranks the long strategies by their backtest
-and its own paper trades, Futures AI the longs and the short twins by their backtest and its own
+Each engine has its own ranking (``market``): Spot AI ranks the long strategies by their spot
+backtest and its own paper trades, Futures AI the longs and the short twins by their backtest on
+the perpetuals (``learn test --market futures``; the spot one until that has run) and its own
 paper trades. An engine trades only the strategies its own ranking kept (``kept_ids``), so a
 strategy that earned its place on Futures never trades on Spot because of it, and the other way
 round. A strategy leaves paper trading only when neither engine kept it.
@@ -38,16 +39,25 @@ BENCHED = "not in the best"
 PER_TIMEFRAME = 2  # places kept for the best strategies on each timeframe
 
 
-def _passed(entry: Entry) -> bool:
-    bt = entry.backtest or {}
+def backtest_of(entry: Entry, market: str | None = None) -> dict:
+    """The backtest an engine ranks on: Futures AI its own test on the perpetuals when there is
+    one (``learn test --market futures``), else the spot test like Spot AI."""
+    if market == "futures" and entry.backtest_futures:
+        return entry.backtest_futures
+    return entry.backtest or {}
+
+
+def _passed(entry: Entry, market: str | None = None) -> bool:
+    bt = backtest_of(entry, market)
     return not bt.get("failed") and (bt.get("out_of_sample") or {}).get("trades", 0) > 0
 
 
 def score(entry: Entry, market: str | None = None) -> float | None:
     """Result per trade, out of sample and paper together, shrunk toward 0 for few trades. None
     when the strategy has no backtest result yet. With ``market`` only that engine's paper trades."""
-    oos = (entry.backtest or {}).get("out_of_sample") or {}
-    if not entry.backtest or "trades" not in oos:
+    bt = backtest_of(entry, market)
+    oos = bt.get("out_of_sample") or {}
+    if not bt or "trades" not in oos:
         return None
     n_bt, e_bt = oos.get("trades", 0), oos.get("expectancy_r", 0.0)
     paper = entry.paper or {}
@@ -70,14 +80,14 @@ def rank(reg: Registry, market: str | None = None) -> list[tuple[Entry, float]]:
             and not (e.spec or {}).get("pick")  # timeframe picks (learn.picks) are kept apart
             and not (market == "spot" and e.kind == "short")]
     scored = [(e, s) for e in pool if (s := score(e, market)) is not None]
-    return sorted(scored, key=lambda es: (_passed(es[0]), es[1]), reverse=True)
+    return sorted(scored, key=lambda es: (_passed(es[0], market), es[1]), reverse=True)
 
 
-def timeframe_scores(entry: Entry) -> dict[str, float]:
+def timeframe_scores(entry: Entry, market: str | None = None) -> dict[str, float]:
     """Out-of-sample result per trade on each timeframe alone, shrunk toward 0 like ``score``."""
     trades: dict[str, int] = {}
     total: dict[str, float] = {}
-    for m in (entry.backtest or {}).get("markets") or []:
+    for m in backtest_of(entry, market).get("markets") or []:
         tf, n = m.get("timeframe"), m.get("trades_oos", 0)
         if tf and n:
             trades[tf] = trades.get(tf, 0) + n
@@ -91,20 +101,20 @@ def _tf_order(tf: str) -> int:
     return TIMEFRAME_MS.get(tf, 0)
 
 
-def choose(ranked: list[tuple[Entry, float]], n: int,
-           per_tf: int = PER_TIMEFRAME) -> list[tuple[Entry, float, str]]:
+def choose(ranked: list[tuple[Entry, float]], n: int, per_tf: int = PER_TIMEFRAME,
+           market: str | None = None) -> list[tuple[Entry, float, str]]:
     """The ``n`` to keep, in ranking order, each with why: first up to ``per_tf`` places for the
     best on each timeframe (shortest first), then the best overall. A timeframe place needs a result
     above 0R on that timeframe *and* overall, since the paper trader trades every timeframe of a
     strategy; at most half of the ``n`` places go this way, so the best overall always get the rest."""
-    tf_scores = {e.id: timeframe_scores(e) for e, _s in ranked}
+    tf_scores = {e.id: timeframe_scores(e, market) for e, _s in ranked}
     tfs = sorted({tf for sc in tf_scores.values() for tf in sc}, key=_tf_order)
     why: dict[str, str] = {}
     for tf in tfs:
         have = sum(1 for i in why if tf in tf_scores[i])
         best = sorted(((e, tf_scores[e.id][tf]) for e, total in ranked
                        if e.id not in why and total > 0 and tf_scores[e.id].get(tf, 0.0) > 0),
-                      key=lambda es: (_passed(es[0]), es[1]), reverse=True)
+                      key=lambda es: (_passed(es[0], market), es[1]), reverse=True)
         for e, s in best[:max(0, per_tf - have)]:
             if len(why) >= n // 2:
                 break
@@ -123,10 +133,10 @@ def keep_top(reg: Registry, n: int, per_tf: int = PER_TIMEFRAME, market: str | N
     ranked = rank(reg, market)
     if not ranked:
         return {"kept": [], "benched": [], "returned": [], "untested": 0}
-    chosen = choose(ranked, n, per_tf)
+    chosen = choose(ranked, n, per_tf, market)
     keep_ids = {e.id for e, _s, _w in chosen} | set(others)
-    out = {"market": market, "kept": [{"id": e.id, "score": round(sc, 4), "passed": _passed(e), "why": w,
-                     "timeframes": sorted(timeframe_scores(e), key=_tf_order)} for e, sc, w in chosen],
+    out = {"market": market, "kept": [{"id": e.id, "score": round(sc, 4), "passed": _passed(e, market), "why": w,
+                     "timeframes": sorted(timeframe_scores(e, market), key=_tf_order)} for e, sc, w in chosen],
            "benched": [], "returned": [],
            "untested": sum(1 for e in reg.entries.values() if e.status == "paper" and score(e) is None)}
     for i, (e, s) in enumerate(ranked, 1):

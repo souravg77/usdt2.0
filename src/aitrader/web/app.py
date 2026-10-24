@@ -676,7 +676,7 @@ after {_e(window.split(" to ")[1])}; the next one waits for the next night.</p>
                              ["learn", "add-shorts"],
                              ["learn", "paper-all"],
                              ["download", "--since", since, "--exchange", EXCHANGE],
-                             ["learn", "test", "--paper"], ["learn", "keep-top", "--market", mkt]],
+                             ["learn", "test", "--paper", "--market", mkt], ["learn", "keep-top", "--market", mkt]],
                             meta={"kind": "paper-start"})
                 return (f"{name} paper trading is on, and every strategy is being loaded: a year of price history is "
                         "downloaded, each one is backtested and only the best ones keep trading. Trades open when a "
@@ -700,10 +700,13 @@ after {_e(window.split(" to ")[1])}; the next one waits for the next night.</p>
             busy = {j.get("meta", {}).get("kind") for j in jobs.list() if j["status"] in ("queued", "running")}
             if busy & {"paper-start", "keep-top"}:
                 return "Strategies are already being loaded or ranked; see Recent jobs on the Overview page."
+            # Futures AI ranks on its own backtests on the perpetuals, so they are brought up to date first
+            steps = [["learn", "test", "--paper", "--market", "futures"]] if mkt == "futures" else []
             jobs.submit(f"{name}: keep only the best {count} strategies paper trading",
-                        [["learn", "keep-top", "--n", str(count), "--market", mkt]], meta={"kind": "keep-top"})
+                        steps + [["learn", "keep-top", "--n", str(count), "--market", mkt]], meta={"kind": "keep-top"})
             _event("keep_top", f"{name}: keep only the best {count} strategies, from the dashboard by {user}")
-            return (f"Ranking {name}'s strategies on its own results: its best {count} keep trading on {name}, "
+            first = "Backtesting them on the perpetuals, then ranking" if mkt == "futures" else "Ranking"
+            return (f"{first} {name}'s strategies on its own results: its best {count} keep trading on {name}, "
                     "the rest stop opening trades there (their open trades still close normally). The other "
                     "engine's strategies are not changed.")
         return _control_post(request, csrf, act)
@@ -1180,14 +1183,16 @@ def _strategy_table(paths: Paths) -> str:
     for e in sorted(reg.entries.values(), key=lambda e: (order.get(e.status, 9), e.id)):
         state, note = ladder_state(e, ev)
         bt = e.backtest.get("out_of_sample", {})
+        fbt = (e.backtest_futures or {}).get("out_of_sample", {})
         pp = e.paper or {}
         why = e.history[-1]["why"] if e.history else ""
         rows.append(
             f'<tr><td><a href="/strategies/{_e(e.id)}">{_e(e.id)}</a><div class="muted small">{_e(e.source[:70])}</div></td>'
             f'<td class="{_status_class(state)}">{_e(label(state))}<div class="muted small">{_e(note)}</div></td>'
-            f'<td>{_result(bt)}</td><td>{_result(pp)}</td>'
+            f'<td>{_result(bt)}</td><td>{_result(fbt)}</td><td>{_result(pp)}</td>'
             f'<td class="small">{_e(why[:140])}</td></tr>')
     return ("<table><tr><th>Strategy</th><th>Ladder</th><th>Backtest (out of sample)</th>"
+            "<th>Futures backtest (perpetuals)</th>"
             f"<th>Paper</th><th>Last change</th></tr>{''.join(rows)}</table>")
 
 

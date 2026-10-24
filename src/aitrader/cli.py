@@ -623,13 +623,23 @@ def cmd_learn(s: Settings, args) -> int:
     cfg = BacktestConfig(taker_fee=s.paper_taker_fee, maker_fee=s.paper_maker_fee,
                          slippage_bps=s.paper_slippage_bps, max_cost_r=s.max_cost_r)
 
-    def run_tests(entries, move: bool = True) -> None:
-        store = CandleStore(s.db_path)
+    def run_tests(entries, move: bool = True, market: str = "spot") -> None:
+        from .learn.picks import learns_for
+
+        # each engine tests on its own candles: Spot AI on spot, Futures AI on the perpetuals
+        store, pairs, costs = _engine_market(s, market, symbols, cfg)
         regimes: dict = {}  # each market's regime labels, worked out once for all entries
+        skipped = [e.id for e in entries if not learns_for(e, market)]
+        if skipped:
+            print(f"  {len(skipped)} left out: {'Spot AI never trades them' if market == 'spot' else 'Futures AI never trades them'}")
         for e in entries:
-            res = evaluate(e, store, exchanges, symbols, cfg, move=move, regimes=regimes)
+            if not learns_for(e, market):
+                continue
+            res = evaluate(e, store, exchanges, pairs, costs, move=move, regimes=regimes, market=market)
             m = res["out_of_sample"]
-            if move:
+            # Futures AI's test moves only the strategies Spot AI never trades (short twins,
+            # Futures picks); a shared one keeps the status its spot test gave it
+            if move and (market == "spot" or not learns_for(e, "spot")):
                 verdict = {"paper": "PASSED -> paper trading", "rejected": "rejected",
                            "under_review": "UNDER REVIEW (holdout)"}.get(e.status, "untested")
             else:
@@ -828,6 +838,8 @@ def cmd_learn(s: Settings, args) -> int:
                 print("indicators they use: " + ", ".join(f"{k} ({c})" for k, c in used.items()))
         return 0
     if cmd == "test":
+        market = getattr(args, "market", "spot") or "spot"
+        print(f"{'Futures AI: backtesting on the perpetuals' if market == 'futures' else 'Spot AI: backtesting on spot candles'}")
         if args.ids:
             entries = [reg.get(i) for i in args.ids]
         elif args.paper:
@@ -837,7 +849,7 @@ def cmd_learn(s: Settings, args) -> int:
         if not entries:
             print("nothing to test (add strategies with `learn read` or `learn add-builtin`)")
             return 0
-        run_tests(entries, move=not args.paper)
+        run_tests(entries, move=not args.paper, market=market)
         return 0
     if cmd == "report":
         from .learn.report import backtest_report, known_entries, report_text, save_report
@@ -1849,6 +1861,8 @@ def build_parser() -> argparse.ArgumentParser:
     lt.add_argument("--retest", action="store_true", help="also re-test rejected strategies")
     lt.add_argument("--paper", action="store_true", help="backtest the strategies already paper trading and "
                                                         "record the result, without moving them")
+    lt.add_argument("--market", choices=["spot", "futures"], default="spot",
+                    help="whose test: Spot AI's on spot candles (default) or Futures AI's on the perpetuals")
     lrp = le_sub.add_parser("report", help="backtest every strategy over the last N years: win report "
                                            "per strategy and per year")
     lrp.add_argument("--years", type=int, default=5)
