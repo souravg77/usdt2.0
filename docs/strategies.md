@@ -211,6 +211,23 @@ Ornstein-Uhlenbeck half-life) but never makes a signal: both legs would have to 
 together, and the executor trades one leg at a time with its own stop. Cross-exchange
 arbitrage is recorded as not possible because the platform trades on Bybit only (owner decision).
 
+## ml_boosted (machine learning that finds its own entries)
+
+No hand-written entry rule: a gradient-boosted tree model (scikit-learn HistGradientBoosting) decides
+when to buy. For every past bar of the chart it learns whether price reached +3 ATR before -1.5 ATR
+within 24 bars, from 22 features (RSI 7/14, MACD histogram, ADX, DI spread, Bollinger %B and width,
+distance from EMA 20/50/100, 1-24 bar returns, ATR % and ATR 14/50 ratio, relative volume, position
+in the 20-bar range, candle body and wicks). A long opens when its chance for the newest closed bar
+crosses above 50 %; the short twin (`short: ml_boosted`) has its own model, trained on the upside-down
+chart. Stop 1.5 ATR, target 2R, time stop 24 bars, 0.5 % risk. 1h and 4h.
+
+- Walk-forward: a model is retrained every 250 bars on up to the last 1,500 bars whose outcome was
+  already known, and only predicts the bars after it, so backtests and Replay are out-of-sample.
+- Paper trading reads about 2,000 bars per chart (the collector keeps that much 1h and 4h history)
+  and reuses each trained model until the next retrain step.
+- It is a candidate like every other strategy: `learn add-builtin ml_boosted`, `learn add-shorts`,
+  `learn test`, then the usual picks. `ml_classifier` is the simpler logistic-regression baseline.
+
 ## New indicators
 
 Added to `aitrader.indicators` with unit tests (warm-up, value checks, no look-ahead):
