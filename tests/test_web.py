@@ -254,6 +254,18 @@ def test_paper_switch_and_live_card(web, monkeypatch):
     assert "Spot AI paper trading <b class=\"good\">ON</b>" in client.get("/trading").text
 
 
+def test_each_ai_learning_link_shows_only_in_its_own_view(web):
+    """Shawn: the Spot AI learning page belongs to the Spot AI view, Futures AI learning to the
+    Futures AI view. The header shows only the matching one."""
+    client, auth, _runner, paths = web
+    csrf = auth.csrf(login(client))
+    spot = client.get("/").text  # spot is the default view
+    assert ">Spot AI learning</a>" in spot and ">Futures AI learning</a>" not in spot
+    client.post("/market-mode", data={"csrf": csrf, "market": "futures", "back": "/"})
+    fut = client.get("/").text
+    assert ">Futures AI learning</a>" in fut and ">Spot AI learning</a>" not in fut
+
+
 def test_turning_one_engine_off_leaves_the_other_running(web, monkeypatch):
     """Shawn: stopping Spot AI paper trading must not stop Futures AI, and the other way round."""
     client, auth, runner, paths = web
