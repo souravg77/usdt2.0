@@ -103,9 +103,15 @@ def create_app(settings: Settings, auth: Auth, jobs: JobRunner, paths: Paths | N
              refresh: int | None = None, nav_links: str | None = None, head_extra: str = "") -> HTMLResponse:
         nav = ""
         if user:
+            try:  # the Spot/Futures view: each AI's learning page shows only in its own view
+                fut_view = _futures_state(paths)[0]
+            except Exception:
+                fut_view = False
             links = nav_links if nav_links is not None else "".join(
                 f'<a href="{href}"{" class=active aria-current=page" if name == title else ""}>{name}</a>'
-                for href, name in NAV if href != "/admin/users" or users is not None)
+                for href, name in NAV
+                if (href != "/admin/users" or users is not None)
+                and href != ("/learning/spot" if fut_view else "/learning/futures"))
             nav = (f'<nav>{links}</nav><div class="who"><span class="muted small">{_e(user)}</span>'
                    f'<form method="post" action="/logout" class="inline">{_csrf(auth, token)}'
                    f'<button class="link">Log out</button></form></div>')
