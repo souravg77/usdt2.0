@@ -10,6 +10,7 @@ can veto a new entry or shrink its size, but they never create one.
 | `funding_rate` | Bybit USDT perpetual, ccxt `fetch_funding_rate_history` | 8h | fraction per 8h (0.0001 = 0.01%) |
 | `open_interest` | Bybit USDT perpetual, ccxt `fetch_open_interest_history` (1h; the last 29 days are fetched) | 1h | coins |
 | `long_short_ratio` | Bybit long/short account ratio (skipped if ccxt does not expose it) | 1h | ratio |
+| `premium_index` | Bybit premium-index klines (perpetual against the index price, the basis), ccxt `fetch_premium_index_ohlcv`; each hour stored at its close | 1h | fraction (0.0005 = 0.05%) |
 | `btc_dominance` | CoinGecko `/api/v3/global` | 1h | percent |
 | `total_mcap` | CoinGecko `/api/v3/global` | 1h | USD |
 | `total_mcap_change_24h` | CoinGecko `/api/v3/global` | 1h | fraction (-0.08 = -8%) |
@@ -24,7 +25,13 @@ an API key.
 aitrader context collect --once           # one top-up (backfills 30 days the first time)
 aitrader context collect --interval 900   # service: top up every 15 minutes
 aitrader context show --symbol BTC/USDT   # latest values and the filter's decision now
+aitrader context backfill                 # once: about 3 years of funding, open interest and premium
+                                          # index for every pair, for the ML fundamental overlay
 ```
+
+Every top-up also copies the perpetuals' series (funding, open interest, premium index) into Futures
+AI's own database, so its strategy test reads them without opening Spot AI's. On the server:
+`docker compose run --rm -T collector context backfill --backfill-days 1100`.
 
 ## The filter rules
 
@@ -34,6 +41,8 @@ aitrader context show --symbol BTC/USDT   # latest values and the filter's decis
 - funding above **+0.05% per 8h**: size x0.5; above **+0.10%**: no new longs (the agent only buys
   spot, so no new entries).
 - open interest up more than **15% in 24h while price fell**: size x0.5.
+- funding above **+0.05%** and open interest up more than **10% in 24h**: crowded longs still piling
+  in, no new longs (Shawn's gate; a short reads it the other way).
 - total market cap down more than **8% in 24h**: no new entries.
 - size cuts from several rules multiply (x0.5 and x0.5 give x0.25).
 - a series older than **twice its refresh interval** is ignored and its rule skipped. Missing or
@@ -50,11 +59,12 @@ when its own feed fails.
 
 ## AI features
 
-`data.context.attach_context(df, store, exchange, symbol)` adds `funding_rate` and
-`open_interest` columns to a candle frame. Each bar sees only the newest value stamped at or
+`data.context.attach_context(df, store, exchange, symbol)` adds `funding_rate`,
+`open_interest` and `premium_index` columns to a candle frame. Each bar sees only the newest value stamped at or
 before its close (`ts + timeframe`), and only while that value is fresh. `ai dataset` / `ai retrain`
 call it automatically once the context table has rows, so the Phase 4 model's `funding_rate` and
-`oi_change` features stop being empty after the next retrain.
+`oi_change` features stop being empty after the next retrain. The ML strategies `ml_boosted_fund` and
+`ml_ensemble_fund` read the same columns as model inputs (see [strategies.md](strategies.md)).
 
 ## Not covered
 

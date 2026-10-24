@@ -240,6 +240,24 @@ crosses above 70 % (Shawn's choice; the paper used 50 %) and is sold at the firs
 safety stop, a 4R ceiling and a 12 x 4-hour time stop are backstops. Retrained every 250 candles on up to
 the last 1,500, walk-forward. 1h and 4h; the short twin has its own models on the upside-down chart.
 
+## ml_boosted_fund and ml_ensemble_fund (the fundamental overlay)
+
+The same two models with six more inputs from the coin's Bybit perpetual (Shawn's "high fundamental
+overlay", 2026-10-24): funding rate, funding against its 3-day average, open-interest change over 4 hours
+and 1 day, the premium index (the basis: perpetual against the index price) and how unusual it is against
+the last 7 days (a z-score). `ml_ensemble_fund` adds them for the newest candle next to its 60-candle window.
+Labels stay price-only; fundamentals are never used to make a label.
+
+- Every value is the newest one stamped at or before the candle's close (`attach_context`), so no future data.
+- Models only train on candles that had funding and premium data at the time; open interest may be missing
+  (the trees handle a gap, k-NN gets it filled with the median). No trade without a fresh funding rate and premium.
+- They are separate strategies next to `ml_boosted` and `ml_ensemble`, so each engine's strategy test shows
+  whether the overlay helps on candles the models never saw. They start untested like every strategy.
+- They need years of funding, open interest and premium history: run `context backfill` once (see
+  [market-context.md](market-context.md)). The short twins read funding and premium with the sign flipped.
+- Not included (no free source for most coins): MVRV, NVT, active addresses, exchange flows, liquidations.
+  Long/short ratio has only about a month of history, too little to train on.
+
 ## New indicators
 
 Added to `aitrader.indicators` with unit tests (warm-up, value checks, no look-ahead):

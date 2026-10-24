@@ -197,8 +197,24 @@ def test_filter_blocks_market_wide_selloff_and_rules_combine(ctx):
                 ("bybit", "BTC/USDT", "funding_rate", NOW, 0.0007),
                 ("bybit", "BTC/USDT", "open_interest", NOW - DAY_MS, 100.0),
                 ("bybit", "BTC/USDT", "open_interest", NOW, 130.0)])
-    d = ContextFilter(ctx).decide("bybit", "BTC/USDT", NOW, price_change_24h=-0.01)
+    d = ContextFilter(ctx, crowd_oi=1.0).decide("bybit", "BTC/USDT", NOW, price_change_24h=-0.01)
     assert d.allow_entries and d.size_multiplier == 0.25 and len(d.reasons) == 2
+
+
+@pytest.mark.parametrize("rate, oi, side, allow", [
+    (0.0007, 115.0, "buy", False),   # crowded longs still piling in
+    (0.0007, 105.0, "buy", True),    # open interest barely moving
+    (0.0002, 130.0, "buy", True),    # funding normal
+    (-0.0007, 115.0, "sell", False),  # the mirror for shorts
+    (0.0007, 115.0, "sell", True),
+])
+def test_filter_blocks_high_funding_with_rising_open_interest(ctx, rate, oi, side, allow):
+    ctx.upsert([("bybit", "BTC/USDT", "funding_rate", NOW, rate),
+                ("bybit", "BTC/USDT", "open_interest", NOW - DAY_MS, 100.0),
+                ("bybit", "BTC/USDT", "open_interest", NOW, oi)])
+    d = ContextFilter(ctx).decide("bybit", "BTC/USDT", NOW, price_change_24h=0.02, side=side)
+    assert d.allow_entries == allow
+    assert allow or any("piling in" in r for r in d.reasons)
 
 
 def test_build_dataset_attaches_context(tmp_path, monkeypatch):

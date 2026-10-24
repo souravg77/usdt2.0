@@ -347,7 +347,7 @@ class MlEnsemble(MlBoosted):
 
     def _exit_name(self, timeframe: str) -> str:
         p = self.params
-        return f"ml_ensemble_down:{timeframe}:{p['exit_below']:g}:{p['hours']:g}:{p['fee_threshold']:g}"
+        return f"{self.spec.name}_down:{timeframe}:{p['exit_below']:g}:{p['hours']:g}:{p['fee_threshold']:g}"
 
     def _horizon(self, timeframe: str) -> int:
         return max(1, round(self.params["hours"] * 3_600_000 / TIMEFRAME_MS[timeframe]))
@@ -374,13 +374,15 @@ class MlEnsemble(MlBoosted):
         model = _MODELS.get(key)
         if model is None:
             from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestClassifier
+            from sklearn.impute import SimpleImputer
             from sklearn.neighbors import KNeighborsClassifier
             from sklearn.pipeline import make_pipeline
             from sklearn.preprocessing import StandardScaler
 
             p = self.params
             model = _Vote([
-                make_pipeline(StandardScaler(), KNeighborsClassifier(n_neighbors=int(p["knn_k"]),
+                make_pipeline(SimpleImputer(strategy="median", keep_empty_features=True), StandardScaler(),
+                              KNeighborsClassifier(n_neighbors=int(p["knn_k"]),
                                                                      weights="distance")),
                 RandomForestClassifier(n_estimators=int(p["rf_trees"]), min_samples_leaf=3, max_features="sqrt",
                                        n_jobs=1, random_state=0),
@@ -419,4 +421,77 @@ class _Vote:
         return np.mean([m.predict_proba(X) for m in self.models], axis=0)
 
 
-ML_STRATEGIES = (MlBoosted, MlEnsemble)
+# ---- the fundamental overlay: the perpetual's funding, open interest and basis as model inputs ----
+
+FUND_COLUMNS = ("funding", "funding_chg3d", "oi_chg4h", "oi_chg1d", "premium", "premium_z7d")
+FUND_TEXT = ("Fundamental overlay (6 more inputs, from Bybit's perpetual for this coin): funding rate, "
+             "funding against its 3-day average, open-interest change over 4 hours and 1 day, the premium "
+             "index (basis: perpetual against the index price) and how unusual it is against the last 7 "
+             "days. No trade without a fresh funding rate and premium index; open interest may be missing.")
+
+
+def fund_frame(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+    """The perpetual's funding, open interest and premium index as scaled inputs, from the columns
+    ``data.context.attach_context`` adds (NaN where they are missing). Each bar only reads values
+    stamped at or before its close."""
+    nan = pd.Series(np.nan, index=df.index)
+    f = df["funding_rate"] if "funding_rate" in df else nan
+    oi = (df["open_interest"] if "open_interest" in df else nan).replace(0, np.nan)
+    pr = df["premium_index"] if "premium_index" in df else nan
+    per_hour = 3_600_000 / TIMEFRAME_MS[timeframe]
+    day, week, h4 = max(1, round(24 * per_hour)), max(2, round(168 * per_hour)), max(1, round(4 * per_hour))
+    days3 = max(1, round(72 * per_hour))
+    sd = pr.rolling(week, min_periods=week // 2).std(ddof=0).replace(0, np.nan)
+    return pd.DataFrame({
+        "funding": f * 1000,  # +0.01 % per 8h -> 0.1
+        "funding_chg3d": (f - f.rolling(days3, min_periods=1).mean()) * 1000,
+        "oi_chg4h": oi / oi.shift(h4) - 1,
+        "oi_chg1d": oi / oi.shift(day) - 1,
+        "premium": pr * 100,
+        "premium_z7d": (pr - pr.rolling(week, min_periods=week // 2).mean()) / sd,
+    }, index=df.index).replace([np.inf, -np.inf], np.nan)
+
+
+def _fund_needed(F: pd.DataFrame) -> np.ndarray:
+    """Rows with the inputs a trade can't go without: funding and premium index (open interest may
+    be missing; the trees and the filled-in k-NN handle that)."""
+    return F[["funding", "funding_chg3d", "premium"]].notna().all(axis=1).to_numpy()
+
+
+def _fund_spec(base, name: str, extra: str):
+    from dataclasses import replace
+
+    return replace(base, name=name, setup=base.setup + " " + FUND_TEXT,
+                   filter=base.filter + " " + extra,
+                   decisions=base.decisions + (
+                       "A separate strategy next to the one without fundamentals, so each engine's strategy "
+                       "test shows whether the extra inputs help on candles the models never saw.",))
+
+
+class MlBoostedFund(MlBoosted):
+    spec = _fund_spec(MlBoosted.spec, "ml_boosted_fund",
+                      "It only trains on candles that had funding and premium data at the time.")
+    needs_context = True
+    reason = "ML model with funding / open interest / basis: chance of +2R crossed 70%"
+
+    def _features(self, df):
+        X = feature_frame(df)
+        F = fund_frame(df, getattr(self, "_tf", None) or self.spec.timeframes[0])
+        both = pd.concat([X, F], axis=1)
+        return both.to_numpy(float), X.notna().all(axis=1).to_numpy() & _fund_needed(F)
+
+
+class MlEnsembleFund(MlEnsemble):
+    spec = _fund_spec(MlEnsemble.spec, "ml_ensemble_fund",
+                      "The six fundamental inputs are the newest candle's, next to its 60-candle window; it "
+                      "only trains on candles that had funding and premium data at the time.")
+    needs_context = True
+    reason = "k-NN, Random Forest and gradient boosting with funding / open interest / basis expect a 4h rise above the fees"
+
+    def _features(self, df):
+        X, ok = super()._features(df)
+        F = fund_frame(df, getattr(self, "_tf", None) or self.spec.timeframes[0])
+        return np.hstack([X, F.to_numpy(float)]), ok & _fund_needed(F)
+
+
+ML_STRATEGIES = (MlBoosted, MlEnsemble, MlBoostedFund, MlEnsembleFund)

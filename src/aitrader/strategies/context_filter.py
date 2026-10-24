@@ -6,6 +6,8 @@ Rules (defaults are conservative: they only cut risk, and only on clear extremes
 - funding above +0.05% per 8h: longs are crowded, size x0.5; above +0.10%: no new longs.
 - open interest up more than 15% in 24h while price fell: new leverage is piling into a falling
   market, size x0.5.
+- funding above +0.05% per 8h and open interest up more than 10% in 24h: crowded longs still
+  piling in (Shawn's gate), no new longs.
 - total crypto market cap down more than 8% in 24h: market-wide sell-off, no new longs.
 
 A short (``side="sell"``, Futures AI) gets the mirror: funding below -0.05% means shorts are
@@ -47,6 +49,7 @@ class ContextFilter:
     funding_size: float = 0.5
     oi_jump: float = 0.15  # open interest +15% in 24h ...
     oi_size: float = 0.5  # ... while price fell
+    crowd_oi: float = 0.10  # open interest +10% in 24h while funding is above ``funding_reduce``
     mcap_drop: float = 0.08  # total market cap -8% in 24h
     source_exchange: str = SOURCE_EXCHANGE
     price_timeframes: tuple[str, ...] = ("1h", "15m", "4h")
@@ -99,15 +102,20 @@ class ContextFilter:
 
         oi_now = self._derivs("open_interest", exchange, symbol, now)
         oi_ago = self._derivs("open_interest", exchange, symbol, now - DAY_MS) if oi_now else None
+        oi_chg = oi_now[1] / oi_ago[1] - 1 if oi_now and oi_ago and oi_ago[1] > 0 else None
+        if oi_chg is not None and fr is not None and allow and sign * fr[1] > self.funding_reduce \
+                and oi_chg > self.crowd_oi:
+            allow = False
+            side_word = "shorts" if short else "longs"
+            reasons.append(f"funding {fr[1]:+.4%}/8h and open interest {oi_chg:+.1%} in 24h: crowded "
+                           f"{side_word} still piling in, no new {side_word}")
         move = price_change_24h if price_change_24h is not None else self._price_change(exchange, symbol, now)
-        if oi_now is None or oi_ago is None or oi_ago[1] <= 0 or move is None:
+        if oi_chg is None or move is None:
             reasons.append("open interest or price history missing or stale: rule skipped")
-        else:
-            oi_chg = oi_now[1] / oi_ago[1] - 1
-            if oi_chg > self.oi_jump and sign * move < 0:
-                size *= self.oi_size
-                reasons.append(f"open interest {oi_chg:+.1%} in 24h while price {move:+.1%}: "
-                               f"size x{self.oi_size:g}")
+        elif oi_chg > self.oi_jump and sign * move < 0:
+            size *= self.oi_size
+            reasons.append(f"open interest {oi_chg:+.1%} in 24h while price {move:+.1%}: "
+                           f"size x{self.oi_size:g}")
 
         chg = self._fresh("total_mcap_change_24h", *GLOBAL, now)
         if chg is None:

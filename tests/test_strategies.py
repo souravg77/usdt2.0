@@ -48,6 +48,9 @@ def with_funding(df):
     wave = np.sin(np.arange(len(df)) / 60)
     df["funding_rate"] = np.where(wave > 0.3, -0.0005, 0.0001)
     df.loc[df.index[wave < -0.9], "funding_rate"] = np.nan
+    # the ML strategies' fundamental overlay also reads the premium index and open interest
+    df["premium_index"] = np.cos(np.arange(len(df)) / 40) * 0.0005
+    df["open_interest"] = 1e6 * (1.5 + np.sin(np.arange(len(df)) / 90))
     return df
 
 

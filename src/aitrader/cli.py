@@ -430,24 +430,40 @@ async def cmd_context(s: Settings, args) -> int:
     """Market context (Phase 2): funding, open interest, global market cap; see docs/market-context.md."""
     import time
 
-    from .data.context import ContextStore, collect_context
+    from .data.context import HISTORY_DAYS, ContextStore, collect_context, mirror_context
+    from .data.perp import futures_db_path
     from .strategies.context_filter import ContextFilter
 
     ctx = ContextStore(s.db_path)
     try:
-        if args.context_cmd == "collect":
+        if args.context_cmd in ("collect", "backfill"):
             log = logging.getLogger("aitrader.context")
+            history = args.context_cmd == "backfill"
+            days = args.backfill_days if not history or args.backfill_days != 30 else HISTORY_DAYS
             while True:
-                added = await collect_context(ctx, args.symbol or _context_symbols(s), backfill_days=args.backfill_days)
+                symbols = args.symbol or _context_symbols(s)
+                if history:
+                    print(f"fetching {days} days of funding, open interest and premium index for "
+                          f"{len(symbols)} pairs; this takes a while", flush=True)
+                added = await collect_context(ctx, symbols, backfill_days=days, history=history)
                 log.info("context +%s", ", ".join(f"{m} {n}" for m, n in added.items() if n) or "nothing new")
-                if args.once:
+                # Futures AI's database gets the perpetuals' series too (it never opens Spot AI's)
+                fut = ContextStore(futures_db_path(s.db_path))
+                try:
+                    copied = mirror_context(ctx, fut)
+                finally:
+                    fut.close()
+                if history:
+                    print("rows saved: " + (", ".join(f"{m} {n}" for m, n in added.items() if n) or "none")
+                          + f"; {copied} copied to Futures AI's database", flush=True)
+                if args.once or history:
                     return 0
                 await asyncio.sleep(args.interval)
         if args.context_cmd == "derivs":
             return await _print_derivs(args.symbol or s.symbols)
         now, symbol = int(time.time() * 1000), (args.symbol or ["BTC/USDT"])[0]
         for ex, sym in dict.fromkeys([(args.exchange, symbol), ("global", "*")]):
-            for metric in ("funding_rate", "open_interest", "long_short_ratio", "btc_dominance",
+            for metric in ("funding_rate", "open_interest", "long_short_ratio", "premium_index", "btc_dominance",
                            "total_mcap", "total_mcap_change_24h", "stable_mcap"):
                 row = ctx.value_at(metric, ex, sym)
                 if row:
@@ -1790,12 +1806,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     cx = sub.add_parser("context", help="market context: funding, open interest, total market cap; "
                         "derivs: live mark/index price, basis and funding of the perpetuals")
-    cx.add_argument("context_cmd", choices=["collect", "show", "derivs"])
+    cx.add_argument("context_cmd", choices=["collect", "backfill", "show", "derivs"],
+                    help="backfill: years of funding, open interest and premium index for the ML strategies")
     cx.add_argument("--symbol", action="append")
     cx.add_argument("--exchange", default=EXCHANGE, choices=EXCHANGES, help="for show")
     cx.add_argument("--once", action="store_true", help="collect: one top-up, then exit")
     cx.add_argument("--interval", type=float, default=900, help="collect: seconds between top-ups")
-    cx.add_argument("--backfill-days", type=int, default=30, help="collect: history on first run")
+    cx.add_argument("--backfill-days", type=int, default=30,
+                    help="collect: history on first run; backfill: days back (default 1100)")
 
     kb = sub.add_parser("kb", help="knowledge base: index the books and notes, then search them")
     kb_sub = kb.add_subparsers(dest="kb_cmd", required=True)
