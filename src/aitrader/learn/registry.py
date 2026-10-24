@@ -54,6 +54,10 @@ class Entry:
     source: str = ""
     added: float = field(default_factory=time.time)
     backtest: dict = field(default_factory=dict)
+    # Futures AI's own backtest of a strategy both engines trade, on the perpetuals (``learn test
+    # --market futures``); a strategy only Futures AI trades (a short twin, a Futures pick) keeps
+    # its result in ``backtest`` as well
+    backtest_futures: dict = field(default_factory=dict)
     paper: dict = field(default_factory=dict)
     history: list = field(default_factory=list)
 

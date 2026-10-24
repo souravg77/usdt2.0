@@ -130,10 +130,17 @@ class Gate:
 
 def evaluate(entry: Entry, store: CandleStore, exchanges: list[str], symbols: list[str],
              cfg: BacktestConfig | None = None, gate: Gate | None = None, move: bool = True,
-             regimes: dict | None = None) -> dict:
+             regimes: dict | None = None, market: str = "spot") -> dict:
     """Backtest one registry entry and move it along the ladder: to paper, under review or
     rejected (only record the result with ``move=False``). Returns the summary. ``regimes`` caches
-    each market's regime labels when several entries are tested in a row."""
+    each market's regime labels when several entries are tested in a row. With ``market="futures"``
+    (the perpetuals' candles and costs given) the result is Futures AI's own: kept in
+    ``backtest_futures``, and it moves only a strategy Spot AI never trades."""
+    from .picks import learns_for
+
+    futures_only = market == "futures" and not learns_for(entry, "spot")
+    if market == "futures" and not futures_only:
+        move = False  # a strategy both engines trade keeps the status its spot test gave it
     cfg, gate = cfg or BacktestConfig(), gate or Gate()
     regimes = {} if regimes is None else regimes
     strat = make_strategy(entry)
@@ -176,7 +183,8 @@ def evaluate(entry: Entry, store: CandleStore, exchanges: list[str], symbols: li
         if trades_oos:
             why_oos += gate.check_monte_carlo(mc)
     why = why_in + why_oos
-    looks = ((entry.backtest or {}).get("holdout") or {}).get("looks", 0)
+    own = entry.backtest_futures if market == "futures" else entry.backtest
+    looks = ((own or {}).get("holdout") or {}).get("looks", 0)
     holdout = {"evaluated": False, "looks": looks,
                "note": "not looked at: the strategy has to pass everything else first"}
     why_h: list[str] = []
@@ -196,7 +204,11 @@ def evaluate(entry: Entry, store: CandleStore, exchanges: list[str], symbols: li
                "gate": asdict(gate), "failed": why + why_h,
                "costs": {"taker_fee": cfg.taker_fee, "maker_fee": cfg.maker_fee,
                          "slippage_bps": cfg.slippage_bps}}
-    entry.backtest = summary
+    if market == "futures":
+        summary["market"] = "futures"
+        entry.backtest_futures = summary
+    if market != "futures" or futures_only:
+        entry.backtest = summary
     if not move or not markets:
         return summary  # without data it stays where it is until there is data to test it on
     if why_in:

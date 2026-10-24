@@ -100,11 +100,11 @@ def add_teacher_routes(app, *, settings, page, guard, auth, paths, csrf, jobs, e
         EventLog(paths.events, service="dashboard").emit(kind, text, level=level)
 
     @app.get("/teacher")
-    def teacher_page(request: Request, msg: str = ""):
+    def teacher_page(request: Request, msg: str = "", market: str = ""):
         user, token, redirect = guard(request)
         if redirect:
             return redirect
-        market, name, root = _engine()
+        market, name, root = _engine(market)  # a learning window's link names its engine
         t = Teacher(root)
         cand, act = t.candidate, t.active
         form = csrf(token) + f'<input type="hidden" name="market" value="{market}">'
@@ -186,13 +186,14 @@ def add_teacher_routes(app, *, settings, page, guard, auth, paths, csrf, jobs, e
         parts.append(improve_html)
         return page("Teacher", "".join(parts), user, token, refresh=120)
 
-    def _post(request: Request, csrf_value: str, action):
+    def _post(request: Request, csrf_value: str, action, market: str = ""):
         user, token, redirect = guard(request)
         if redirect:
             return redirect
         if not auth.check_csrf(token, csrf_value):
             return PlainTextResponse("bad form token; reload the page", status_code=403)
-        return RedirectResponse(f"/teacher?msg={urllib.parse.quote(action(user))}", status_code=303)
+        back = f"&market={market}" if market in ("spot", "futures") else ""  # back to the same engine
+        return RedirectResponse(f"/teacher?msg={urllib.parse.quote(action(user))}{back}", status_code=303)
 
     @app.post("/teacher/teach")
     def teacher_teach(request: Request, csrf: str = Form(""), market: str = Form("")):
@@ -207,7 +208,7 @@ def add_teacher_routes(app, *, settings, page, guard, auth, paths, csrf, jobs, e
             _event("teacher", f"{name} backtest teacher started from the dashboard by {user}")
             return (f"{name} learning started. When it finishes this page shows the lessons and how they did on "
                     "unseen data.")
-        return _post(request, csrf, act)
+        return _post(request, csrf, act, market)
 
     @app.post("/teacher/improve")
     def teacher_improve(request: Request, csrf: str = Form("")):
@@ -233,7 +234,7 @@ def add_teacher_routes(app, *, settings, page, guard, auth, paths, csrf, jobs, e
             return (f"{name} lessons {t['version']} are on. {name} paper trading now skips strategies in situations "
                     "they lost in and adds the 1R profit-take where it helped. The other engine is not changed. "
                     "Turn off goes back to every signal at once.")
-        return _post(request, csrf, act)
+        return _post(request, csrf, act, market)
 
     @app.post("/teacher/off")
     def teacher_off(request: Request, csrf: str = Form(""), market: str = Form("")):
@@ -241,7 +242,7 @@ def add_teacher_routes(app, *, settings, page, guard, auth, paths, csrf, jobs, e
             _m, name, root = _engine(market)
             Teacher(root, events=_events()).turn_off(user)
             return f"{name} lessons off: {name} paper trading takes every signal as before."
-        return _post(request, csrf, act)
+        return _post(request, csrf, act, market)
 
     def _events():
         from ..ops import EventLog
