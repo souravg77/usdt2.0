@@ -154,3 +154,32 @@ def test_futures_ai_has_its_own_strategy_test(tmp_path, monkeypatch, capsys):
     fut = keep_top(reg, 10, market="futures")
     assert [k["score"] > 0 for k in spot["kept"] if k["id"] == "up"] == [True]
     assert [(k["score"] < 0, k["passed"]) for k in fut["kept"] if k["id"] == "up"] == [(True, False)]
+
+
+def test_futures_test_covers_strategies_only_tested_on_spot(tmp_path, monkeypatch, capsys):
+    from aitrader.learn.keep import has_own_result
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("AITRADER_FUTURES_DB_PATH", raising=False)
+    fstore = CandleStore("data/aitrader_futures.db")
+    fill_store(fstore, synthetic(n=3000, seed=7), sym="SOL/USDT")
+    fstore.close()
+    CandleStore("data/aitrader.db").close()
+    reg = Registry("data/learn/registry.json")
+    spot_result = {"out_of_sample": {"trades": 50, "expectancy_r": -0.1}, "failed": ["weak"]}
+    # rejected on spot, never tried on the perpetuals: neither `--paper` nor plain `test` picks it
+    reg.add(Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR), status="rejected",
+                  backtest=spot_result))
+    reg.add(Entry(id="done", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR), status="paper",
+                  backtest=spot_result, backtest_futures={"out_of_sample": {"trades": 9}}))
+    reg.save()
+    assert not has_own_result(reg.get("up"), "futures") and has_own_result(reg.get("up"), "spot")
+    assert main(["--env-file", "none", "learn", "test", "--missing", "--market", "futures"]) == 0
+    out = capsys.readouterr().out
+    assert "1 strategies have no perpetual result yet" in out and "testing up" in out and "testing done" not in out
+    reg = Registry("data/learn/registry.json")
+    up = reg.get("up")
+    assert has_own_result(up, "futures") and up.status == "rejected"  # Spot AI's verdict stays
+    assert up.backtest == spot_result
+    assert main(["--env-file", "none", "learn", "test", "--missing", "--market", "futures"]) == 0
+    assert "nothing to test" in capsys.readouterr().out

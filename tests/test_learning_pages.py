@@ -44,12 +44,14 @@ def test_each_engine_has_its_own_learning_window(tmp_path, monkeypatch):
 
     fut = client.get("/learning/futures").text
     assert "Futures AI learning" in fut and "short-builtin-ml_boosted" in fut and "failed: loses money" in fut
-    assert "not tested on the perpetuals yet" in fut  # the shared long has only its spot result
+    # the shared long has only a spot result: Futures AI shows it as not tested, never the spot numbers
+    assert "40 trades · +0.210R" not in fut and "spot result" not in fut and "not yet" in fut
     assert "AI trade filter: Futures AI" in fut and 'href="/teacher?market=futures"' in fut
 
     r = client.post("/learning/test", data={"csrf": csrf, "market": "futures"}, follow_redirects=False)
     assert r.headers["location"].startswith("/learning/futures?msg=")
-    assert submitted[-1] == ([["learn", "test", "--paper", "--market", "futures"]],
+    assert submitted[-1] == ([["learn", "test", "--paper", "--market", "futures"],
+                              ["learn", "test", "--missing", "--market", "futures"]],
                              {"kind": "learn-test", "market": "futures"})
     assert client.post("/learning/test", data={"csrf": "bad", "market": "spot"}).status_code == 403
     # the AI filter's buttons come back to the window they were pressed in

@@ -40,11 +40,22 @@ PER_TIMEFRAME = 2  # places kept for the best strategies on each timeframe
 
 
 def backtest_of(entry: Entry, market: str | None = None) -> dict:
-    """The backtest an engine ranks on: Futures AI its own test on the perpetuals when there is
-    one (``learn test --market futures``), else the spot test like Spot AI."""
-    if market == "futures" and entry.backtest_futures:
-        return entry.backtest_futures
+    """The backtest an engine ranks on, from its own candles only: Futures AI its test on the
+    perpetuals (``learn test --market futures``; for a strategy only Futures AI trades that is its one
+    backtest), never a spot result (Shawn: no spot in Futures AI). Spot AI its spot test."""
+    if market == "futures":
+        from .picks import learns_for
+
+        if entry.backtest_futures:
+            return entry.backtest_futures
+        return (entry.backtest or {}) if not learns_for(entry, "spot") else {}
     return entry.backtest or {}
+
+
+def has_own_result(entry: Entry, market: str) -> bool:
+    """True when ``entry`` was backtested on this engine's own candles: Futures AI's test on the
+    perpetuals (or, for a strategy only Futures AI trades, its one test), Spot AI's on spot."""
+    return "trades" in (backtest_of(entry, market).get("out_of_sample") or {})
 
 
 def _passed(entry: Entry, market: str | None = None) -> bool:
