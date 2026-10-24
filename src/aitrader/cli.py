@@ -635,7 +635,9 @@ def cmd_learn(s: Settings, args) -> int:
         for e in entries:
             if not learns_for(e, market):
                 continue
-            res = evaluate(e, store, exchanges, pairs, costs, move=move, regimes=regimes, market=market)
+            print(f"  testing {e.id} ...", flush=True)
+            res = evaluate(e, store, exchanges, pairs, costs, move=move, regimes=regimes, market=market,
+                           progress=lambda text: print(f"    {text}", flush=True))
             m = res["out_of_sample"]
             # Futures AI's test moves only the strategies Spot AI never trades (short twins,
             # Futures picks); a shared one keeps the status its spot test gave it

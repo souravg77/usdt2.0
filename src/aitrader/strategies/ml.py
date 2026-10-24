@@ -38,6 +38,12 @@ _MODELS: OrderedDict = OrderedDict()
 _PREDICTIONS: OrderedDict = OrderedDict()
 MAX_MODELS = 400
 MAX_PREDICTIONS = 20_000
+# Whole charts already worked out by ``prime`` (the strategy test): its in-sample, out-of-sample,
+# walk-forward and holdout slices read their answers from here instead of retraining every model on
+# each slice. Each answer is still walk-forward (it only used candles before it), so a slice gets
+# the same answers it would get with more history in front of it.
+_PRIMED: OrderedDict = OrderedDict()
+MAX_PRIMED = 8
 
 
 def _remember(cache: OrderedDict, key, value, limit: int):
@@ -174,8 +180,41 @@ class MlBoosted(_Master):
         p = self.params
         return barrier_labels(df, int(p["horizon"]), p["up_atr"], p["down_atr"])
 
+    def _primed_key(self, timeframe: str):
+        return (type(self).__name__, timeframe,
+                tuple(sorted((k, v) for k, v in self.params.items() if not isinstance(v, (list, dict)))))
+
+    def prime(self, df: pd.DataFrame, timeframe: str) -> None:
+        """Work out the whole chart once, so slices of it (``_from_primed``) need no new models."""
+        prob = self._compute(df, timeframe).to_numpy(float)
+        key = (self._primed_key(timeframe), int(df["ts"].iloc[0]), int(df["ts"].iloc[-1]), len(df),
+               float(df["close"].iloc[-1]))
+        _remember(_PRIMED, key, (df["ts"].to_numpy(np.int64), df["close"].to_numpy(float), prob), MAX_PRIMED)
+
+    def _from_primed(self, df: pd.DataFrame, timeframe: str):
+        """The answers for ``df`` when it is a stretch of a primed chart (same candles), else None."""
+        if not len(df):
+            return None
+        mine = self._primed_key(timeframe)
+        ts, close = df["ts"].to_numpy(np.int64), df["close"].to_numpy(float)
+        for key, (pts, pclose, prob) in reversed(_PRIMED.items()):
+            if key[0] != mine or ts[0] < pts[0] or ts[-1] > pts[-1]:
+                continue
+            i = np.searchsorted(pts, ts)
+            if (i < len(pts)).all() and np.array_equal(pts[np.minimum(i, len(pts) - 1)], ts) \
+                    and np.array_equal(pclose[i], close):
+                return prob[i]
+        return None
+
     def probabilities(self, df: pd.DataFrame, timeframe: str) -> pd.Series:
         """Out-of-sample chance for every bar (NaN where no model was trained yet)."""
+        self._tf = timeframe
+        hit = self._from_primed(df, timeframe) if _PRIMED else None
+        if hit is not None:
+            return pd.Series(hit, index=df.index)
+        return self._compute(df, timeframe)
+
+    def _compute(self, df: pd.DataFrame, timeframe: str) -> pd.Series:
         p = self.params
         self._tf = timeframe
         n, h = len(df), self._horizon(timeframe)

@@ -130,7 +130,7 @@ class Gate:
 
 def evaluate(entry: Entry, store: CandleStore, exchanges: list[str], symbols: list[str],
              cfg: BacktestConfig | None = None, gate: Gate | None = None, move: bool = True,
-             regimes: dict | None = None, market: str = "spot") -> dict:
+             regimes: dict | None = None, market: str = "spot", progress=None) -> dict:
     """Backtest one registry entry and move it along the ladder: to paper, under review or
     rejected (only record the result with ``move=False``). Returns the summary. ``regimes`` caches
     each market's regime labels when several entries are tested in a row. With ``market="futures"``
@@ -154,6 +154,10 @@ def evaluate(entry: Entry, store: CandleStore, exchanges: list[str], symbols: li
                 if len(candles) < MIN_BARS:
                     continue
                 df = with_context(strat, candles_to_frame(candles), store, ex, sym, tf)
+                if progress:
+                    progress(f"{sym} {tf}: {len(candles)} candles")
+                if hasattr(strat, "prime"):  # an ML strategy: train its models on this chart once
+                    strat.prime(df, tf)
                 ins, oos, final = split_periods(df)
                 t_in = run_backtest(strat, ins, ex, sym, tf, cfg)
                 t_oos = run_backtest(strat, oos, ex, sym, tf, cfg)

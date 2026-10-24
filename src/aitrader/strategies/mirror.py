@@ -74,6 +74,11 @@ class ShortMirror(Strategy):
     def default_params(cls) -> dict:
         return {}
 
+    def prime(self, df: pd.DataFrame, timeframe: str) -> None:
+        """Let a base that learns from the whole chart (the ML strategies) work out the flipped one."""
+        if hasattr(self.base, "prime"):
+            self.base.prime(flip(df), timeframe)
+
     def generate(self, df: pd.DataFrame, exchange: str, symbol: str, timeframe: str) -> list[Signal]:
         out = []
         for s in self.base.generate(flip(df), exchange, symbol, timeframe):
