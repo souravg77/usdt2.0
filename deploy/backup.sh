@@ -26,7 +26,8 @@ CANDLES=(--no-candles)
 [ "${AITRADER_BACKUP_CANDLES:-}" = "true" ] && CANDLES=()
 ${DOCKER:-docker} compose run --rm -T collector backup "$DEST" "${CANDLES[@]}" >/dev/null
 echo "$(date -u +%FT%TZ) backup written to $DEST"
-ls -1d data/backups/*/ 2>/dev/null | sort | head -n "-$KEEP" | xargs -r rm -rf
+# the daily ones only: update.sh keeps its own full copies (<time>-full)
+ls -1d data/backups/*/ 2>/dev/null | { grep -v -- '-full/$' || true; } | sort | head -n "-$KEEP" | xargs -r rm -rf
 if [ -n "${AITRADER_BACKUP_COPY_TO:-}" ]; then
   rsync -a --delete data/backups/ "$AITRADER_BACKUP_COPY_TO/"
   echo "$(date -u +%FT%TZ) copied to $AITRADER_BACKUP_COPY_TO"

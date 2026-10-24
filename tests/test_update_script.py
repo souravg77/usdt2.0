@@ -105,6 +105,8 @@ def test_check_reports_without_changing_anything(server):
 
 def test_update_rebuilds_migrates_and_restarts(server):
     work, release, run, calls = server
+    for old in ("20261001-000000-full", "20261002-000000-full", "20261003-033000"):
+        (work / "data" / "backups" / old).mkdir(parents=True)
     release("v2")
     r = run()
     assert r.returncode == 0, r.stdout + r.stderr
@@ -115,7 +117,10 @@ def test_update_rebuilds_migrates_and_restarts(server):
               "docker compose run --rm -T collector migrate", "docker compose up -d")]
     assert order == sorted(order)
     assert "docker compose up -d --remove-orphans collector paper" in c  # only what was running
-    assert "live trading: locked" in r.stdout and list((work / "data" / "backups").iterdir())
+    assert "live trading: locked" in r.stdout
+    # one full backup (about 4 GB on a real server) is kept: this update's; daily ones aren't touched
+    kept = sorted(p.name for p in (work / "data" / "backups").iterdir())
+    assert len(kept) == 2 and kept[0] == "20261003-033000" and kept[1].endswith("-full")
     assert (work / ".env").read_text() == "AITRADER_LIVE_UNLOCKED=false\n"
 
 
