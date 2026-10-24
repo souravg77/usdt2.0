@@ -74,7 +74,9 @@ def test_signals_are_well_formed(name):
 @pytest.mark.parametrize("name", list(STRATEGIES))
 def test_no_lookahead(name):
     """Signals up to bar k must not change when later bars are added."""
-    strat = STRATEGIES[name]()
+    # the ML strategies' 70 % entry bar rarely trips this early on synthetic data; a lower one gives
+    # this test signals to compare (the look-ahead question doesn't depend on the bar)
+    strat = STRATEGIES[name](threshold=0.55) if name.startswith("ml_") else STRATEGIES[name]()
     tf = strat.spec.timeframes[0]
     df = data_for(name)
     full = strat.generate(df, "bybit", "BTC/USDT", tf)

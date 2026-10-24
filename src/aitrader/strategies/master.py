@@ -1193,7 +1193,7 @@ class MlClassifier(_Master):
         setup="A logistic regression, retrained every 250 bars on past bars only, estimates the "
         "chance that price reaches +3 x ATR before -1.5 x ATR within 24 bars. Features: RSI, MACD "
         "histogram, ADX, Bollinger %B, distance from EMA(50), 1/5/20-bar returns, ATR % of price, "
-        "relative volume. Setup: that chance crosses above 0.55.",
+        "relative volume. Setup: that chance crosses above 0.70.",
         entry="Market order at the next bar's open.",
         stop="Entry - 1.5 x ATR(14) (the same barrier the model was trained on).",
         target="2R (+3 x ATR); time stop after 24 bars.",
@@ -1204,12 +1204,12 @@ class MlClassifier(_Master):
                    "The model makes signals here; the separate AI filter (ai/) only judges other strategies' signals."),
     )
     eligible_regimes = TREND_RANGE
-    reason = "classifier probability crossed 0.55"
+    reason = "classifier probability crossed 0.70"
 
     @classmethod
     def default_params(cls):
         return {**BASE, "horizon": 24, "up_atr": 3.0, "down_atr": 1.5, "min_train": 600, "retrain": 250,
-                "threshold": 0.55, "target_r": 2.0}
+                "threshold": 0.7, "target_r": 2.0}
 
     @staticmethod
     def feature_frame(df: pd.DataFrame) -> pd.DataFrame:
