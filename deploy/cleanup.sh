@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Free disk space without touching anything the platform needs. Removes only:
-#   - old Docker images left behind by earlier installs (each install builds a new one; the one
-#     running now is kept) and Docker build cache older than a week,
+#   - old Docker images left behind by earlier installs (each install builds a new one and the old
+#     one keeps its space; images a container uses are kept, as is anything from the last 3 days)
+#     and all Docker build cache (the next install rebuilds what it needs),
 #   - the server's own leftovers: downloaded system packages and system logs over 200 MB,
 #   - the platform's cron logs (data/*.log) cut to their last 5,000 lines.
 # The price database, strategies, trades, wallets, settings, backups and .env are never touched.
@@ -13,8 +14,9 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 DOCKER="${DOCKER:-docker}"
 before=$(df -Pk . | awk 'NR==2 {print $4}')
-$DOCKER image prune -f >/dev/null || true                         # unused old builds only
-$DOCKER builder prune -f --filter until=168h >/dev/null || true    # build cache over a week old
+$DOCKER image prune -f >/dev/null || true                         # untagged leftovers
+$DOCKER image prune -af --filter until=72h >/dev/null || true     # old images no container uses
+$DOCKER builder prune -af >/dev/null || true                       # build cache
 if sudo -n true 2>/dev/null; then                                  # only when no password is asked
   sudo -n apt-get clean >/dev/null 2>&1 || true
   sudo -n journalctl --vacuum-size=200M >/dev/null 2>&1 || true
