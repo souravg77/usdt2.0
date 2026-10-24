@@ -15,14 +15,14 @@
 # fails (and the update is rolled back) if live trading was locked before and is not after.
 #
 # Settings (environment): AITRADER_UPDATE_BRANCH (default main), AITRADER_UPDATE_WAIT (seconds
-# to let services settle before the health check, default 30), AITRADER_UPDATE_KEEP (backups
-# kept, default 5).
+# to let services settle before the health check, default 30), AITRADER_UPDATE_KEEP (full
+# backups kept, default 1: each holds the whole price history, about 4 GB).
 
 set -Eeuo pipefail
 
 BRANCH="${AITRADER_UPDATE_BRANCH:-main}"
 WAIT="${AITRADER_UPDATE_WAIT:-30}"
-KEEP="${AITRADER_UPDATE_KEEP:-5}"
+KEEP="${AITRADER_UPDATE_KEEP:-1}"
 MODE="${1:-}"
 IMAGE="aitrader:latest"
 ROLLBACK_IMAGE="aitrader:rollback"
@@ -72,7 +72,7 @@ live_state() {  # prints "locked", "UNLOCKED" or "unknown"
 RUNNING="$(docker compose ps --services --status running 2>/dev/null | sort | tr '\n' ' ' || true)"
 LIVE_BEFORE="$(live_state)"
 STAMP="$(date -u +%Y%m%d-%H%M%S)"
-BACKUP="data/backups/$STAMP"
+BACKUP="data/backups/$STAMP-full"  # full: a failed migration restores the database from it
 log "updating $(git rev-parse --short "$PREV") -> $(git rev-parse --short "$NEXT"); running: ${RUNNING:-none}; live trading: $LIVE_BEFORE"
 
 mkdir -p "$BACKUP"
@@ -139,5 +139,5 @@ case " $RUNNING " in
 esac
 
 trap - ERR
-ls -1d data/backups/*/ 2>/dev/null | sort | head -n "-$KEEP" | xargs -r rm -rf
+ls -1d data/backups/*-full/ 2>/dev/null | sort | head -n "-$KEEP" | xargs -r rm -rf  # daily ones: backup.sh
 log "done: now on $(git log -1 --format='%h %s'); live trading: $LIVE_AFTER"
