@@ -2,7 +2,7 @@
 
 ``ml_boosted`` trains a gradient-boosted tree model (scikit-learn's HistGradientBoosting) on the
 chart's own past: for every past bar it asks "did price reach +3 ATR before -1.5 ATR within the
-next 24 bars?" and learns which mix of 22 features (momentum, trend, volatility, volume, candle
+next 24 bars?" and learns which mix of 25 features (momentum, trend, volatility, volume, candle
 shape, where price sits in its recent range) came before a yes. It opens a long when the model's
 chance for the newest closed bar crosses above 50 %. Its short twin (``strategies.mirror``) learns
 the same on the upside-down chart, so it has its own model for shorts.
@@ -26,9 +26,9 @@ from collections import OrderedDict
 import numpy as np
 import pandas as pd
 
-from ..indicators import adx, atr, bollinger, directional_index, ema, macd, relative_volume, rsi
+from ..indicators import adx, atr, bollinger, cci, directional_index, ema, macd, relative_volume, rsi
 from ..models import TIMEFRAME_MS
-from .families import BASE, NO_TRADE, SOURCE
+from .families import BASE, NO_TRADE, SOURCE, _exit_rule
 from .master import TREND_RANGE, _df_key, _Master, _spec
 
 # Trained models and finished blocks of predictions, shared by every copy of the strategy in this
@@ -49,7 +49,7 @@ def _remember(cache: OrderedDict, key, value, limit: int):
 
 
 def feature_frame(df: pd.DataFrame) -> pd.DataFrame:
-    """22 features, each scaled so it means the same on any coin and price level."""
+    """25 features, each scaled so it means the same on any coin and price level."""
     c, h, lo, o = df["close"], df["high"], df["low"], df["open"]
     a = atr(df)
     b = bollinger(c)
@@ -59,6 +59,9 @@ def feature_frame(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame({
         "rsi14": (rsi(c) - 50) / 50,
         "rsi7": (rsi(c, 7) - 50) / 50,
+        "rsi30": (rsi(c, 30) - 50) / 50,  # Asgari & Khasteh's indicator set: RSI and CCI on 14 and 30
+        "cci14": cci(df, 14) / 100,
+        "cci30": cci(df, 30) / 100,
         "macd_hist": macd(c)["hist"] / a,
         "adx": adx(df) / 100,
         "di_spread": (di["plus_di"] - di["minus_di"]) / 100,
@@ -112,7 +115,7 @@ class MlBoosted(_Master):
         regime="Any orderly market (not high-volatility); the model itself learns which conditions pay.",
         setup="A gradient-boosted tree model (HistGradientBoosting), retrained every 250 bars on up to "
         "the last 1,500 bars of this chart, estimates the chance that price reaches +3 x ATR before "
-        "-1.5 x ATR within 24 bars. Features (22): RSI 7/14, MACD histogram, ADX, DI spread, Bollinger "
+        "-1.5 x ATR within 24 bars. Features (25): RSI 7/14/30, CCI 14/30, MACD histogram, ADX, DI spread, Bollinger "
         "%B and width, distance from EMA 20/50/100, 1/3/6/12/24-bar returns, ATR % and ATR 14/50 ratio, "
         "relative volume, position in the 20-bar range, candle body and wicks. Setup: that chance "
         "crosses above 50 %.",
@@ -140,6 +143,10 @@ class MlBoosted(_Master):
         return {**BASE, "horizon": 24, "up_atr": 3.0, "down_atr": 1.5, "min_train": 400,
                 "train_bars": 1500, "retrain": 250, "threshold": 0.5, "target_r": 2.0}
 
+    def _horizon(self, timeframe: str) -> int:
+        """Bars until a label's outcome is known."""
+        return int(self.params["horizon"])
+
     @property
     def history_align(self) -> int:
         return int(self.params["retrain"])
@@ -158,17 +165,25 @@ class MlBoosted(_Master):
             _MODELS.move_to_end(key)
         return model
 
+    def _features(self, df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+        """(feature rows, which rows are complete)."""
+        X = feature_frame(df)
+        return X.to_numpy(float), X.notna().all(axis=1).to_numpy()
+
+    def _labels(self, df: pd.DataFrame) -> np.ndarray:
+        p = self.params
+        return barrier_labels(df, int(p["horizon"]), p["up_atr"], p["down_atr"])
+
     def probabilities(self, df: pd.DataFrame, timeframe: str) -> pd.Series:
         """Out-of-sample chance for every bar (NaN where no model was trained yet)."""
         p = self.params
-        n, h = len(df), int(p["horizon"])
+        self._tf = timeframe
+        n, h = len(df), self._horizon(timeframe)
         prob = np.full(n, np.nan)
         if n < p["min_train"] + h + 2:
             return pd.Series(prob, index=df.index)
-        X = feature_frame(df)
-        ok = X.notna().all(axis=1).to_numpy()
-        Xv = X.to_numpy(float)
-        yv = barrier_labels(df, h, p["up_atr"], p["down_atr"])
+        Xv, ok = self._features(df)
+        yv = self._labels(df)
         ts = df["ts"].to_numpy(np.int64)
         # a new model at every bar whose time is on the retrain grid (or the first bar after a gap)
         block_id = ts // (int(p["retrain"]) * TIMEFRAME_MS[timeframe])
@@ -180,7 +195,8 @@ class MlBoosted(_Master):
             if len(rows) < p["min_train"] or len(set(yv[rows])) < 2:
                 continue
             fp = hashlib.blake2b(Xv[rows].tobytes() + yv[rows].tobytes(), digest_size=16).hexdigest()
-            key = (fp, tuple(sorted((k, v) for k, v in p.items() if not isinstance(v, (list, dict)))))
+            key = (type(self).__name__, fp,
+                   tuple(sorted((k, v) for k, v in p.items() if not isinstance(v, (list, dict)))))
             block = np.arange(t0, t1)
             block = block[ok[block]]
             if not len(block):
@@ -213,4 +229,154 @@ class MlBoosted(_Master):
         return {"ml_chance": self._memo[1]} if getattr(self, "_memo", None) else {}
 
 
-ML_STRATEGIES = (MlBoosted,)
+# ---- Asgari & Khasteh (2021): k-NN, Random Forest and gradient boosting on the next 4 hours ---------
+
+
+def paper_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """The paper's 19 values per candle (OHLCV plus its Appendix A indicators: CCI 14/30, RSI 14/30,
+    DMI 14, MACD, Bollinger bands), each made price-free so one coin's model reads like another's.
+    The paper scaled each column by its min and max over the whole history, which lets the test
+    period leak into training; here every value is a ratio of the candle's own prices instead."""
+    c, h, lo, o = df["close"], df["high"], df["low"], df["open"]
+    a = atr(df).replace(0, np.nan)
+    di = directional_index(df)
+    m = macd(c)
+    tp = (h + lo + c) / 3
+    mid = tp.rolling(20, min_periods=20).mean()
+    sd = tp.rolling(20, min_periods=20).std(ddof=0)
+    pdi, mdi = di["plus_di"], di["minus_di"]
+    return pd.DataFrame({
+        "open": o / c - 1, "high": h / c - 1, "low": lo / c - 1, "ret1": c.pct_change(1),
+        "volume": np.log((df["volume"] / df["volume"].rolling(60, min_periods=20).mean()).replace(0, np.nan)),
+        "cci14": cci(df, 14) / 100, "cci30": cci(df, 30) / 100,
+        "rsi14": (rsi(c) - 50) / 50, "rsi30": (rsi(c, 30) - 50) / 50,
+        "plus_di": pdi / 100, "minus_di": mdi / 100,
+        "dx": (pdi - mdi).abs() / (pdi + mdi).replace(0, np.nan),
+        "macd": m["macd"] / a, "macd_signal": m["signal"] / a, "macd_hist": m["hist"] / a,
+        "boll_up": (mid + 2 * sd - c) / a, "boll_down": (c - (mid - 2 * sd)) / a, "boll_mid": (c - mid) / a,
+        "atr_pct": a / c,
+    }, index=df.index).replace([np.inf, -np.inf], np.nan)
+
+
+class MlEnsemble(MlBoosted):
+    spec = _spec(
+        name="ml_ensemble",
+        source=SOURCE + ": machine learning, Asgari & Khasteh (2021) 'Profitable Strategy Design for "
+        "Trades on Cryptocurrency Markets with Machine Learning Techniques': k-NN, Random Forest and "
+        "gradient-boosted trees voting together",
+        timeframes=("1h", "4h"),
+        regime="Any orderly market (not high-volatility); the models learn which conditions pay.",
+        setup="Three models from the paper (k-NN with 20 distance-weighted neighbours, a Random Forest "
+        "and gradient-boosted trees with XGBoost's eta 0.3 / depth 6 / lambda 1, in scikit-learn) "
+        "each estimate the chance that the price 4 hours later is more than 0.15 % (the round-trip fee) "
+        "above the close. Each reads the last 60 candles x 19 values (OHLCV, CCI 14/30, RSI 14/30, "
+        "DMI 14, MACD, Bollinger bands) = 1,140 inputs, as in the paper. Their average is the chance "
+        "(the paper's future-work idea of ensembling them). Setup: that chance crosses above 50 %.",
+        entry="Market order at the next bar's open.",
+        stop="Entry - 2 x ATR(14): a safety stop the paper did not have.",
+        target="As in the paper, it holds while the models still expect a rise and sells at the first "
+        "candle where they don't; a 4R ceiling and a time stop of 12 x 4 hours as backstops.",
+        filter="Retrained every 250 candles on up to the last 1,500, only on candles whose 4-hour outcome "
+        "was already known, and each model predicts only later candles (walk-forward, no leakage). " + NO_TRADE,
+        size="0.5% of equity at risk.",
+        decisions=("The paper's best results were a profit factor of 1.12-1.63 over one 66-day test on "
+                   "three pairs, with accuracy near 52 % and no stop loss; here it must pass the same "
+                   "walk-forward, Monte Carlo and holdout gate as every other strategy, per engine.",
+                   "The paper tuned k and the number of trees per pair; one setting is used here, so the "
+                   "test is not fitted to the pairs it is judged on.",
+                   "Labels need a rise bigger than the fees, as the paper says: a smaller one loses money.",
+                   "60 trees and 40 boosting rounds instead of the paper's 700-1,000 trees, so a retrain takes "
+                   "seconds on the server's CPU; the three models still vote."),
+    )
+    reason = "k-NN, Random Forest and gradient boosting expect a 4h rise above the fees"
+
+    @classmethod
+    def default_params(cls):
+        return {**BASE, "hours": 4, "fee_threshold": 0.0015, "lookback": 60, "min_train": 400,
+                "train_bars": 1500, "retrain": 250, "threshold": 0.5, "knn_k": 20, "rf_trees": 60, "gb_rounds": 40,
+                "stop_atr": 2.0, "target_r": 4.0, "max_hold": 12}
+
+    history_bars = 1500 + 60 + 4 + 2 * 250
+
+    def __init__(self, **params):
+        super().__init__(**params)
+        # the exit "the models no longer expect a rise", one per timeframe, registered up front so a
+        # restarted paper trader can manage an open trade before it builds new signals
+        for tf in self.spec.timeframes:
+            _exit_rule(self._exit_name(tf), lambda d, tf=tf: self.probabilities(d, tf) < self.params["threshold"])
+
+    def _exit_name(self, timeframe: str) -> str:
+        p = self.params
+        return f"ml_ensemble_down:{timeframe}:{p['threshold']:g}:{p['hours']:g}:{p['fee_threshold']:g}"
+
+    def _horizon(self, timeframe: str) -> int:
+        return max(1, round(self.params["hours"] * 3_600_000 / TIMEFRAME_MS[timeframe]))
+
+    def _features(self, df):
+        from numpy.lib.stride_tricks import sliding_window_view
+
+        rows = paper_rows(df).to_numpy(float)
+        n, w = len(rows), int(self.params["lookback"])
+        X = np.full((n, w * rows.shape[1]), np.nan)
+        if n >= w:  # row t holds candles t-59 .. t, oldest first
+            X[w - 1:] = sliding_window_view(rows, w, axis=0).transpose(0, 2, 1).reshape(n - w + 1, -1)
+        return X, np.isfinite(X).all(axis=1)
+
+    def _labels(self, df):
+        c = df["close"].to_numpy(float)
+        h = self._horizon(self._tf)
+        out = np.full(len(c), np.nan)
+        if len(c) > h:
+            out[:-h] = (c[h:] / c[:-h] - 1 > self.params["fee_threshold"]).astype(float)
+        return out
+
+    def _model(self, X, y, key):
+        model = _MODELS.get(key)
+        if model is None:
+            from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestClassifier
+            from sklearn.neighbors import KNeighborsClassifier
+            from sklearn.pipeline import make_pipeline
+            from sklearn.preprocessing import StandardScaler
+
+            p = self.params
+            model = _Vote([
+                make_pipeline(StandardScaler(), KNeighborsClassifier(n_neighbors=int(p["knn_k"]),
+                                                                     weights="distance")),
+                RandomForestClassifier(n_estimators=int(p["rf_trees"]), min_samples_leaf=3, max_features="sqrt",
+                                       n_jobs=1, random_state=0),
+                HistGradientBoostingClassifier(learning_rate=0.3, max_depth=6, l2_regularization=1.0,
+                                               max_iter=int(p["gb_rounds"]), max_features=0.3,
+                                               early_stopping=False, random_state=0),
+            ]).fit(X, y)
+            _remember(_MODELS, key, model, MAX_MODELS)
+        else:
+            _MODELS.move_to_end(key)
+        return model
+
+    def stop_series(self, df):
+        return df["close"] - self.params["stop_atr"] * atr(df)
+
+    def exit_key(self):
+        tf = getattr(self, "_tf", None) or self.spec.timeframes[0]
+        return f"{self._exit_name(tf)}|time_stop={self.params['max_hold'] * self._horizon(tf)}"
+
+    def features(self, df):
+        return {"ml_chance": self._memo[1]} if getattr(self, "_memo", None) else {}
+
+
+class _Vote:
+    """The three models' average chance of a rise (soft voting)."""
+
+    def __init__(self, models):
+        self.models = models
+
+    def fit(self, X, y):
+        for m in self.models:
+            m.fit(X, y)
+        return self
+
+    def predict_proba(self, X):
+        return np.mean([m.predict_proba(X) for m in self.models], axis=0)
+
+
+ML_STRATEGIES = (MlBoosted, MlEnsemble)
