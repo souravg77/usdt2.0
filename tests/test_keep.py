@@ -142,6 +142,8 @@ def test_each_engine_keeps_its_own_best(tmp_path, monkeypatch, capsys):
     spot_star.paper = {"trades": 60, "expectancy_r": 0.3, "markets": {"spot": {"trades": 60, "expectancy_r": 0.9}}}
     fut_star = entry("fut_star", trades=100, exp=0.05)
     fut_star.paper = {"trades": 60, "expectancy_r": 0.3, "markets": {"futures": {"trades": 60, "expectancy_r": 0.9}}}
+    # Futures AI ranks only on results from the perpetuals, never a spot one
+    fut_star.backtest_futures = dict(fut_star.backtest)
     short = entry("short_one", trades=100, exp=0.8)
     short.kind = "short"
     reg = make(tmp_path, *longs, spot_star, fut_star, short)
@@ -151,6 +153,7 @@ def test_each_engine_keeps_its_own_best(tmp_path, monkeypatch, capsys):
     spot, fut = kept_ids(reg.path, "spot"), kept_ids(reg.path, "futures")
     assert "spot_star" in spot and "fut_star" not in spot and "short_one" not in spot
     assert "fut_star" in fut and "spot_star" not in fut and "short_one" in fut
+    assert not any(f"l{i}" in fut for i in range(10))  # only spot results: never ranked by Futures AI
     now = Registry(reg.path)
     assert now.get("spot_star").status == now.get("fut_star").status == "paper"  # each kept by its engine
     assert picks.trades_now(now.get("spot_star"), False, "spot", spot)

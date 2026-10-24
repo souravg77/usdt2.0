@@ -28,7 +28,8 @@ Futures AI trades on the perpetuals' candles, with perp fees and funding. A stra
 trades (a short twin, a Futures pick) takes that result as its backtest and moves on it; Spot AI's
 `learn test` leaves those out. A long both engines trade keeps its spot result and status, with
 Futures AI's own result beside it (`backtest_futures`), and Futures AI's "Keep the best" ranks on that
-one (the button runs the Futures test first).
+one (the button runs the Futures test first). Futures AI never uses or shows a spot result: a long with
+only a spot result counts as not tested on Futures AI's learning page and in its ranking.
 
 `aitrader learn test --missing --market futures` tests every strategy Futures AI trades that has no
 result on the perpetuals yet, whatever its status: one Spot AI tested (or rejected) before Futures AI

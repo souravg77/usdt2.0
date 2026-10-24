@@ -45,7 +45,7 @@ def _engine_entries(reg, market: str):
 def _backtest(entry, market: str) -> dict:
     from ..learn.keep import backtest_of
 
-    return backtest_of(entry, market if market == "futures" else None)
+    return backtest_of(entry, market)
 
 
 def _ml_section(entries, market: str, kept) -> str:
@@ -54,9 +54,7 @@ def _ml_section(entries, market: str, kept) -> str:
     for e in sorted((e for e in entries if is_ml(e)), key=lambda e: e.id):
         bt = _backtest(e, market)
         test = _r(bt.get("out_of_sample") or {})
-        if market == "futures" and not e.backtest_futures and e.backtest and e.kind != "short":
-            test += '<div class="muted small">spot result: not tested on the perpetuals yet</div>'
-        elif bt.get("failed"):
+        if bt.get("failed"):
             test += f'<div class="bad small">failed: {_e("; ".join(bt["failed"])[:140])}</div>'
         elif (bt.get("out_of_sample") or {}).get("trades"):
             test += '<div class="good small">passed</div>'
@@ -71,38 +69,35 @@ def _ml_section(entries, market: str, kept) -> str:
             'Trading page (it loads every strategy), or run <code>learn add-builtin ml_boosted</code>.</p>')
     return (f'<div class="card"><h3>Machine-learning strategies: {name}</h3>'
             f'<p class="small muted">These strategies have no hand-written entry rule: a model learns from the '
-            f'chart\'s own past when to enter. For {name} each model trains only on {SOURCES[market]}; '
-            'a coin\'s spot chart and its perpetual chart each get their own models. They are retrained '
+            f'chart\'s own past when to enter. For {name} each model trains only on {SOURCES[market]}, '
+            f'one model per {"perpetual" if market == "futures" else "pair"}. They are retrained '
             'walk-forward (every 250 candles, on the last 1,500) so every result is on candles the model never '
             f'saw.</p>{body}</div>')
 
 
 def _test_section(entries, market: str, form: str, busy) -> str:
     name = NAMES[market]
-    passed = failed = untested = spot_only = 0
+    passed = failed = untested = 0
     for e in entries:
         if (e.spec or {}).get("pick"):
             continue  # WIN copies are judged by Keep the winners, not by this test
-        bt = _backtest(e, market)
-        if market == "futures" and not e.backtest_futures and e.kind != "short":
-            spot_only += 1
-        elif not bt or "trades" not in (bt.get("out_of_sample") or {}):
+        bt = _backtest(e, market)  # Futures AI: perpetual results only, never a spot one
+        if not bt or "trades" not in (bt.get("out_of_sample") or {}):
             untested += 1
         elif bt.get("failed"):
             failed += 1
         else:
             passed += 1
     where = "the perpetuals' candles" if market == "futures" else "spot candles"
-    extra = (f", {spot_only} only have a spot result so far" if market == "futures" and spot_only else "")
     button = (f'<p class="small">Testing now (<a href="/jobs/{_e(busy["id"])}">progress</a>)</p>' if busy else
               f'<form method="post" action="/learning/test">{form}<button class="ghost">Test every {name} strategy '
               f'on {where}</button></form>')
     return (f'<div class="card"><h3>Strategy test: {name}</h3>'
-            f'<p>{passed} passed, {failed} failed, {untested} not tested yet{extra}.</p>'
+            f'<p>{passed} passed, {failed} failed, {untested} not tested yet.</p>'
             f'<p class="small muted">{name}\'s own backtest gate, on {where}: in-sample, out-of-sample, '
             'walk-forward, Monte Carlo and the untouched final part. The ranking in "Keep the best" uses these '
             f'results. The other engine\'s test is separate. The button tests the strategies on paper now, then '
-            f'every one with no result on {where} yet{" (including those only tested on spot)" if market == "futures" else ""}. '
+            f'every one with no result on {where} yet. '
             'With many strategies it takes hours; the progress link shows each one.</p>'
             f'{button}</div>')
 
@@ -156,8 +151,7 @@ def add_learning_routes(app, *, page, guard, auth, paths, csrf, jobs, ai_card, c
                               f'<input type="hidden" name="back" value="{back}">')
         parts = [f'<p class="{"bad" if bad else "good"}">{_e(msg)}</p>' if msg else "",
                  f'<p class="small muted">Everything {name} learns, in one place. {name} learns only from '
-                 f'{SOURCES[market]}. {NAMES[other]} has its own learning window: '
-                 f'<a href="/learning/{other}">{NAMES[other]} learning</a>.</p>',
+                 f'{SOURCES[market]}; nothing from {NAMES[other]} is shown or used here.</p>',
                  _ml_section(entries, market, kept_ids(paths.registry, market)),
                  _test_section(entries, market, form, _busy(market)),
                  ai_card(paths, jobs.list(), csrf(token), market, back=back),
