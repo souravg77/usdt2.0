@@ -24,14 +24,15 @@ PRICE_COLS = ("open", "high", "low", "close")
 
 
 def flip(df: pd.DataFrame) -> pd.DataFrame:
-    """The chart upside down: 1/price, with high and low swapped. Volume and time stay."""
+    """The chart upside down: 1/price, with high and low swapped. Volume, time and open interest stay;
+    funding and the premium index change sign (what longs pay, shorts earn)."""
     out = df.copy()
     out["open"] = 1.0 / df["open"]
     out["close"] = 1.0 / df["close"]
     out["high"] = 1.0 / df["low"]
     out["low"] = 1.0 / df["high"]
     for col in df.columns:
-        if col.startswith("funding"):
+        if col.startswith("funding") or col.startswith("premium"):  # who pays flips with the side
             out[col] = -df[col]
     return out
 

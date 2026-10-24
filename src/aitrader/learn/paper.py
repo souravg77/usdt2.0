@@ -849,10 +849,19 @@ class PaperTrader:
             sig = capped(_sig_from({**pos["signal"], "target": full}), max_rr)
             pos["signal"]["target"] = sig.target
             step = TIMEFRAME_MS[tf]
-            df = self._frame(ex, sym, tf, sig.ts - WINDOW_BARS * step, now_ms, pos_mkt)
+            try:  # registers its custom exit rules; an ML exit also needs its models' full history
+                strat = make_strategy(reg.entries[entry_id]) if entry_id in reg.entries else None
+            except Exception:  # never close a trade on the wrong rule: keep it open and say so
+                log.exception("paper %s: can't build its strategy; kept open", key)
+                left += closing
+                continue
+            bars = max(WINDOW_BARS, int(getattr(strat, "history_bars", 0) or 0))
+            df = self._frame(ex, sym, tf, sig.ts - bars * step, now_ms, pos_mkt)
             if df is None:
                 left += closing
                 continue
+            if strat is not None:  # funding / open interest / premium for a strategy that reads them
+                df = with_context(strat, df, self.store, ex, sym, tf)
             ts = df["ts"].to_numpy()
             idx = {int(t): i for i, t in enumerate(ts)}
             entry_i = idx.get(sig.ts)
@@ -864,8 +873,6 @@ class PaperTrader:
                 entry_i = later[0]
                 log.warning("paper %s: entry candle %d missing; entering at the next one", key, sig.ts)
             try:
-                if entry_id in reg.entries:
-                    make_strategy(reg.entries[entry_id])  # registers its custom exit rules
                 bcfg = self._bcfg(bool(pos.get("perp")), split_tp=bool(pos.get("split_tp")),
                                   maker_entry=bool(pos.get("maker_entry")), breakeven=bool(pos.get("breakeven")),
                                   max_rr=max_rr)

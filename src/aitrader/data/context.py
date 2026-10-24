@@ -11,6 +11,11 @@ Sources (all free, no key):
   value per settlement, usually 8h), open-interest history (1h, the last 29 days are fetched) and
   the long/short account ratio (1h). A spot pair ``BTC/USDT`` maps to the perpetual
   ``BTC/USDT:USDT``; rows are stored under the spot symbol so they line up with candles.
+- Bybit's premium index (1h klines of the perpetual against Bybit's index price, through ccxt's
+  ``fetch_premium_index_ohlcv``): the basis. Each hour is stored at its close, when it is known.
+  ``context backfill`` fetches years of funding, open interest and premium index, so the ML
+  strategies that read them (``ml_boosted_fund``, ``ml_ensemble_fund``) have them for every
+  candle they train on.
 - CoinGecko ``/api/v3/global`` for BTC dominance (percent), total market cap (USD) and its 24h
   change (a fraction: -0.08 is -8%), and ``/api/v3/coins/markets?ids=tether,usd-coin`` for the
   stablecoin (USDT + USDC) market cap. These are snapshots, stored under
@@ -46,12 +51,15 @@ REFRESH_MS = {
     "funding_rate": 8 * HOUR_MS,
     "open_interest": HOUR_MS,
     "long_short_ratio": HOUR_MS,
+    "premium_index": HOUR_MS,
     "btc_dominance": HOUR_MS,
     "total_mcap": HOUR_MS,
     "total_mcap_change_24h": HOUR_MS,
     "stable_mcap": HOUR_MS,
 }
-SYMBOL_METRICS = ("funding_rate", "open_interest", "long_short_ratio")
+SYMBOL_METRICS = ("funding_rate", "open_interest", "long_short_ratio", "premium_index")
+# the columns ``attach_context`` adds to candle frames
+ATTACHED = ("funding_rate", "open_interest", "premium_index")
 GLOBAL_METRICS = ("btc_dominance", "total_mcap", "total_mcap_change_24h", "stable_mcap")
 
 COINGECKO = "https://api.coingecko.com/api/v3"
@@ -59,6 +67,7 @@ COINGECKO_GLOBAL = f"{COINGECKO}/global"
 COINGECKO_STABLES = f"{COINGECKO}/coins/markets?vs_currency=usd&ids=tether,usd-coin"
 
 OI_HISTORY_DAYS = 29  # open interest and long/short history fetched on first run
+HISTORY_DAYS = 1100  # ``context backfill``: about three years, the ML strategies' training span
 
 
 def stale_after(metric: str) -> int:
@@ -147,7 +156,7 @@ def make_client():
     return ccxt_async.bybit({"enableRateLimit": True, "options": {"defaultType": "swap"}})
 
 
-async def _paged(fetch, since: int, now: int, limit: int, max_pages: int = 50) -> list[dict]:
+async def _paged(fetch, since: int, now: int, limit: int, max_pages: int = 1000) -> list[dict]:
     out: list[dict] = []
     for _ in range(max_pages):
         rows = await fetch(since, limit)
@@ -172,10 +181,11 @@ async def fetch_funding(client, symbol: str, since: int, now: int | None = None,
 
 
 async def fetch_open_interest(client, symbol: str, since: int, now: int | None = None,
-                              timeframe: str = "1h", limit: int = 200) -> list[tuple[int, float]]:
+                              timeframe: str = "1h", limit: int = 200,
+                              max_days: int = OI_HISTORY_DAYS) -> list[tuple[int, float]]:
     """Open interest in coins (falls back to USD value when the amount is missing)."""
     now = now or int(time.time() * 1000)
-    since = max(since, now - OI_HISTORY_DAYS * DAY_MS)
+    since = max(since, now - max_days * DAY_MS)
     rows = await _paged(lambda s, n: client.fetch_open_interest_history(
         perp_symbol(symbol), timeframe, since=s, limit=n), since, now, limit)
     out = {}
@@ -200,6 +210,27 @@ async def fetch_long_short(client, symbol: str, since: int, now: int | None = No
                         since, now, limit)
     return sorted({int(r["timestamp"]): float(r["longShortRatio"]) for r in rows
                    if r.get("longShortRatio") is not None}.items())
+
+
+async def fetch_premium_index(client, symbol: str, since: int, now: int | None = None,
+                              timeframe: str = "1h", limit: int = 1000) -> list[tuple[int, float]]:
+    """The perpetual's premium index (its basis against the index price) per hour, stamped at each
+    hour's close so a candle never reads an hour that had not finished yet."""
+    now = now or int(time.time() * 1000)
+    step = TIMEFRAME_MS[timeframe]
+    out: dict[int, float] = {}
+    for _ in range(1000):
+        rows = await client.fetch_premium_index_ohlcv(perp_symbol(symbol), timeframe, since=since, limit=limit)
+        rows = [r for r in rows if r and r[0] is not None and int(r[0]) >= since and r[4] is not None]
+        for r in rows:
+            if int(r[0]) + step <= now:  # only finished hours
+                out[int(r[0]) + step] = float(r[4])
+        if len(rows) < limit:
+            break
+        since = max(int(r[0]) for r in rows) + 1
+        if since >= now:
+            break
+    return sorted(out.items())
 
 
 def _get_json(url: str, urlopen=None, timeout: float = 15.0):
@@ -239,20 +270,26 @@ def fetch_global(urlopen=None, now: int | None = None, timeout: float = 15.0) ->
 
 async def collect_context(store: ContextStore, symbols: list[str], exchange: str = SOURCE_EXCHANGE,
                           client=None, urlopen=None, backfill_days: int = 30,
-                          now_ms: int | None = None) -> dict[str, int]:
+                          now_ms: int | None = None, history: bool = False) -> dict[str, int]:
     """Top up every context series. Returns rows written per metric. A failing source is logged
-    and skipped; the others still update."""
+    and skipped; the others still update. ``history`` fetches the last ``backfill_days`` again
+    even where rows exist (``context backfill``: open interest and premium index too, years back)."""
     now = now_ms or int(time.time() * 1000)
     own = client is None
     client = client or make_client()
     added = {m: 0 for m in SYMBOL_METRICS + GLOBAL_METRICS}
-    fetchers = {"funding_rate": fetch_funding, "open_interest": fetch_open_interest,
-                "long_short_ratio": fetch_long_short}
+    oi_days = backfill_days if history else OI_HISTORY_DAYS
+
+    async def oi(client, sym, since, now):
+        return await fetch_open_interest(client, sym, since, now, max_days=oi_days)
+
+    fetchers = {"funding_rate": fetch_funding, "open_interest": oi,
+                "long_short_ratio": fetch_long_short, "premium_index": fetch_premium_index}
     try:
         for sym in symbols:
             for metric, fetch in fetchers.items():
                 last = store.last_ts(metric, exchange, sym)
-                since = last + 1 if last is not None else now - backfill_days * DAY_MS
+                since = last + 1 if last is not None and not history else now - backfill_days * DAY_MS
                 try:
                     pairs = await fetch(client, sym, since, now)
                 except Exception as exc:
@@ -280,7 +317,7 @@ def _timeframe_ms(df: pd.DataFrame, timeframe: str | None) -> int:
 
 def attach_context(df: pd.DataFrame, store: ContextStore, exchange: str, symbol: str,
                    timeframe: str | None = None) -> pd.DataFrame:
-    """Copy of ``df`` with ``funding_rate`` and ``open_interest`` columns.
+    """Copy of ``df`` with ``funding_rate``, ``open_interest`` and ``premium_index`` columns.
 
     Each bar sees the newest value stamped at or before its close (``ts + timeframe``), never a
     later one, and only while that value is fresh (``stale_after``); otherwise NaN. Rows stored
@@ -288,13 +325,13 @@ def attach_context(df: pd.DataFrame, store: ContextStore, exchange: str, symbol:
     """
     out = df.copy()
     if out.empty:
-        out["funding_rate"] = np.nan
-        out["open_interest"] = np.nan
+        for metric in ATTACHED:
+            out[metric] = np.nan
         return out
     step = _timeframe_ms(out, timeframe)
     close = pd.DataFrame({"_close": out["ts"].astype("int64").to_numpy() + step,
                           "_pos": np.arange(len(out))}).sort_values("_close")
-    for metric in ("funding_rate", "open_interest"):
+    for metric in ATTACHED:
         ex = exchange if store.last_ts(metric, exchange, symbol) is not None else SOURCE_EXCHANGE
         rows = store.load(metric, ex, symbol)
         if not rows:
@@ -305,3 +342,18 @@ def attach_context(df: pd.DataFrame, store: ContextStore, exchange: str, symbol:
                                allow_exact_matches=True, tolerance=stale_after(metric))
         out[metric] = merged.sort_values("_pos")[metric].to_numpy()
     return out
+
+
+def mirror_context(src: ContextStore, dst: ContextStore, metrics=ATTACHED) -> int:
+    """Copy the perpetuals' series (funding, open interest, premium index) from ``src`` into ``dst``,
+    rows newer than what ``dst`` has: Futures AI's own database gets them too, so its strategy test
+    reads them without opening Spot AI's. Returns rows copied."""
+    total = 0
+    for exchange, symbol, metric in src.conn.execute(
+            "SELECT DISTINCT exchange, symbol, metric FROM context WHERE exchange != 'global'").fetchall():
+        if metric not in metrics:
+            continue
+        last = dst.last_ts(metric, exchange, symbol)
+        rows = src.load(metric, exchange, symbol, start=None if last is None else last + 1)
+        total += dst.upsert((exchange, symbol, metric, t, v) for t, v in rows)
+    return total
