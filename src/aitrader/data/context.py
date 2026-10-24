@@ -16,6 +16,14 @@ Sources (all free, no key):
   ``context backfill`` fetches years of funding, open interest and premium index, so the ML
   strategies that read them (``ml_boosted_fund``, ``ml_ensemble_fund``) have them for every
   candle they train on.
+- CoinMetrics' free community API (no key) for on-chain numbers, one value per day: MVRV
+  (``CapMVRVCur``), NVT (``NVTAdj``), active addresses (``AdrActCnt``) and transaction count
+  (``TxCnt``). Only coins CoinMetrics covers for free get them (BTC, ETH and a few other big ones);
+  the others have none, and the models then use the rest of their inputs. Stored under
+  ``exchange="onchain"``. A day's value is stamped one full day after that day ends, because it is
+  published some hours after midnight: a candle never reads a number that wasn't out yet.
+- DefiLlama's free stablecoin chart for the total stablecoin supply (USD), one value per day,
+  stamped the same way, under ``exchange="global"``.
 - CoinGecko ``/api/v3/global`` for BTC dominance (percent), total market cap (USD) and its 24h
   change (a fraction: -0.08 is -8%), and ``/api/v3/coins/markets?ids=tether,usd-coin`` for the
   stablecoin (USDT + USDC) market cap. These are snapshots, stored under
@@ -52,6 +60,12 @@ REFRESH_MS = {
     "open_interest": HOUR_MS,
     "long_short_ratio": HOUR_MS,
     "premium_index": HOUR_MS,
+    # daily on-chain numbers, stamped a day late (see the top): fresh for 3 days
+    "mvrv": 36 * HOUR_MS,
+    "nvt": 36 * HOUR_MS,
+    "active_addresses": 36 * HOUR_MS,
+    "tx_count": 36 * HOUR_MS,
+    "stable_supply": 36 * HOUR_MS,
     "btc_dominance": HOUR_MS,
     "total_mcap": HOUR_MS,
     "total_mcap_change_24h": HOUR_MS,
@@ -60,7 +74,15 @@ REFRESH_MS = {
 SYMBOL_METRICS = ("funding_rate", "open_interest", "long_short_ratio", "premium_index")
 # the columns ``attach_context`` adds to candle frames
 ATTACHED = ("funding_rate", "open_interest", "premium_index")
-GLOBAL_METRICS = ("btc_dominance", "total_mcap", "total_mcap_change_24h", "stable_mcap")
+GLOBAL_METRICS = ("btc_dominance", "total_mcap", "total_mcap_change_24h", "stable_mcap", "stable_supply")
+ONCHAIN = "onchain"  # the ``exchange`` on-chain rows are stored under
+# our name -> CoinMetrics community metric
+ONCHAIN_METRICS = {"mvrv": "CapMVRVCur", "nvt": "NVTAdj", "active_addresses": "AdrActCnt", "tx_count": "TxCnt"}
+# what ``attach_context`` adds besides ``ATTACHED``: per coin from ``onchain``, market-wide from ``global``
+ATTACHED_ONCHAIN = tuple(ONCHAIN_METRICS)
+ATTACHED_GLOBAL = ("stable_supply",)
+COINMETRICS = "https://community-api.coinmetrics.io/v4/timeseries/asset-metrics"
+DEFILLAMA_STABLES = "https://stablecoins.llama.fi/stablecoincharts/all"
 
 COINGECKO = "https://api.coingecko.com/api/v3"
 COINGECKO_GLOBAL = f"{COINGECKO}/global"
@@ -299,9 +321,98 @@ async def collect_context(store: ContextStore, symbols: list[str], exchange: str
     finally:
         if own:
             await client.close()
+    # the database is only used from this thread, so this runs here (a few requests, once a day)
+    for metric, n in collect_onchain(store, symbols, urlopen, backfill_days, now, history).items():
+        added[metric] = added.get(metric, 0) + n
     snap = await asyncio.to_thread(fetch_global, urlopen, now)
     for metric, (t, v) in snap.items():
         added[metric] += store.upsert([(*GLOBAL, metric, t, v)])
+    return added
+
+
+def _day_ms(text: str) -> int:
+    """``2024-01-01T00:00:00.000000000Z`` -> ms since 1970 (UTC)."""
+    return int(pd.Timestamp(text).value // 1_000_000)
+
+
+def fetch_onchain(symbols: list[str], since: int, urlopen=None, timeout: float = 30.0,
+                  max_pages: int = 200) -> dict[tuple[str, str], list[tuple[int, float]]]:
+    """CoinMetrics community daily values: ``{(symbol, metric): [(stamp, value)]}``. A day's value is
+    stamped at the end of the next day (published after the day ends). Coins or metrics CoinMetrics
+    doesn't offer for free are simply missing."""
+    from urllib.parse import urlencode
+
+    assets = {s.split("/")[0].lower(): s for s in symbols}
+    if not assets:
+        return {}
+    back = {v: k for k, v in ONCHAIN_METRICS.items()}
+    url = COINMETRICS + "?" + urlencode({
+        "assets": ",".join(assets), "metrics": ",".join(ONCHAIN_METRICS.values()), "frequency": "1d",
+        "start_time": pd.Timestamp(since, unit="ms", tz="UTC").strftime("%Y-%m-%d"), "page_size": 10000,
+        "ignore_unsupported_errors": "true", "ignore_forbidden_errors": "true"})
+    out: dict[tuple[str, str], list[tuple[int, float]]] = {}
+    for _ in range(max_pages):
+        body = _get_json(url, urlopen, timeout)
+        for row in body.get("data") or []:
+            sym = assets.get(str(row.get("asset", "")).lower())
+            if sym is None or not row.get("time"):
+                continue
+            stamp = _day_ms(row["time"]) + 2 * DAY_MS  # the day ends, then a day to publish
+            for cm, ours in back.items():
+                try:
+                    v = float(row[cm])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if np.isfinite(v):
+                    out.setdefault((sym, ours), []).append((stamp, v))
+        url = body.get("next_page_url")
+        if not url:
+            break
+    return out
+
+
+def fetch_stable_supply(since: int, urlopen=None, timeout: float = 30.0) -> list[tuple[int, float]]:
+    """DefiLlama: total stablecoin supply in USD per day, stamped like the on-chain values."""
+    out = []
+    for row in _get_json(DEFILLAMA_STABLES, urlopen, timeout) or []:
+        try:
+            stamp = int(row["date"]) * 1000 + 2 * DAY_MS
+            v = float((row.get("totalCirculatingUSD") or {}).get("peggedUSD"))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if stamp >= since and np.isfinite(v):
+            out.append((stamp, v))
+    return out
+
+
+def collect_onchain(store: ContextStore, symbols: list[str], urlopen=None, backfill_days: int = 30,
+                    now: int | None = None, history: bool = False) -> dict[str, int]:
+    """Top up the daily on-chain series (at most once a day: they change once a day). A failing
+    source is logged and skipped."""
+    now = now or int(time.time() * 1000)
+    added: dict[str, int] = {}
+    lasts = [store.last_ts(m, ONCHAIN, s) for s in symbols for m in ONCHAIN_METRICS]
+    known = [t for t in lasts if t is not None]
+    since = now - backfill_days * DAY_MS
+    if known and not history:
+        if min(known) > now - DAY_MS:  # every coin is up to date
+            since = None
+        else:
+            since = max(since, min(known) - 3 * DAY_MS)
+    if since is not None:
+        try:
+            for (sym, metric), rows in fetch_onchain(symbols, since - 2 * DAY_MS, urlopen).items():
+                added[metric] = added.get(metric, 0) + store.upsert((ONCHAIN, sym, metric, t, v) for t, v in rows)
+        except Exception as exc:
+            log.warning("coinmetrics fetch failed: %s", exc)
+    last = store.last_ts("stable_supply", *GLOBAL)
+    if history or last is None or last <= now - DAY_MS:
+        start = now - backfill_days * DAY_MS if history or last is None else last + 1
+        try:
+            added["stable_supply"] = store.upsert((*GLOBAL, "stable_supply", t, v)
+                                                  for t, v in fetch_stable_supply(start, urlopen))
+        except Exception as exc:
+            log.warning("defillama stablecoin fetch failed: %s", exc)
     return added
 
 
@@ -317,7 +428,9 @@ def _timeframe_ms(df: pd.DataFrame, timeframe: str | None) -> int:
 
 def attach_context(df: pd.DataFrame, store: ContextStore, exchange: str, symbol: str,
                    timeframe: str | None = None) -> pd.DataFrame:
-    """Copy of ``df`` with ``funding_rate``, ``open_interest`` and ``premium_index`` columns.
+    """Copy of ``df`` with ``funding_rate``, ``open_interest`` and ``premium_index`` columns, the coin's
+    daily on-chain numbers (``mvrv``, ``nvt``, ``active_addresses``, ``tx_count``) and the total
+    stablecoin supply (``stable_supply``).
 
     Each bar sees the newest value stamped at or before its close (``ts + timeframe``), never a
     later one, and only while that value is fresh (``stale_after``); otherwise NaN. Rows stored
@@ -325,15 +438,20 @@ def attach_context(df: pd.DataFrame, store: ContextStore, exchange: str, symbol:
     """
     out = df.copy()
     if out.empty:
-        for metric in ATTACHED:
+        for metric in ATTACHED + ATTACHED_ONCHAIN + ATTACHED_GLOBAL:
             out[metric] = np.nan
         return out
     step = _timeframe_ms(out, timeframe)
     close = pd.DataFrame({"_close": out["ts"].astype("int64").to_numpy() + step,
                           "_pos": np.arange(len(out))}).sort_values("_close")
-    for metric in ATTACHED:
-        ex = exchange if store.last_ts(metric, exchange, symbol) is not None else SOURCE_EXCHANGE
-        rows = store.load(metric, ex, symbol)
+    wanted = [(m, None, symbol) for m in ATTACHED] + [(m, ONCHAIN, symbol) for m in ATTACHED_ONCHAIN] \
+        + [(m, *GLOBAL) for m in ATTACHED_GLOBAL]
+    for metric, home, sym in wanted:
+        if home is None:
+            ex = exchange if store.last_ts(metric, exchange, symbol) is not None else SOURCE_EXCHANGE
+        else:
+            ex = home
+        rows = store.load(metric, ex, sym)
         if not rows:
             out[metric] = np.nan
             continue
@@ -344,13 +462,15 @@ def attach_context(df: pd.DataFrame, store: ContextStore, exchange: str, symbol:
     return out
 
 
-def mirror_context(src: ContextStore, dst: ContextStore, metrics=ATTACHED) -> int:
-    """Copy the perpetuals' series (funding, open interest, premium index) from ``src`` into ``dst``,
+def mirror_context(src: ContextStore, dst: ContextStore,
+                   metrics=ATTACHED + ATTACHED_ONCHAIN + ATTACHED_GLOBAL) -> int:
+    """Copy the series the ML strategies read (funding, open interest, premium index, on-chain numbers,
+    stablecoin supply) from ``src`` into ``dst``,
     rows newer than what ``dst`` has: Futures AI's own database gets them too, so its strategy test
     reads them without opening Spot AI's. Returns rows copied."""
     total = 0
     for exchange, symbol, metric in src.conn.execute(
-            "SELECT DISTINCT exchange, symbol, metric FROM context WHERE exchange != 'global'").fetchall():
+            "SELECT DISTINCT exchange, symbol, metric FROM context").fetchall():
         if metric not in metrics:
             continue
         last = dst.last_ts(metric, exchange, symbol)
