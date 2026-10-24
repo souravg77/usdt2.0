@@ -1024,8 +1024,11 @@ def _teach(s: Settings, args, reg, exchanges, symbols, cfg) -> int:
         return 1
     # Futures AI learns on the perpetuals' own candles, costed as perps; Spot AI on spot candles
     store, symbols, cfg = _engine_market(s, market, symbols, cfg)
+    print(f"{name}: backtesting {len(strategies)} strategies on {len(symbols)} pairs "
+          f"({'perpetual' if market == 'futures' else 'spot'} candles); one line per strategy", flush=True)
     try:
-        frame = collect(store, strategies, exchanges, symbols, cfg)
+        frame = collect(store, strategies, exchanges, symbols, cfg,
+                        progress=lambda text: print(f"  {text}", flush=True))
     finally:
         store.close()
     if frame.empty:

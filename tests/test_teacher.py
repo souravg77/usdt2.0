@@ -166,8 +166,10 @@ def test_collect_tags_every_backtest_signal(tmp_path):
     store = CandleStore(str(tmp_path / "c.db"))
     fill_store(store, df)
     strat = make_strategy(Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR)))
-    frame = collect(store, [("up", strat)], ["bybit"], ["BTC/USDT"])
+    said = []
+    frame = collect(store, [("up", strat)], ["bybit"], ["BTC/USDT"], progress=said.append)
     store.close()
+    assert said == ["[1/1] up (0 signals so far)"]  # the job page shows each strategy as it starts
     assert len(frame) > 20
     assert frame["situation"].map(lambda k: len(k.split("|")) == 3).all()
     assert frame["signal_ts"].max() < df["ts"].iloc[int(len(df) * 0.8)] + H  # the final 20% is never used

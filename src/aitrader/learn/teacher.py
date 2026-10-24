@@ -134,8 +134,9 @@ def signal_rows(strategy, strategy_id: str, df: pd.DataFrame, exchange: str, sym
 
 
 def collect(store, strategies: list[tuple[str, object]], exchanges: list[str], symbols: list[str],
-            cfg=None) -> pd.DataFrame:
-    """Backtest every (id, strategy) on every stored market, the final 20% left out."""
+            cfg=None, progress=None) -> pd.DataFrame:
+    """Backtest every (id, strategy) on every stored market, the final 20% left out. ``progress``
+    (a function taking a line of text) hears about each strategy as it starts."""
     from ..ai.features import market_features
     from ..backtest import split_periods
     from ..indicators import candles_to_frame
@@ -143,7 +144,9 @@ def collect(store, strategies: list[tuple[str, object]], exchanges: list[str], s
 
     rows: list[dict] = []
     markets: dict = {}
-    for sid, strat in strategies:
+    for n, (sid, strat) in enumerate(strategies, 1):
+        if progress:
+            progress(f"[{n}/{len(strategies)}] {sid} ({len(rows)} signals so far)")
         for ex in exchanges:
             for sym in symbols:
                 for tf in strat.spec.timeframes:
