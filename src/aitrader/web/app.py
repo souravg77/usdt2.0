@@ -378,6 +378,11 @@ after {_e(window.split(" to ")[1])}; the next one waits for the next night.</p>
     add_teacher_routes(app, settings=settings, page=page, guard=guard, auth=auth, paths=paths,
                        csrf=lambda token: _csrf(auth, token), jobs=jobs, exchange=EXCHANGE)
 
+    from .learning_pages import add_learning_routes
+
+    add_learning_routes(app, page=page, guard=guard, auth=auth, paths=paths,
+                        csrf=lambda token: _csrf(auth, token), jobs=jobs, ai_card=_ai_card)
+
     @app.get("/scan-log")
     def scan_log(request: Request, show: str = "all", msg: str = "", bad: str = ""):
         """How trades are scanned and taken: every pass over the charts, every signal and what
@@ -631,6 +636,10 @@ after {_e(window.split(" to ")[1])}; the next one waits for the next night.</p>
                     + (f"Bybit's live price {live[sym]:g}" if live.get(sym) else "the newest saved price")
                     + "; it'll be gone in a few seconds. The others stay open.")
         return _control_post(request, csrf, act)
+
+    def _back(back: str) -> str:
+        """Where a form returns to: a learning window when it was sent from one, else the Trading page."""
+        return back if back in LEARNING_PAGES else "/trading"
 
     def _ws_market(market: str) -> str:
         """The engine a form is for: its own field, else the workspace shown."""
@@ -949,7 +958,7 @@ after {_e(window.split(" to ")[1])}; the next one waits for the next night.</p>
         return _control_post(request, csrf, act)
 
     @app.post("/trading/ai/train")
-    def trading_ai_train(request: Request, csrf: str = Form(""), market: str = Form("")):
+    def trading_ai_train(request: Request, csrf: str = Form(""), market: str = Form(""), back: str = Form("")):
         """Train one engine's own AI filter: Spot AI's on spot candles and Spot AI's trades, Futures
         AI's on the perpetuals' candles and Futures AI's trades."""
         def act(user):
@@ -967,10 +976,11 @@ after {_e(window.split(" to ")[1])}; the next one waits for the next night.</p>
             _event("ai_train", f"{name} AI filter training started from the dashboard by {user}")
             return (f"{name} training started. When it finishes, the AI filter card shows how the new model did on "
                     "data it never saw, and a Turn on button if it beat the unfiltered strategies.")
-        return _control_post(request, csrf, act)
+        return _control_post(request, csrf, act, back=_back(back))
 
     @app.post("/trading/ai/on")
-    def trading_ai_on(request: Request, csrf: str = Form(""), version: str = Form(""), market: str = Form("")):
+    def trading_ai_on(request: Request, csrf: str = Form(""), version: str = Form(""), market: str = Form(""),
+                      back: str = Form("")):
         def act(user):
             from ..ai import ModelRegistry
             from ..learn.wallet import engine_path
@@ -986,10 +996,10 @@ after {_e(window.split(" to ")[1])}; the next one waits for the next night.</p>
             return (f"{name} AI filter {version} is on. {name} paper trading now skips the signals it rates weakest "
                     "and shrinks the doubtful ones; the other engine is not changed. Turn off takes every signal "
                     "again at once.")
-        return _control_post(request, csrf, act)
+        return _control_post(request, csrf, act, back=_back(back))
 
     @app.post("/trading/ai/off")
-    def trading_ai_off(request: Request, csrf: str = Form(""), market: str = Form("")):
+    def trading_ai_off(request: Request, csrf: str = Form(""), market: str = Form(""), back: str = Form("")):
         def act(user):
             from ..ai import ModelRegistry
             from ..learn.wallet import engine_path
@@ -999,7 +1009,7 @@ after {_e(window.split(" to ")[1])}; the next one waits for the next night.</p>
             ModelRegistry(engine_path(paths.models, mkt)).deactivate(by=user)
             _event("ai_off", f"{name} AI filter turned off from the dashboard by {user}")
             return f"{name} AI filter off: every {name} signal is taken at full size."
-        return _control_post(request, csrf, act)
+        return _control_post(request, csrf, act, back=_back(back))
 
     @app.post("/trading/paper/off")
     def trading_paper_off(request: Request, csrf: str = Form(""), market: str = Form("")):
@@ -1053,9 +1063,11 @@ def _tabbar(title: str) -> str:
         f'stroke-linejoin="round" aria-hidden="true">{icon}</svg>{name}</a>' for href, name, icon in TABS) + "</nav>")
 
 
+LEARNING_PAGES = ("/learning/spot", "/learning/futures")
 NAV = [("/", "Overview"), ("/markets", "Markets"), ("/pairs", "Pairs"), ("/trading", "Trading"), ("/scan-log", "Scan log"),
        ("/monitor", "Monitor"),
-       ("/replay", "Replay"), ("/teacher", "Teacher"),
+       ("/replay", "Replay"), ("/learning/spot", "Spot AI learning"), ("/learning/futures", "Futures AI learning"),
+       ("/teacher", "Teacher"),
        ("/news", "News"), ("/research", "Research"), ("/reports", "Reports"), ("/books", "Submit a book"), ("/changes", "Change requests"), ("/admin/users", "Users"),
        ("/settings", "Settings")]
 
@@ -1224,7 +1236,7 @@ def _filter_card(paths: Paths) -> str:
     return f'<div class="card"><h3>AI trade filters</h3><p>{"<br>".join(lines)}</p></div>'
 
 
-def _ai_card(paths: Paths, job_list: list[dict], csrf: str, ws: str = "spot") -> str:
+def _ai_card(paths: Paths, job_list: list[dict], csrf: str, ws: str = "spot", back: str = "") -> str:
     """The AI trade filter: train a new model, turn the best candidate on, or turn it off; and
     whether the workspace's engine uses it and the backtest teacher."""
     from ..ai import ModelRegistry
@@ -1243,7 +1255,8 @@ def _ai_card(paths: Paths, job_list: list[dict], csrf: str, ws: str = "spot") ->
         state = '<b class="bad">OFF</b>: every signal is taken at full size'
     source = ("the perpetual futures' own candles and Futures AI's own paper trades (longs and shorts)"
               if ws == "futures" else "spot candles and Spot AI's own paper trades (longs only)")
-    csrf = csrf + f'<input type="hidden" name="market" value="{ws}">'
+    csrf = csrf + f'<input type="hidden" name="market" value="{ws}">' + (
+        f'<input type="hidden" name="back" value="{_e(back)}">' if back else "")
     parts = [f'<div class="card"><h3>AI trade filter: {name}</h3><p>{state}</p>',
              f'<p class="small muted">{name} has its own filter, learned only from {source}; the other '
              'engine\'s filter is separate and never used here. '
