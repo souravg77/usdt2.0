@@ -195,7 +195,8 @@ def test_doctor_reads_the_newest_candles_without_scanning_the_table(tmp_path):
 
 def test_cleanup_frees_space_but_never_touches_the_data():
     text = open("deploy/cleanup.sh", encoding="utf-8").read()
-    assert "image prune -f" in text and "builder prune -f" in text
+    assert "image prune -f" in text and "builder prune -af" in text
+    assert "image prune -af --filter until=72h" in text  # old installs' images, not the ones in use
     assert "sudo -n" in text and "sudo apt" not in text  # never waits for a password
     for keep in ("aitrader.db", "backups", ".env", "volume prune", "system prune -a", "rm -rf"):
         assert keep not in text.split("set -uo pipefail")[1]
