@@ -244,7 +244,12 @@ class MlBoosted(_Master):
             pkey = (key, int(ts[t0]), int(ts[t1 - 1]))
             got = _PREDICTIONS.get(pkey) if done else None
             if got is None:
-                got = self._model(Xv[rows], yv[rows], key).predict_proba(Xv[block])[:, 1]
+                Xt, Xp = Xv[rows], Xv[block]
+                empty = ~np.isfinite(Xt).any(axis=0)  # an input with no value in the training rows
+                if empty.any():  # (no on-chain data for this coin): a constant the models ignore
+                    Xt, Xp = Xt.copy(), Xp.copy()
+                    Xt[:, empty], Xp[:, empty] = 0.0, 0.0
+                got = self._model(Xt, yv[rows], key).predict_proba(Xp)[:, 1]
                 if done:
                     _remember(_PREDICTIONS, pkey, got, MAX_PREDICTIONS)
             prob[block] = got
@@ -423,16 +428,22 @@ class _Vote:
 
 # ---- the fundamental overlay: the perpetual's funding, open interest and basis as model inputs ----
 
-FUND_COLUMNS = ("funding", "funding_chg3d", "oi_chg4h", "oi_chg1d", "premium", "premium_z7d")
-FUND_TEXT = ("Fundamental overlay (6 more inputs, from Bybit's perpetual for this coin): funding rate, "
+FUND_COLUMNS = ("funding", "funding_chg3d", "oi_chg4h", "oi_chg1d", "premium", "premium_z7d",
+                "mvrv", "nvt_log", "addresses_chg7d", "tx_chg7d", "stablecoins_chg7d")
+FUND_TEXT = ("Fundamental overlay (11 more inputs). From Bybit's perpetual for this coin: funding rate, "
              "funding against its 3-day average, open-interest change over 4 hours and 1 day, the premium "
              "index (basis: perpetual against the index price) and how unusual it is against the last 7 "
-             "days. No trade without a fresh funding rate and premium index; open interest may be missing.")
+             "days. On-chain, from CoinMetrics' free data where it covers the coin (BTC, ETH and a few other "
+             "big ones): MVRV, NVT, and the 7-day change in active addresses and transactions. Market-wide, "
+             "from DefiLlama: the 7-day change in total stablecoin supply. No trade without a fresh funding "
+             "rate and premium index; the others may be missing (a coin without on-chain data simply "
+             "trains without it).")
 
 
 def fund_frame(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
-    """The perpetual's funding, open interest and premium index as scaled inputs, from the columns
-    ``data.context.attach_context`` adds (NaN where they are missing). Each bar only reads values
+    """The perpetual's funding, open interest and premium index, the coin's on-chain numbers and the
+    stablecoin supply as scaled inputs, from the columns ``data.context.attach_context`` adds (NaN
+    where they are missing). Each bar only reads values
     stamped at or before its close."""
     nan = pd.Series(np.nan, index=df.index)
     f = df["funding_rate"] if "funding_rate" in df else nan
@@ -442,6 +453,11 @@ def fund_frame(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     day, week, h4 = max(1, round(24 * per_hour)), max(2, round(168 * per_hour)), max(1, round(4 * per_hour))
     days3 = max(1, round(72 * per_hour))
     sd = pr.rolling(week, min_periods=week // 2).std(ddof=0).replace(0, np.nan)
+
+    def col(name):
+        return (df[name] if name in df else nan).replace(0, np.nan)
+
+    adr, tx, stab = col("active_addresses"), col("tx_count"), col("stable_supply")
     return pd.DataFrame({
         "funding": f * 1000,  # +0.01 % per 8h -> 0.1
         "funding_chg3d": (f - f.rolling(days3, min_periods=1).mean()) * 1000,
@@ -449,6 +465,11 @@ def fund_frame(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
         "oi_chg1d": oi / oi.shift(day) - 1,
         "premium": pr * 100,
         "premium_z7d": (pr - pr.rolling(week, min_periods=week // 2).mean()) / sd,
+        "mvrv": df["mvrv"] if "mvrv" in df else nan,
+        "nvt_log": np.log(col("nvt")),
+        "addresses_chg7d": adr / adr.shift(7 * day) - 1,
+        "tx_chg7d": tx / tx.shift(7 * day) - 1,
+        "stablecoins_chg7d": stab / stab.shift(7 * day) - 1,
     }, index=df.index).replace([np.inf, -np.inf], np.nan)
 
 

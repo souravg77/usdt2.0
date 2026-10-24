@@ -9,6 +9,9 @@ Rules (defaults are conservative: they only cut risk, and only on clear extremes
 - funding above +0.05% per 8h and open interest up more than 10% in 24h: crowded longs still
   piling in (Shawn's gate), no new longs.
 - total crypto market cap down more than 8% in 24h: market-wide sell-off, no new longs.
+- MVRV above 3.5 (holders sit on large gains, historically near cycle tops): no new longs; below
+  1.0 (the average holder is at a loss, historically near bottoms): no new shorts. Only coins with
+  free on-chain data (CoinMetrics) have it.
 
 A short (``side="sell"``, Futures AI) gets the mirror: funding below -0.05% means shorts are
 crowded (size x0.5) and below -0.10% means a squeeze is likely (no new shorts); open interest up
@@ -49,6 +52,8 @@ class ContextFilter:
     funding_size: float = 0.5
     oi_jump: float = 0.15  # open interest +15% in 24h ...
     oi_size: float = 0.5  # ... while price fell
+    mvrv_high: float = 3.5  # no new longs above
+    mvrv_low: float = 1.0  # no new shorts below
     crowd_oi: float = 0.10  # open interest +10% in 24h while funding is above ``funding_reduce``
     mcap_drop: float = 0.08  # total market cap -8% in 24h
     source_exchange: str = SOURCE_EXCHANGE
@@ -124,5 +129,14 @@ class ContextFilter:
             allow = False
             reasons.append(f"total market cap {chg[1]:+.1%} in 24h (below -{self.mcap_drop:.0%}): "
                            "no new longs")
+
+        mv = self._fresh("mvrv", "onchain", symbol, now)
+        if mv is not None:
+            if not short and mv[1] > self.mvrv_high:
+                allow = False
+                reasons.append(f"MVRV {mv[1]:.2f} above {self.mvrv_high:g} (historically elevated): no new longs")
+            elif short and mv[1] < self.mvrv_low:
+                allow = False
+                reasons.append(f"MVRV {mv[1]:.2f} below {self.mvrv_low:g} (holders at a loss): no new shorts")
 
         return ContextDecision(allow, size if allow else 0.0, reasons)

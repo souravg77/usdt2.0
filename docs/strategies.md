@@ -255,8 +255,11 @@ Labels stay price-only; fundamentals are never used to make a label.
   whether the overlay helps on candles the models never saw. They start untested like every strategy.
 - They need years of funding, open interest and premium history: run `context backfill` once (see
   [market-context.md](market-context.md)). The short twins read funding and premium with the sign flipped.
-- Not included (no free source for most coins): MVRV, NVT, active addresses, exchange flows, liquidations.
-  Long/short ratio has only about a month of history, too little to train on.
+- On-chain inputs (Shawn picked free sources): MVRV, log NVT, 7-day change in active addresses and
+  transactions from CoinMetrics' free data, and the 7-day change in total stablecoin supply from DefiLlama.
+  Most coins have no free on-chain data; for them those inputs are empty and the models train on the rest.
+- Not included (paid or not published): exchange flows, STH/LTH supply and cost basis, liquidations, TVL and
+  fee revenue per coin. Long/short ratio has only about a month of history, too little to train on.
 
 ## New indicators
 

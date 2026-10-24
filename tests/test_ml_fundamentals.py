@@ -152,3 +152,95 @@ def test_a_short_reads_the_premium_the_other_way():
 def test_own_exit_rule_name():
     assert MlEnsembleFund().exit_key().startswith("ml_ensemble_fund_down:")
     assert STRATEGIES["ml_ensemble"]().exit_key().startswith("ml_ensemble_down:")
+
+
+# ---- on-chain (CoinMetrics) and stablecoin supply (DefiLlama) ----------------------------------
+
+
+def onchain_urlopen(days, assets=("btc",), fail=False):
+    """CoinMetrics community (two pages) and DefiLlama stand-ins."""
+    import io
+    import json
+
+    seen = []
+
+    def urlopen(req, timeout=None):
+        url = req.full_url
+        seen.append(url)
+        if fail:
+            raise OSError("offline")
+        if "coinmetrics" in url:
+            rows = [{"asset": a, "time": pd.Timestamp(d, unit="ms", tz="UTC").strftime("%Y-%m-%dT%H:%M:%S.000000000Z"),
+                     "CapMVRVCur": "2.5", "AdrActCnt": str(1000 + i), "TxCnt": "500"}  # no NVT for this coin
+                    for a in assets for i, d in enumerate(days)]
+            half = len(rows) // 2
+            if "page2" in url:
+                body = {"data": rows[half:]}
+            else:
+                body = {"data": rows[:half], "next_page_url": "https://community-api.coinmetrics.io/page2"}
+        else:
+            body = [{"date": str(d // 1000), "totalCirculatingUSD": {"peggedUSD": 1.5e11 + i}}
+                    for i, d in enumerate(days)]
+        return io.BytesIO(json.dumps(body).encode())
+    urlopen.seen = seen
+    return urlopen
+
+
+def test_onchain_values_are_stamped_a_day_after_the_day_ends(ctx):
+    from aitrader.data.context import collect_onchain
+
+    day0 = NOW // DAY_MS * DAY_MS - 10 * DAY_MS
+    days = [day0 + i * DAY_MS for i in range(10)]
+    added = collect_onchain(ctx, ["BTC/USDT", "PEPE/USDT"], onchain_urlopen(days), backfill_days=30, now=NOW)
+    assert added["mvrv"] == 10 and added["active_addresses"] == 10 and "nvt" not in added
+    first = ctx.load("mvrv", "onchain", "BTC/USDT")[0]
+    assert first == (day0 + 2 * DAY_MS, 2.5)  # the day, then a day to be published
+    assert not ctx.load("mvrv", "onchain", "PEPE/USDT")  # not covered for free: simply missing
+    assert ctx.load("stable_supply", "global", "*")[0] == (day0 + 2 * DAY_MS, 1.5e11)
+    # up to date: no new request until a day has passed
+    again = onchain_urlopen(days)
+    collect_onchain(ctx, ["BTC/USDT"], again, now=day0 + 11 * DAY_MS)
+    assert not any("coinmetrics" in u for u in again.seen)
+
+
+def test_onchain_source_offline_is_skipped(ctx):
+    from aitrader.data.context import collect_onchain
+
+    assert collect_onchain(ctx, ["BTC/USDT"], onchain_urlopen([], fail=True), now=NOW) == {}
+
+
+def test_attach_context_adds_onchain_and_stablecoins(ctx):
+    from aitrader.data.context import collect_onchain
+
+    day0 = NOW // DAY_MS * DAY_MS - 10 * DAY_MS
+    collect_onchain(ctx, ["BTC/USDT"], onchain_urlopen([day0 + i * DAY_MS for i in range(10)]), now=NOW)
+    ts = np.arange(48) * HOUR_MS + day0 + 2 * DAY_MS - HOUR_MS
+    df = pd.DataFrame({"ts": ts, "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0})
+    out = attach_context(df, ctx, "bybit", "BTC/USDT", "1h")
+    assert out["mvrv"].iloc[0] == 2.5 and out["stable_supply"].iloc[0] == 1.5e11
+    assert out["active_addresses"].iloc[-1] == 1001  # a day later it reads the second day
+    assert attach_context(df, ctx, "bybit", "PEPE/USDT", "1h")["mvrv"].isna().all()
+
+
+def test_fund_frame_reads_onchain_when_there():
+    df = frame(400)
+    assert fund_frame(df, "1h")["mvrv"].isna().all()  # no on-chain data: left empty, still trades
+    df["mvrv"], df["nvt"] = 2.0, np.e
+    df["active_addresses"] = np.r_[np.full(200, 100.0), np.full(200, 110.0)]
+    F = fund_frame(df, "1h")
+    assert F["mvrv"].iloc[-1] == 2.0 and F["nvt_log"].iloc[-1] == pytest.approx(1.0)
+    assert F["addresses_chg7d"].iloc[300] == pytest.approx(0.1)  # 168 bars = 7 days on 1h
+    full = frame()
+    full["mvrv"], full["nvt"] = 2.0, np.e
+    assert MlBoostedFund(threshold=0.55).generate(full, "bybit", "X/USDT", "1h")
+
+
+@pytest.mark.parametrize("mvrv, side, allow", [(3.8, "buy", False), (2.0, "buy", True), (0.9, "buy", True),
+                                               (0.9, "sell", False), (3.8, "sell", True)])
+def test_filter_mvrv_gate(ctx, mvrv, side, allow):
+    from aitrader.strategies.context_filter import ContextFilter
+
+    ctx.upsert([("onchain", "BTC/USDT", "mvrv", NOW - HOUR_MS, mvrv)])
+    d = ContextFilter(ctx).decide("bybit", "BTC/USDT", NOW, price_change_24h=0.0, side=side)
+    assert d.allow_entries == allow
+    assert ContextFilter(ctx).decide("bybit", "ETH/USDT", NOW, side=side).allow_entries  # no data: no gate

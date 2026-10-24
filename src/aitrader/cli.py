@@ -443,7 +443,7 @@ async def cmd_context(s: Settings, args) -> int:
             while True:
                 symbols = args.symbol or _context_symbols(s)
                 if history:
-                    print(f"fetching {days} days of funding, open interest and premium index for "
+                    print(f"fetching {days} days of funding, open interest, premium index and on-chain data for "
                           f"{len(symbols)} pairs; this takes a while", flush=True)
                 added = await collect_context(ctx, symbols, backfill_days=days, history=history)
                 log.info("context +%s", ", ".join(f"{m} {n}" for m, n in added.items() if n) or "nothing new")
@@ -462,9 +462,10 @@ async def cmd_context(s: Settings, args) -> int:
         if args.context_cmd == "derivs":
             return await _print_derivs(args.symbol or s.symbols)
         now, symbol = int(time.time() * 1000), (args.symbol or ["BTC/USDT"])[0]
-        for ex, sym in dict.fromkeys([(args.exchange, symbol), ("global", "*")]):
-            for metric in ("funding_rate", "open_interest", "long_short_ratio", "premium_index", "btc_dominance",
-                           "total_mcap", "total_mcap_change_24h", "stable_mcap"):
+        for ex, sym in dict.fromkeys([(args.exchange, symbol), ("onchain", symbol), ("global", "*")]):
+            for metric in ("funding_rate", "open_interest", "long_short_ratio", "premium_index", "mvrv", "nvt",
+                           "active_addresses", "tx_count", "btc_dominance", "total_mcap",
+                           "total_mcap_change_24h", "stable_mcap", "stable_supply"):
                 row = ctx.value_at(metric, ex, sym)
                 if row:
                     print(f"{sym:10} {metric:22} {row[1]:>18.6g}  at {_fmt(row[0])} UTC "
