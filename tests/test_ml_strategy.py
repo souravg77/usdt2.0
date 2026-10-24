@@ -126,3 +126,33 @@ def test_ensemble_is_walk_forward_and_exits_when_the_models_turn():
     shorts = ShortMirror(STRATEGIES["ml_ensemble"]()).generate(df, "bybit", "BTC/USDT", "4h")
     assert shorts and all(x.stop > x.entry > x.target for x in shorts)
     assert ml.MlEnsemble in ml.ML_STRATEGIES
+
+
+def test_the_strategy_test_trains_each_chart_once(monkeypatch):
+    """The gate cuts a chart into in-sample, out-of-sample, walk-forward and holdout slices; an ML
+    strategy reads them from the whole chart's walk-forward answers instead of retraining each."""
+    from sklearn.ensemble import HistGradientBoostingClassifier
+
+    df = synthetic(n=2600, seed=6)
+    ml._MODELS.clear()
+    ml._PREDICTIONS.clear()
+    ml._PRIMED.clear()
+    s = ml.MlBoosted()
+    s.prime(df, "1h")
+    full = s.probabilities(df, "1h")
+    fits = []
+    real = HistGradientBoostingClassifier.fit
+    monkeypatch.setattr(HistGradientBoostingClassifier, "fit",
+                        lambda self, X, y: fits.append(len(y)) or real(self, X, y))
+    for a, b in ((0, 1500), (1500, 2100), (1700, 2600)):
+        part = s.probabilities(df.iloc[a:b], "1h")
+        np.testing.assert_array_equal(part.to_numpy(), full.iloc[a:b].to_numpy())
+    assert fits == []
+    # another chart (here: the upside-down one a short twin reads) is never answered from it
+    twin = ShortMirror(ml.MlBoosted())
+    twin.prime(df, "1h")
+    from aitrader.strategies.mirror import flip
+
+    assert not np.allclose(np.nan_to_num(s.probabilities(flip(df).iloc[1500:2100], "1h").to_numpy()),
+                           np.nan_to_num(full.iloc[1500:2100].to_numpy()))
+    ml._PRIMED.clear()
