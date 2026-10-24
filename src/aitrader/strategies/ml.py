@@ -4,7 +4,7 @@
 chart's own past: for every past bar it asks "did price reach +3 ATR before -1.5 ATR within the
 next 24 bars?" and learns which mix of 25 features (momentum, trend, volatility, volume, candle
 shape, where price sits in its recent range) came before a yes. It opens a long when the model's
-chance for the newest closed bar crosses above 50 %. Its short twin (``strategies.mirror``) learns
+chance for the newest closed bar crosses above 70 %. Its short twin (``strategies.mirror``) learns
 the same on the upside-down chart, so it has its own model for shorts.
 
 Honest by construction:
@@ -124,7 +124,7 @@ class MlBoosted(_Master):
         "-1.5 x ATR within 24 bars. Features (25): RSI 7/14/30, CCI 14/30, MACD histogram, ADX, DI spread, Bollinger "
         "%B and width, distance from EMA 20/50/100, 1/3/6/12/24-bar returns, ATR % and ATR 14/50 ratio, "
         "relative volume, position in the 20-bar range, candle body and wicks. Setup: that chance "
-        "crosses above 50 %.",
+        "crosses above 70 % (Shawn's choice: only confident calls trade).",
         entry="Market order at the next bar's open.",
         stop="Entry - 1.5 x ATR(14) (the same barrier the model was trained on).",
         target="2R (+3 x ATR); time stop after 24 bars.",
@@ -139,7 +139,7 @@ class MlBoosted(_Master):
                    "same backtests to be kept."),
     )
     eligible_regimes = TREND_RANGE
-    reason = "ML model chance of +2R crossed 50%"
+    reason = "ML model chance of +2R crossed 70%"
     # the paper trader loads this many bars (and starts them on the retrain grid) so the newest
     # model always has its full training window
     history_bars = 1500 + 24 + 2 * 250
@@ -147,7 +147,7 @@ class MlBoosted(_Master):
     @classmethod
     def default_params(cls):
         return {**BASE, "horizon": 24, "up_atr": 3.0, "down_atr": 1.5, "min_train": 400,
-                "train_bars": 1500, "retrain": 250, "threshold": 0.5, "target_r": 2.0}
+                "train_bars": 1500, "retrain": 250, "threshold": 0.7, "target_r": 2.0}
 
     def _horizon(self, timeframe: str) -> int:
         """Bars until a label's outcome is known."""
@@ -310,7 +310,8 @@ class MlEnsemble(MlBoosted):
         "each estimate the chance that the price 4 hours later is more than 0.15 % (the round-trip fee) "
         "above the close. Each reads the last 60 candles x 19 values (OHLCV, CCI 14/30, RSI 14/30, "
         "DMI 14, MACD, Bollinger bands) = 1,140 inputs, as in the paper. Their average is the chance "
-        "(the paper's future-work idea of ensembling them). Setup: that chance crosses above 50 %.",
+        "(the paper's future-work idea of ensembling them). Setup: that chance crosses above 70 % "
+        "(Shawn's choice: only confident calls trade).",
         entry="Market order at the next bar's open.",
         stop="Entry - 2 x ATR(14): a safety stop the paper did not have.",
         target="As in the paper, it holds while the models still expect a rise and sells at the first "
@@ -332,7 +333,7 @@ class MlEnsemble(MlBoosted):
     @classmethod
     def default_params(cls):
         return {**BASE, "hours": 4, "fee_threshold": 0.0015, "lookback": 60, "min_train": 400,
-                "train_bars": 1500, "retrain": 250, "threshold": 0.5, "knn_k": 20, "rf_trees": 60, "gb_rounds": 40,
+                "train_bars": 1500, "retrain": 250, "threshold": 0.7, "exit_below": 0.5, "knn_k": 20, "rf_trees": 60, "gb_rounds": 40,
                 "stop_atr": 2.0, "target_r": 4.0, "max_hold": 12}
 
     history_bars = 1500 + 60 + 4 + 2 * 250
@@ -342,11 +343,11 @@ class MlEnsemble(MlBoosted):
         # the exit "the models no longer expect a rise", one per timeframe, registered up front so a
         # restarted paper trader can manage an open trade before it builds new signals
         for tf in self.spec.timeframes:
-            _exit_rule(self._exit_name(tf), lambda d, tf=tf: self.probabilities(d, tf) < self.params["threshold"])
+            _exit_rule(self._exit_name(tf), lambda d, tf=tf: self.probabilities(d, tf) < self.params["exit_below"])
 
     def _exit_name(self, timeframe: str) -> str:
         p = self.params
-        return f"ml_ensemble_down:{timeframe}:{p['threshold']:g}:{p['hours']:g}:{p['fee_threshold']:g}"
+        return f"ml_ensemble_down:{timeframe}:{p['exit_below']:g}:{p['hours']:g}:{p['fee_threshold']:g}"
 
     def _horizon(self, timeframe: str) -> int:
         return max(1, round(self.params["hours"] * 3_600_000 / TIMEFRAME_MS[timeframe]))

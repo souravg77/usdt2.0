@@ -1,6 +1,7 @@
 """ml_boosted: the machine-learning strategy that finds its own entries."""
 
 import numpy as np
+import pytest
 import pandas as pd
 
 from aitrader.learn.paper import WINDOW_BARS, history_start, window_start
@@ -69,8 +70,8 @@ def test_signals_carry_the_models_chance_and_fixed_risk():
     sigs = STRATEGIES["ml_boosted"]().generate(df, "bybit", "BTC/USDT", "1h")
     assert sigs
     for sig in sigs:
-        assert 0.5 <= sig.features["ml_chance"] <= 1
-        assert sig.r_multiple_target == 2.0 and sig.trailing == "time_stop=24"
+        assert 0.7 <= sig.features["ml_chance"] <= 1
+        assert sig.r_multiple_target == pytest.approx(2.0) and sig.trailing == "time_stop=24"
     shorts = ShortMirror(STRATEGIES["ml_boosted"]()).generate(df, "bybit", "BTC/USDT", "1h")
     assert shorts and all(x.stop > x.entry > x.target for x in shorts)
 

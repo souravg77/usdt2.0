@@ -218,7 +218,7 @@ when to buy. For every past bar of the chart it learns whether price reached +3 
 within 24 bars, from 25 features (RSI 7/14/30, CCI 14/30, MACD histogram, ADX, DI spread, Bollinger %B and width,
 distance from EMA 20/50/100, 1-24 bar returns, ATR % and ATR 14/50 ratio, relative volume, position
 in the 20-bar range, candle body and wicks). A long opens when its chance for the newest closed bar
-crosses above 50 %; the short twin (`short: ml_boosted`) has its own model, trained on the upside-down
+crosses above 70 %; the short twin (`short: ml_boosted`) has its own model, trained on the upside-down
 chart. Stop 1.5 ATR, target 2R, time stop 24 bars, 0.5 % risk. 1h and 4h.
 
 - Walk-forward: a model is retrained every 250 bars on up to the last 1,500 bars whose outcome was
@@ -235,7 +235,8 @@ k-Nearest Neighbours (k 20, distance-weighted), a Random Forest (60 trees) and g
 (eta 0.3, depth 6, lambda 1, 40 rounds) each estimate the chance that the close 4 hours later is more than
 0.15 % (the round-trip fee) above this close. Each reads the last 60 candles x 19 values (OHLCV, CCI 14/30,
 RSI 14/30, DMI 14, MACD, Bollinger bands), 1,140 inputs; their average is the chance. A long opens when it
-crosses above 50 % and is sold at the first candle where it falls below 50 %, as in the paper; a 2 ATR
+crosses above 70 % (Shawn's choice; the paper used 50 %) and is sold at the first candle where it falls below 50 %
+(the models no longer expect a rise), as in the paper; a 2 ATR
 safety stop, a 4R ceiling and a 12 x 4-hour time stop are backstops. Retrained every 250 candles on up to
 the last 1,500, walk-forward. 1h and 4h; the short twin has its own models on the upside-down chart.
 
