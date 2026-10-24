@@ -58,8 +58,27 @@ MIN_BARS = 250
 def history_start(tf: str, now_ms: int | None = None) -> int:
     """How far back the collector keeps ``tf`` candles so a chart has the ``MIN_BARS`` the paper
     trader needs (with a margin for gaps)."""
+    from ..strategies.ml import ML_STRATEGIES
+
     now_ms = now_ms or int(time.time() * 1000)
-    return now_ms - (MIN_BARS + 50) * TIMEFRAME_MS[tf]
+    # the ML strategy trains on more bars (its window plus a retrain step, as ``window_start`` reads)
+    bars = max([MIN_BARS] + [s.history_bars + s.default_params()["retrain"]
+                             for s in ML_STRATEGIES if tf in s.spec.timeframes])
+    return now_ms - (bars + 50) * TIMEFRAME_MS[tf]
+
+
+def window_start(strat, tf: str, now_ms: int) -> int:
+    """Where the candles a strategy reads start: ``WINDOW_BARS`` back, or more for a strategy that
+    asks for it (``history_bars``, the ML one). Its start then sits on the strategy's own grid
+    (``history_align`` bars), so the same bars are read for a while and a model trained on them
+    is reused instead of retrained on every candle."""
+    step = TIMEFRAME_MS[tf]
+    bars = max(WINDOW_BARS, int(getattr(strat, "history_bars", 0) or 0))
+    grid = max(1, int(getattr(strat, "history_align", 1) or 1)) * step
+    start = now_ms - bars * step
+    return start - start % grid if grid > step else start
+
+
 MAX_DATA_AGE_MS = 15 * 60_000  # a signal on a candle that closed longer ago than this (or a bar) is not taken
 
 
@@ -172,7 +191,7 @@ class PaperTrader:
         if self.control is not None and getattr(self.control, "stops_paper", self.control.paused):
             allow, blocked = False, "a pause or the kill switch"
         self.state["blocked"] = {"why": blocked, "at": now_ms} if blocked else {}
-        frames: dict = {}  # (exchange, symbol, timeframe) -> (frame, newest close, new candle since last tick)
+        frames: dict = {}  # ((market, exchange, symbol, timeframe), start) -> (frame, newest close, new candle since last tick)
         regimes: dict = {}  # (exchange, symbol, timeframe) -> regime of the newest closed bar
         symbols = self._symbols()
         per_market = {m: set(symbols if self.market_symbols is None else self._symbols(m)) for m in wallet.MARKETS}
@@ -229,12 +248,13 @@ class PaperTrader:
                             if all(k in self.state["open"] for k in slots):
                                 idle[mkt].setdefault("a position is already open", set()).add(key)
                                 continue  # each engine its own candles: spot or perpetual
-                            if market not in frames:
-                                df = self._frame(ex, sym, tf, now_ms - WINDOW_BARS * TIMEFRAME_MS[tf], now_ms, mkt)
+                            start = window_start(strat, tf, now_ms)
+                            if (market, start) not in frames:
+                                df = self._frame(ex, sym, tf, start, now_ms, mkt)
                                 close = int(df["ts"].iloc[-1]) + TIMEFRAME_MS[tf] if df is not None and len(df) else None
-                                frames[market] = (df, close, close is not None
-                                                  and (manual is not None or self._seen.get(market) != close))
-                            df, newest_close, fresh = frames[market]
+                                frames[(market, start)] = (df, close, close is not None
+                                                           and (manual is not None or self._seen.get(market) != close))
+                            df, newest_close, fresh = frames[(market, start)]
                             # signals only appear when a candle closes: skip markets with no new candle
                             if df is None:
                                 idle[mkt].setdefault("no candles collected", set()).add(market)
@@ -329,14 +349,15 @@ class PaperTrader:
                                     "breakeven": self._guards[leg_mkt]["breakeven"],
                                     "maker_entry": self._guards[leg_mkt]["maker_entry"]}))
         self._open_agreed(pending, events)
-        for market, (_df, close, _fresh) in frames.items():
+        for (market, _start), (_df, close, _fresh) in frames.items():
             self._seen[market] = close
         newest = max((c for _d, c, _f in frames.values() if c), default=None)
         self.state["last_pass"] = {"at": now_ms, "strategies": built, "broken": broken, "pairs": len(symbols),
-                                   "markets": len({m[1:] for m in frames}), "new_candles": sum(1 for *_x, f in frames.values() if f),
+                                   "markets": len({m[1:] for m, _s in frames}),
+                                   "new_candles": len({m for (m, _s), (*_x, f) in frames.items() if f}),
                                    "checks": checks, "newest_candle": newest,
                                    # the shortest timeframe read: on 4h charts alone a candle closes every 4 hours
-                                   "step": min((TIMEFRAME_MS[m[3]] for m in frames), default=None)}
+                                   "step": min((TIMEFRAME_MS[m[3]] for m, _s in frames), default=None)}
         for m in wallet.MARKETS:
             if engines[m] and per_market[m] and not strategies_on[m]:
                 idle[m]["no strategy is set to trade on it (WIN only or Keep the best)"] = {m}
@@ -349,7 +370,7 @@ class PaperTrader:
             self._logged = True
         if checks:
             log.info("paper pass: %d strategies checked %d new candles (%d markets), %d opened, %d skipped",
-                     built, checks, len(frames), len(events["opened"]), len(events["filtered"]))
+                     built, checks, len({m for m, _s in frames}), len(events["opened"]), len(events["filtered"]))
         self._score(reg, events)
         self._save_registry(reg, events["retired"])
         self.save()

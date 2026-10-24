@@ -55,6 +55,8 @@ class ShortMirror(Strategy):
         self.base = base
         self.params = dict(base.params)
         self.needs_context = getattr(base, "needs_context", False)
+        self.history_bars = getattr(base, "history_bars", 0)
+        self.history_align = getattr(base, "history_align", 1)
         b = base.spec
         self.spec = StrategySpec(
             name=f"short: {b.name}", source=b.source, timeframes=b.timeframes,

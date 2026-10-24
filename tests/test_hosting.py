@@ -126,7 +126,7 @@ def test_compose_is_hardened():
         assert svc.get("mem_limit"), name
     builders = [name for name, svc in services.items() if "build" in svc]
     assert builders == ["collector", "claude"]  # one build per image tag, or parallel builds collide
-    assert all(svc["image"] == "aitrader:latest" for n, svc in services.items() if n not in ("caddy", "claude"))
+    assert all(svc["image"] == "aitrader:latest" for n, svc in services.items() if n not in ("caddy", "claude", "ollama"))
     # Claude Code's own container: never the keys (no env_file, .env hidden), the data read-only
     claude = services["claude"]
     assert claude["profiles"] == ["claude"] and "env_file" not in claude
@@ -141,7 +141,7 @@ def test_compose_is_hardened():
     for name, svc in services.items():
         env = svc.get("environment") or {}
         assert str(env.get("AITRADER_LIVE_UNLOCKED", "false")).lower() != "true", name
-        if name not in ("caddy", "claude"):
+        if name not in ("caddy", "claude", "ollama"):
             assert env.get("AITRADER_DB_PATH") == "/app/data/aitrader.db", name
 
 
