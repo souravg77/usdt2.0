@@ -861,6 +861,15 @@ def cmd_learn(s: Settings, args) -> int:
         print(f"{'Futures AI: backtesting on the perpetuals' if market == 'futures' else 'Spot AI: backtesting on spot candles'}")
         if args.ids:
             entries = [reg.get(i) for i in args.ids]
+        elif getattr(args, "missing", False):
+            from .learn.keep import has_own_result
+            from .learn.picks import learns_for
+
+            # every strategy this engine trades that has no result on its own candles yet, whatever
+            # its status (one Spot AI tested or rejected was never tried on the perpetuals)
+            entries = [e for e in reg.entries.values() if not (e.spec or {}).get("pick")
+                       and learns_for(e, market) and not has_own_result(e, market)]
+            print(f"{len(entries)} strategies have no {'perpetual' if market == 'futures' else 'spot'} result yet")
         elif args.paper:
             entries = reg.with_status("paper")
         else:
@@ -868,6 +877,7 @@ def cmd_learn(s: Settings, args) -> int:
         if not entries:
             print("nothing to test (add strategies with `learn read` or `learn add-builtin`)")
             return 0
+        # a missing-result run of Futures AI moves only its own strategies (``run_tests``)
         run_tests(entries, move=not args.paper, market=market)
         return 0
     if cmd == "report":
@@ -1882,6 +1892,8 @@ def build_parser() -> argparse.ArgumentParser:
     lt.add_argument("--retest", action="store_true", help="also re-test rejected strategies")
     lt.add_argument("--paper", action="store_true", help="backtest the strategies already paper trading and "
                                                         "record the result, without moving them")
+    lt.add_argument("--missing", action="store_true",
+                    help="test every strategy that has no result on this engine's own candles yet")
     lt.add_argument("--market", choices=["spot", "futures"], default="spot",
                     help="whose test: Spot AI's on spot candles (default) or Futures AI's on the perpetuals")
     lrp = le_sub.add_parser("report", help="backtest every strategy over the last N years: win report "

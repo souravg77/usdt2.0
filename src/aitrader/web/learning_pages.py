@@ -101,7 +101,10 @@ def _test_section(entries, market: str, form: str, busy) -> str:
             f'<p>{passed} passed, {failed} failed, {untested} not tested yet{extra}.</p>'
             f'<p class="small muted">{name}\'s own backtest gate, on {where}: in-sample, out-of-sample, '
             'walk-forward, Monte Carlo and the untouched final part. The ranking in "Keep the best" uses these '
-            f'results. The other engine\'s test is separate. It can take many minutes.</p>{button}</div>')
+            f'results. The other engine\'s test is separate. The button tests the strategies on paper now, then '
+            f'every one with no result on {where} yet{" (including those only tested on spot)" if market == "futures" else ""}. '
+            'With many strategies it takes hours; the progress link shows each one.</p>'
+            f'{button}</div>')
 
 
 def _teacher_section(paths, market: str) -> str:
@@ -183,8 +186,10 @@ def add_learning_routes(app, *, page, guard, auth, paths, csrf, jobs, ai_card, c
         if _busy(market):
             text = f"{name}'s strategies are already being tested; see the progress link."
         else:
+            # the ones trading now first, then every one with no result on these candles yet
             jobs.submit(f"{name}: test every strategy on its own candles",
-                        [["learn", "test", "--paper", "--market", market]],
+                        [["learn", "test", "--paper", "--market", market],
+                         ["learn", "test", "--missing", "--market", market]],
                         meta={"kind": "learn-test", "market": market})
             text = (f"Testing every {name} strategy on its own candles. The results show here when it is done; "
                     "nothing changes in live trading.")

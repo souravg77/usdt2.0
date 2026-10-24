@@ -49,7 +49,8 @@ def test_each_engine_has_its_own_learning_window(tmp_path, monkeypatch):
 
     r = client.post("/learning/test", data={"csrf": csrf, "market": "futures"}, follow_redirects=False)
     assert r.headers["location"].startswith("/learning/futures?msg=")
-    assert submitted[-1] == ([["learn", "test", "--paper", "--market", "futures"]],
+    assert submitted[-1] == ([["learn", "test", "--paper", "--market", "futures"],
+                              ["learn", "test", "--missing", "--market", "futures"]],
                              {"kind": "learn-test", "market": "futures"})
     assert client.post("/learning/test", data={"csrf": "bad", "market": "spot"}).status_code == 403
     # the AI filter's buttons come back to the window they were pressed in

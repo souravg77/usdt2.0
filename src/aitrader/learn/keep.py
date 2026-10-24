@@ -47,6 +47,18 @@ def backtest_of(entry: Entry, market: str | None = None) -> dict:
     return entry.backtest or {}
 
 
+def has_own_result(entry: Entry, market: str) -> bool:
+    """True when ``entry`` was backtested on this engine's own candles: Futures AI's test on the
+    perpetuals (or, for a strategy only Futures AI trades, its one test), Spot AI's on spot."""
+    from .picks import learns_for
+
+    if market == "futures":
+        bt = entry.backtest_futures or (entry.backtest if not learns_for(entry, "spot") else {})
+    else:
+        bt = entry.backtest
+    return "trades" in ((bt or {}).get("out_of_sample") or {})
+
+
 def _passed(entry: Entry, market: str | None = None) -> bool:
     bt = backtest_of(entry, market)
     return not bt.get("failed") and (bt.get("out_of_sample") or {}).get("trades", 0) > 0

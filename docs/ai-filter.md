@@ -30,6 +30,11 @@ trades (a short twin, a Futures pick) takes that result as its backtest and move
 Futures AI's own result beside it (`backtest_futures`), and Futures AI's "Keep the best" ranks on that
 one (the button runs the Futures test first).
 
+`aitrader learn test --missing --market futures` tests every strategy Futures AI trades that has no
+result on the perpetuals yet, whatever its status: one Spot AI tested (or rejected) before Futures AI
+had its own test was never tried on the perpetuals. The "Test every strategy" button on each learning
+page runs the paper ones first, then `--missing`.
+
 ## What it learns from
 
 `aitrader ai dataset` backtests the strategies and writes one row per signal to
