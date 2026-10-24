@@ -112,6 +112,19 @@ def trades_now(entry: Entry, only_winners: bool, market: str | None = None, kept
     return not only_winners or bool(picked_for(entry))
 
 
+def learns_for(entry: Entry, market: str) -> bool:
+    """Whether ``market``'s engine could trade ``entry`` at all, so its AI filter and teacher learn
+    from it: Spot AI never shorts, and a pick copy (or its short twin) belongs to its own engine."""
+    spec = entry.spec or {}
+    base = spec.get("base_spec") or {}
+    if market == "spot" and entry.kind == "short":
+        return False
+    if spec.get("pick") or base.get("pick"):
+        made_for = "futures" if (spec.get("pick_market") or base.get("pick_market")) == "futures" else "spot"
+        return made_for == market
+    return True
+
+
 def pick_market(entry: Entry) -> str:
     """The engine whose pick made this copy: "futures", or "spot" (every copy from before the
     engines had their own picks); "" for a strategy that isn't a pick copy."""

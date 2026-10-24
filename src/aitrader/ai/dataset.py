@@ -129,8 +129,12 @@ def add_history(frame: pd.DataFrame) -> pd.DataFrame:
 def build_dataset(store, strategies: list[tuple[str, Strategy]], exchanges: list[str],
                   symbols: list[str], cfg: BacktestConfig | None = None,
                   include_final: bool = False, paper_state: str | None = None,
-                  futures_store=None) -> pd.DataFrame:
+                  futures_store=None, market: str | None = None) -> pd.DataFrame:
     """Backtest every (strategy id, strategy) on every stored market and return the rows.
+
+    ``market`` builds one engine's own training set: "spot" adds only Spot AI's closed paper
+    trades, "futures" only Futures AI's, with every backtest costed as a perpetual (``store`` is
+    then the perpetuals' candles). None (the old shared set) adds both engines' trades.
 
     One market's candles are in memory at a time: each is loaded, every strategy that trades its
     timeframe runs on it, its rows become a compact table and the candles are let go before the
@@ -140,6 +144,8 @@ def build_dataset(store, strategies: list[tuple[str, Strategy]], exchanges: list
     for sid, strat in strategies:
         for tf in strat.spec.timeframes:
             by_tf.setdefault(tf, []).append((sid, strat))
+    if market == "futures":
+        cfg = as_perp(cfg or BacktestConfig())
     context = ContextStore(store) if has_context(store) else None  # funding / open interest
     chunks: list[pd.DataFrame] = []
     for tf, strats in by_tf.items():
@@ -163,7 +169,8 @@ def build_dataset(store, strategies: list[tuple[str, Strategy]], exchanges: list
                 if rows:
                     chunks.append(_compact(pd.DataFrame(rows)))
     if paper_state:
-        rows = paper_rows(store, paper_state, cfg, futures_store)
+        rows = paper_rows(store if market != "futures" else None, paper_state, cfg,
+                          futures_store if market != "futures" else store, market)
         if rows:
             chunks.append(_compact(pd.DataFrame(rows)))
     return finish(chunks)
@@ -193,18 +200,27 @@ def finish(rows) -> pd.DataFrame:
     return frame[INFO + ALL]
 
 
-def paper_rows(store, state_path: str, cfg: BacktestConfig | None = None, futures_store=None) -> list[dict]:
+def paper_rows(store, state_path: str, cfg: BacktestConfig | None = None, futures_store=None,
+               market: str | None = None) -> list[dict]:
     """Rows for the closed trades in a ``learn paper`` state file. Futures AI's trades are read on
-    the perpetuals' candles (``futures_store``), Spot AI's on spot ones."""
+    the perpetuals' candles (``futures_store``), Spot AI's on spot ones; with ``market`` only that
+    engine's trades."""
+    from ..learn.wallet import market_of
+
     if not os.path.exists(state_path):
         return []
     with open(state_path, encoding="utf-8") as fh:
         trades = json.load(fh).get("trades", [])
     rows = []
     for t in trades:
+        mkt = t.get("market") or market_of(t)
+        if market and mkt != market:
+            continue
         sid, ex, sym, tf = t["key"].split("|")[:4]
         step = TIMEFRAME_MS[tf]
-        db = futures_store if futures_store is not None and t.get("market") == "futures" else store
+        db = futures_store if futures_store is not None and mkt == "futures" else store
+        if db is None:
+            continue
         candles = db.load(ex, sym, tf, t["signal_ts"] - PAPER_WARMUP * step,
                              t["exit_ts"] + LABEL_HORIZON * step)
         if not candles:

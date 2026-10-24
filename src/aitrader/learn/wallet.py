@@ -32,6 +32,17 @@ MIN_ORDER_USDT = 5.0  # Bybit's smallest order for most USDT spot pairs and perp
 MARKETS = ("spot", "futures")
 
 
+def engine_path(path: str, market: str = "spot") -> str:
+    """Futures AI's own copy of a Spot AI file or folder (its AI filter models, training set,
+    teacher lessons): ``data/ai/models`` -> ``data/ai/models_futures``,
+    ``data/ai/dataset.csv`` -> ``data/ai/dataset_futures.csv``. Spot AI keeps the path as it is."""
+    if market != "futures":
+        return path
+    path = path.rstrip("/")
+    root, ext = os.path.splitext(path)
+    return f"{root}_futures{ext}"
+
+
 def wallet_path(state_path: str, market: str = "spot") -> str:
     name = "paper_wallet_futures.json" if market == "futures" else "paper_wallet.json"
     return os.path.join(os.path.dirname(os.path.abspath(state_path)), name)

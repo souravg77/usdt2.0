@@ -228,7 +228,7 @@ def test_teacher_page_and_buttons(tmp_path, monkeypatch):
     page = client.get("/teacher").text
     assert "OFF" in page and "Teach from the backtests" in page and "never" in page
     r = client.post("/teacher/teach", data={"csrf": csrf}, follow_redirects=False)
-    assert r.status_code == 303 and submitted == [[["learn", "teach", "--dir", str(tmp_path / "t")]]]
+    assert r.status_code == 303 and submitted == [[["learn", "teach", "--dir", str(tmp_path / "t"), "--market", "spot"]]]
     assert client.post("/teacher/on", data={"csrf": "bad"}).status_code == 403
     Teacher(paths.teacher).save_candidate(teach(_frame(n=20)))
     r = client.post("/teacher/on", data={"csrf": csrf}, follow_redirects=True)
@@ -241,3 +241,14 @@ def test_teacher_page_and_buttons(tmp_path, monkeypatch):
     assert "<b class=\"good\">ON</b>" in client.get("/teacher").text
     client.post("/teacher/off", data={"csrf": csrf})
     assert not Teacher(paths.teacher).active
+
+    # Futures AI has its own lessons, in <teacher>_futures: Spot AI's are not touched
+    Teacher(paths.teacher).save_candidate(teach(_frame()))
+    client.post("/teacher/on", data={"csrf": csrf})
+    futures_root = str(tmp_path / "t_futures")
+    client.post("/teacher/teach", data={"csrf": csrf, "market": "futures"})
+    assert submitted[-1] == [["learn", "teach", "--dir", str(tmp_path / "t"), "--market", "futures"]]
+    Teacher(futures_root).save_candidate(teach(_frame()))
+    client.post("/teacher/on", data={"csrf": csrf, "market": "futures"})
+    client.post("/teacher/off", data={"csrf": csrf, "market": "spot"})
+    assert Teacher(futures_root).active and not Teacher(paths.teacher).active
