@@ -70,7 +70,7 @@ def test_overview_shows_lock_strategies_and_escapes(web):
     assert "locked" in r.text and "paper mode" in r.text
     assert "<script>" not in r.text and "evil&lt;script&gt;" in r.text
     assert r.headers["X-Frame-Options"] == "DENY" and "default-src 'self'" in r.headers["Content-Security-Policy"]
-    assert "Off: every signal is taken" in r.text
+    assert "Spot AI: off, every signal is taken" in r.text and "Futures AI: off" in r.text
     assert "PAPER" in r.text and "DEMO" not in r.text and "did not pass the backtest gate" in r.text  # ladder state
 
 
@@ -501,7 +501,8 @@ def test_ai_filter_train_turn_on_and_off_from_the_trading_page(web, monkeypatch)
     assert "AI trade filter" in r.text and "Train the AI filter" in r.text and "/trading/ai/on" not in r.text
     assert client.post("/trading/ai/train", data={}, follow_redirects=False).status_code == 403
     client.post("/trading/ai/train", data={"csrf": csrf})
-    assert submitted == [([["ai", "retrain", "--all"]], {"kind": "ai-train"})]  # trains, never promotes
+    assert submitted == [([["ai", "--market", "spot", "retrain", "--all"]],  # trains, never promotes
+                          {"kind": "ai-train", "market": "spot"})]
 
     reg = ModelRegistry(paths.models)
     model, rep = train(planted())
@@ -520,10 +521,20 @@ def test_ai_filter_train_turn_on_and_off_from_the_trading_page(web, monkeypatch)
     client.post("/trading/ai/on", data={"csrf": csrf, "version": good2})
     reg = ModelRegistry(paths.models)
     assert reg.active == good2 and reg.info(good2)["approved_by"] == "admin" and good != good2
-    assert "Active model" in client.get("/").text
+    assert f"Spot AI: model <b>{good2}" in client.get("/").text
     assert "Turn the AI filter off" in client.get("/trading").text
     client.post("/trading/ai/off", data={"csrf": csrf})
     assert ModelRegistry(paths.models).active is None
+
+    # Futures AI's filter is its own (<models>_futures): training and turning it on leave Spot AI's alone
+    client.post("/trading/ai/train", data={"csrf": csrf, "market": "futures"})
+    assert submitted[-1] == ([["ai", "--market", "futures", "retrain", "--all"]],
+                             {"kind": "ai-train", "market": "futures"})
+    fut = ModelRegistry(paths.models + "_futures")
+    v = fut.add(model, rep)
+    client.post("/trading/ai/on", data={"csrf": csrf, "version": v, "market": "futures"})
+    assert ModelRegistry(paths.models + "_futures").active == v and ModelRegistry(paths.models).active is None
+    assert "Futures AI: model" in client.get("/").text
 
 
 def test_self_refreshing_pages_wait_while_someone_types():

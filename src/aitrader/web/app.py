@@ -946,44 +946,56 @@ after {_e(window.split(" to ")[1])}; the next one waits for the next night.</p>
         return _control_post(request, csrf, act)
 
     @app.post("/trading/ai/train")
-    def trading_ai_train(request: Request, csrf: str = Form("")):
+    def trading_ai_train(request: Request, csrf: str = Form(""), market: str = Form("")):
+        """Train one engine's own AI filter: Spot AI's on spot candles and Spot AI's trades, Futures
+        AI's on the perpetuals' candles and Futures AI's trades."""
         def act(user):
-            busy = {j.get("meta", {}).get("kind") for j in jobs.list() if j["status"] in ("queued", "running")}
-            if "ai-train" in busy:
-                return "The AI filter is already being trained; see Recent jobs on the Overview page."
-            if "paper-start" in busy:
+            mkt = _ws_market(market)
+            name = "Futures AI" if mkt == "futures" else "Spot AI"
+            running = [j for j in jobs.list() if j["status"] in ("queued", "running")]
+            if any(j.get("meta", {}).get("kind") == "ai-train" and j.get("meta", {}).get("market", "spot") == mkt
+                   for j in running):
+                return f"{name}'s AI filter is already being trained; see Recent jobs on the Overview page."
+            if any(j.get("meta", {}).get("kind") == "paper-start" for j in running):
                 return ("Wait until paper trading has finished switching on: the AI filter learns from the "
                         "year of price history it is still downloading.")
-            jobs.submit("Train the AI trade filter on every strategy's backtested and paper signals",
-                        [["ai", "retrain", "--all"]], meta={"kind": "ai-train"})
-            _event("ai_train", f"AI filter training started from the dashboard by {user}")
-            return ("Training started. When it finishes, the AI filter card shows how the new model did on "
+            jobs.submit(f"Train {name}'s AI trade filter on its own backtested and paper signals",
+                        [["ai", "--market", mkt, "retrain", "--all"]], meta={"kind": "ai-train", "market": mkt})
+            _event("ai_train", f"{name} AI filter training started from the dashboard by {user}")
+            return (f"{name} training started. When it finishes, the AI filter card shows how the new model did on "
                     "data it never saw, and a Turn on button if it beat the unfiltered strategies.")
         return _control_post(request, csrf, act)
 
     @app.post("/trading/ai/on")
-    def trading_ai_on(request: Request, csrf: str = Form(""), version: str = Form("")):
+    def trading_ai_on(request: Request, csrf: str = Form(""), version: str = Form(""), market: str = Form("")):
         def act(user):
             from ..ai import ModelRegistry
+            from ..learn.wallet import engine_path
 
-            reg = ModelRegistry(paths.models)
+            mkt = _ws_market(market)
+            name = "Futures AI" if mkt == "futures" else "Spot AI"
+            reg = ModelRegistry(engine_path(paths.models, mkt))
             try:
                 reg.promote(version, approved_by=user)
             except (KeyError, ValueError) as exc:
                 return f"Not turned on: {exc}"
-            _event("ai_promote", f"AI filter {version} turned on from the dashboard by {user}", "warning")
-            return (f"AI filter {version} is on. Paper trading now skips the signals it rates weakest and "
-                    "shrinks the doubtful ones; Turn off takes every signal again at once.")
+            _event("ai_promote", f"{name} AI filter {version} turned on from the dashboard by {user}", "warning")
+            return (f"{name} AI filter {version} is on. {name} paper trading now skips the signals it rates weakest "
+                    "and shrinks the doubtful ones; the other engine is not changed. Turn off takes every signal "
+                    "again at once.")
         return _control_post(request, csrf, act)
 
     @app.post("/trading/ai/off")
-    def trading_ai_off(request: Request, csrf: str = Form("")):
+    def trading_ai_off(request: Request, csrf: str = Form(""), market: str = Form("")):
         def act(user):
             from ..ai import ModelRegistry
+            from ..learn.wallet import engine_path
 
-            ModelRegistry(paths.models).deactivate(by=user)
-            _event("ai_off", f"AI filter turned off from the dashboard by {user}")
-            return "AI filter off: every signal is taken at full size."
+            mkt = _ws_market(market)
+            name = "Futures AI" if mkt == "futures" else "Spot AI"
+            ModelRegistry(engine_path(paths.models, mkt)).deactivate(by=user)
+            _event("ai_off", f"{name} AI filter turned off from the dashboard by {user}")
+            return f"{name} AI filter off: every {name} signal is taken at full size."
         return _control_post(request, csrf, act)
 
     @app.post("/trading/paper/off")
@@ -1186,41 +1198,51 @@ def _result(m: dict) -> str:
 
 
 def _filter_card(paths: Paths) -> str:
+    """Each engine's own AI trade filter."""
     from ..ai import ModelRegistry
+    from ..learn.wallet import MARKETS, engine_path
 
-    reg = ModelRegistry(paths.models)
-    if reg.active:
-        m = reg.info(reg.active)
-        f = m["test"]["filtered"]
-        text = (f"Active model <b>{_e(reg.active)}</b><br>test: {f['trades']} trades, "
-                f"{f['expectancy_r']:+.3f}R each")
-    else:
-        text = "Off: every signal is taken."
-    waiting = [v for v in reg.versions() if reg.info(v)["status"] == "candidate"]
-    if waiting:
-        text += f'<br>{len(waiting)} candidate(s) waiting for approval on the <a href="/trading">Trading</a> page'
-    elif not reg.active:
-        text += '<br><a href="/trading">Train it on the Trading page</a>'
-
-    return f'<div class="card"><h3>AI trade filter</h3><p>{text}</p></div>'
+    lines = []
+    for mkt in MARKETS:
+        reg = ModelRegistry(engine_path(paths.models, mkt))
+        name = "Futures AI" if mkt == "futures" else "Spot AI"
+        if reg.active:
+            f = reg.info(reg.active)["test"]["filtered"]
+            text = (f"{name}: model <b>{_e(reg.active)}</b> (test: {f['trades']} trades, "
+                    f"{f['expectancy_r']:+.3f}R each)")
+        else:
+            text = f"{name}: off, every signal is taken"
+        waiting = [v for v in reg.versions() if reg.info(v)["status"] == "candidate"]
+        if waiting:
+            text += f'; {len(waiting)} candidate(s) waiting on the <a href="/trading">Trading</a> page'
+        lines.append(text)
+    return f'<div class="card"><h3>AI trade filters</h3><p>{"<br>".join(lines)}</p></div>'
 
 
 def _ai_card(paths: Paths, job_list: list[dict], csrf: str, ws: str = "spot") -> str:
     """The AI trade filter: train a new model, turn the best candidate on, or turn it off; and
     whether the workspace's engine uses it and the backtest teacher."""
     from ..ai import ModelRegistry
+    from ..learn.wallet import engine_path
 
-    reg = ModelRegistry(paths.models)
+    name = "Futures AI" if ws == "futures" else "Spot AI"
+    reg = ModelRegistry(engine_path(paths.models, ws))  # each engine its own filter
     training = next((j for j in job_list if j["status"] in ("queued", "running")
-                     and j.get("meta", {}).get("kind") == "ai-train"), None)
+                     and j.get("meta", {}).get("kind") == "ai-train"
+                     and j.get("meta", {}).get("market", "spot") == ws), None)
     if reg.active:
         f = reg.info(reg.active)["test"]["filtered"]
         state = (f'<b class="good">ON</b>: model {_e(reg.active)} (on unseen data {f["trades"]} trades, '
                  f'{f["expectancy_r"]:+.3f}R each)')
     else:
         state = '<b class="bad">OFF</b>: every signal is taken at full size'
-    parts = [f'<div class="card"><h3>AI trade filter</h3><p>{state}</p>',
-             '<p class="small muted">The filter learns from every strategy\'s backtested and paper signals '
+    source = ("the perpetual futures' own candles and Futures AI's own paper trades (longs and shorts)"
+              if ws == "futures" else "spot candles and Spot AI's own paper trades (longs only)")
+    csrf = csrf + f'<input type="hidden" name="market" value="{ws}">'
+    parts = [f'<div class="card"><h3>AI trade filter: {name}</h3><p>{state}</p>',
+             f'<p class="small muted">{name} has its own filter, learned only from {source}; the other '
+             'engine\'s filter is separate and never used here. '
+             'The filter learns from every strategy\'s backtested and paper signals '
              'which ones reached 1R before the stop. It is tested on a later period it never saw, and it can be '
              'turned on only when it beat the strategies without a filter there (higher result per trade, '
              'no worse drawdown). When on, paper trading skips the weakest signals and shrinks doubtful '

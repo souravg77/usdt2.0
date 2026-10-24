@@ -85,7 +85,14 @@ def _improve_section(rep: dict, busy, form: str) -> str:
 
 def add_teacher_routes(app, *, settings, page, guard, auth, paths, csrf, jobs, exchange: str,
                        clock=time.time):
-    root = paths.teacher
+    def _engine(market: str = "") -> tuple[str, str, str]:
+        """(engine, its name, its lessons folder): the form's own engine, else the view shown. Spot AI
+        and Futures AI each learn and follow their own lessons (Futures AI's in <teacher>_futures)."""
+        from ..learn import wallet
+
+        m = market if market in wallet.MARKETS else (
+            "futures" if wallet.futures_on(wallet.market_path(paths.paper_state)) else "spot")
+        return m, ("Futures AI" if m == "futures" else "Spot AI"), wallet.engine_path(paths.teacher, m)
 
     def _event(kind: str, text: str, level: str = "info") -> None:
         from ..ops import EventLog
@@ -97,17 +104,22 @@ def add_teacher_routes(app, *, settings, page, guard, auth, paths, csrf, jobs, e
         user, token, redirect = guard(request)
         if redirect:
             return redirect
+        market, name, root = _engine()
         t = Teacher(root)
         cand, act = t.candidate, t.active
-        form = csrf(token)
+        form = csrf(token) + f'<input type="hidden" name="market" value="{market}">'
         busy = next((j for j in jobs.list() if j["status"] in ("queued", "running")
-                     and j.get("meta", {}).get("kind") == "teach"), None)
-        state = (f'<b class="good">ON</b>: paper trading follows lessons {_e(act["version"])} '
+                     and j.get("meta", {}).get("kind") == "teach"
+                     and j.get("meta", {}).get("market", "spot") == market), None)
+        state = (f'<b class="good">ON</b>: {name} paper trading follows lessons {_e(act["version"])} '
                  f'(turned on by {_e(act.get("turned_on_by", "?"))})' if act
-                 else '<b class="bad">OFF</b>: paper trading takes every signal as before')
+                 else f'<b class="bad">OFF</b>: {name} paper trading takes every signal as before')
+        source = ("the perpetual futures' own candles, with the long and short strategies Futures AI can trade"
+                  if market == "futures" else "spot candles, with the long strategies Spot AI can trade")
         parts = [f'<p class="good">{_e(msg)}</p>' if msg else "",
-                 '<div class="card"><h3>Backtest teacher</h3>'
-                 f'<p>{state}</p><p class="small muted">The teacher replays every strategy\'s backtest and '
+                 f'<div class="card"><h3>Backtest teacher: {name}</h3>'
+                 f'<p>{state}</p><p class="small muted">{name} has its own teacher, learned only on {source}; '
+                 'the other engine\'s lessons are separate and never used here. The teacher replays every strategy\'s backtest and '
                  'notes the market situation at each signal: trend (up, range, down), volatility (low, normal, '
                  'high) and volume (quiet, normal, heavy). It learns on the earlier 70% of the signals where each '
                  'strategy made or lost money, and where taking profit at 1R caught more winners. Then it checks '
@@ -143,11 +155,17 @@ def add_teacher_routes(app, *, settings, page, guard, auth, paths, csrf, jobs, e
         improve_html = _improve_section(load_report(paths.improve), imp_busy, form)
         lessons = (act or cand).get("lessons", {})
         if lessons:
+            from ..data.perp import futures_db_path
             from ..data.store import CandleStore
+            from ..market.pairs import configured_symbols
 
-            store = CandleStore(settings.db_path)
+            store = CandleStore(futures_db_path(settings.db_path) if market == "futures" else settings.db_path)
             try:
-                now = now_situations(store, exchange, list(settings.symbols), now_ms=int(clock() * 1000))
+                try:
+                    pairs = configured_symbols(settings.symbols, market=market)
+                except Exception:
+                    pairs = [] if market == "futures" else list(settings.symbols)
+                now = now_situations(store, exchange, list(pairs), now_ms=int(clock() * 1000))
             finally:
                 store.close()
             rows = []
@@ -177,15 +195,18 @@ def add_teacher_routes(app, *, settings, page, guard, auth, paths, csrf, jobs, e
         return RedirectResponse(f"/teacher?msg={urllib.parse.quote(action(user))}", status_code=303)
 
     @app.post("/teacher/teach")
-    def teacher_teach(request: Request, csrf: str = Form("")):
+    def teacher_teach(request: Request, csrf: str = Form(""), market: str = Form("")):
         def act(user):
-            busy = {j.get("meta", {}).get("kind") for j in jobs.list() if j["status"] in ("queued", "running")}
-            if "teach" in busy:
-                return "The teacher is already learning; see its progress below."
-            jobs.submit("Backtest teacher: learn which market situations each strategy wins in",
-                        [["learn", "teach", "--dir", root]], meta={"kind": "teach"})
-            _event("teacher", f"backtest teacher started from the dashboard by {user}")
-            return "Learning started. When it finishes this page shows the lessons and how they did on unseen data."
+            m, name, _root = _engine(market)
+            if any(j["status"] in ("queued", "running") and j.get("meta", {}).get("kind") == "teach"
+                   and j.get("meta", {}).get("market", "spot") == m for j in jobs.list()):
+                return f"{name}'s teacher is already learning; see its progress below."
+            jobs.submit(f"Backtest teacher for {name}: learn which market situations each strategy wins in",
+                        [["learn", "teach", "--dir", paths.teacher, "--market", m]],
+                        meta={"kind": "teach", "market": m})
+            _event("teacher", f"{name} backtest teacher started from the dashboard by {user}")
+            return (f"{name} learning started. When it finishes this page shows the lessons and how they did on "
+                    "unseen data.")
         return _post(request, csrf, act)
 
     @app.post("/teacher/improve")
@@ -202,21 +223,24 @@ def add_teacher_routes(app, *, settings, page, guard, auth, paths, csrf, jobs, e
         return _post(request, csrf, act)
 
     @app.post("/teacher/on")
-    def teacher_on(request: Request, csrf: str = Form("")):
+    def teacher_on(request: Request, csrf: str = Form(""), market: str = Form("")):
         def act(user):
+            _m, name, root = _engine(market)
             try:
                 t = Teacher(root, events=_events()).turn_on(user)
             except ValueError as exc:
                 return f"Not turned on: {exc}"
-            return (f"Lessons {t['version']} are on. Paper trading now skips strategies in situations they lost "
-                    "in and adds the 1R profit-take where it helped. Turn off goes back to every signal at once.")
+            return (f"{name} lessons {t['version']} are on. {name} paper trading now skips strategies in situations "
+                    "they lost in and adds the 1R profit-take where it helped. The other engine is not changed. "
+                    "Turn off goes back to every signal at once.")
         return _post(request, csrf, act)
 
     @app.post("/teacher/off")
-    def teacher_off(request: Request, csrf: str = Form("")):
+    def teacher_off(request: Request, csrf: str = Form(""), market: str = Form("")):
         def act(user):
+            _m, name, root = _engine(market)
             Teacher(root, events=_events()).turn_off(user)
-            return "Lessons off: paper trading takes every signal as before."
+            return f"{name} lessons off: {name} paper trading takes every signal as before."
         return _post(request, csrf, act)
 
     def _events():

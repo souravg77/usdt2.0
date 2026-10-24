@@ -147,12 +147,16 @@ class PaperTrader:
         self._returns: dict = {}  # (exchange, symbol) -> hourly returns of the last week, this pass
         self._now = 0
         self.perp_limits_path = perp_limits.DEFAULT_PATH  # each coin's maximum leverage on Bybit
-        self.ai_filter = ai_filter  # Phase 4 trade filter (aitrader.ai.LiveFilter) or None
+        # each engine's own trade filter (aitrader.ai.LiveFilter) or None: {"spot": ..., "futures": ...};
+        # one filter given on its own serves both
+        self.ai_filter = ai_filter if isinstance(ai_filter, dict) else {m: ai_filter for m in wallet.MARKETS}
         self.control = control  # trade.Control: pause / kill switch, or None
         self.context = context  # market-context filter (funding, open interest...), or None
         self.events = events  # ops.EventLog for alerts and the stability record, or None
         self.news = news  # news.NewsFilter (AI web-search brief): can only shrink or pause entries
-        self.teacher = teacher  # learn.teacher.TeacherFilter: follows the lessons a person turned on
+        # each engine's own backtest teacher (learn.teacher.TeacherFilter): follows the lessons a person
+        # turned on for that engine; {"spot": ..., "futures": ...}, or one serving both
+        self.teacher = teacher if isinstance(teacher, dict) else {m: teacher for m in wallet.MARKETS}
         self.state = {"open": {}, "trades": [], "equity": {}, "last_signal": {}}
         self._seen: dict = {}  # market -> newest candle close already evaluated (this process)
         self._logged = False  # the first pass after a start is always in the scan log
@@ -300,7 +304,7 @@ class PaperTrader:
                                 continue
                             # each engine uses the AI filter and the teacher only if it is set to
                             ai_legs = [lg for lg in legs if uses["futures" if lg[1] else "spot"]["ai"]]
-                            ai = self._ai_check(sig, entry.id, df) if ai_legs else _NO_AI
+                            ai = self._ai_check(sig, entry.id, df, mkt) if ai_legs else _NO_AI
                             if not ai["take"]:
                                 self._note_filtered(key, sig, ai)
                                 for k, _perp in ai_legs:
@@ -308,7 +312,7 @@ class PaperTrader:
                                     events["filtered"].append(k)
                                 legs = [lg for lg in legs if lg not in ai_legs]
                             tch_legs = [lg for lg in legs if uses["futures" if lg[1] else "spot"]["teacher"]]
-                            tch = self._teacher_check(sig, entry.id, df) if tch_legs else _no_teacher(sig)
+                            tch = self._teacher_check(sig, entry.id, df, mkt) if tch_legs else _no_teacher(sig)
                             if not tch["take"]:
                                 for k, _perp in tch_legs:
                                     self._log_signal(k, sig, "backtest teacher")
@@ -656,23 +660,27 @@ class PaperTrader:
         """``symbol``'s maintenance margin rate on Bybit (from its maximum leverage)."""
         return futures.maintenance_rate(perp_limits.max_leverage(symbol, self.perp_limits_path))
 
-    def _ai_check(self, sig: Signal, entry_id: str, df) -> dict:
-        if self.ai_filter is None:
+    def _ai_check(self, sig: Signal, entry_id: str, df, market: str = "spot") -> dict:
+        ai_filter = self.ai_filter.get(market)
+        if ai_filter is None:
             return {"take": True, "size": 1.0, "prob": None, "version": None}
+        # the strategy's own record on this engine only: the other engine's trades are not its history
         recent = [t["r"] for t in self.state["trades"]
-                  if t["entry_id"] == entry_id and t["exit_ts"] < sig.ts]
+                  if t["entry_id"] == entry_id and t["exit_ts"] < sig.ts
+                  and (t.get("market") or wallet.market_of(t)) == market]
         try:
-            return self.ai_filter.check(sig, entry_id, df, recent)
+            return ai_filter.check(sig, entry_id, df, recent)
         except Exception:  # a broken model must not stop paper trading; trade unfiltered
             log.exception("trade filter failed on %s; taking the signal unfiltered", entry_id)
             return {"take": True, "size": 1.0, "prob": None, "version": None}
 
-    def _teacher_check(self, sig: Signal, entry_id: str, df) -> dict:
+    def _teacher_check(self, sig: Signal, entry_id: str, df, market: str = "spot") -> dict:
         passthrough = _no_teacher(sig)
-        if self.teacher is None:
+        teacher = self.teacher.get(market)
+        if teacher is None:
             return passthrough
         try:
-            return self.teacher.check(sig, entry_id, df)
+            return teacher.check(sig, entry_id, df)
         except Exception:  # broken lessons must not stop paper trading; take the signal as is
             log.exception("backtest teacher failed on %s; taking the signal as is", entry_id)
             return passthrough

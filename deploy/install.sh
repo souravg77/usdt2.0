@@ -173,9 +173,10 @@ sudo systemctl enable --now cron >/dev/null 2>&1 || true
 # pairs trade only if you set AITRADER_PAIRS=ranked in .env.
 RANK_LINE="45 2 * * * cd '$DIR' && docker compose run --rm -T collector pairs rank >> data/pairs.log 2>&1"
 ( crontab -l 2>/dev/null | grep -v 'pairs rank' || true; echo "$RANK_LINE" ) | crontab -
-# Weekly backtest teacher, Sunday 04:15: fresh lessons from the backtests (Teacher page). They are
-# only a candidate: paper trading follows them only after you press Turn on.
-TEACH_LINE="15 4 * * 0 cd '$DIR' && docker compose run --rm -T collector learn teach >> data/teacher.log 2>&1"
+# Weekly backtest teacher, Sunday 04:15: fresh lessons from the backtests (Teacher page), Spot AI's
+# on spot candles, then Futures AI's own on the perpetuals. They are only a candidate: an engine
+# follows its lessons only after you press Turn on in its view.
+TEACH_LINE="15 4 * * 0 cd '$DIR' && { docker compose run --rm -T collector learn teach; docker compose run --rm -T collector learn teach --market futures; } >> data/teacher.log 2>&1"
 ( crontab -l 2>/dev/null | grep -v 'learn teach' || true; echo "$TEACH_LINE" ) | crontab -
 DOCKER="$DOCKER" ./deploy/backup.sh || echo "warning: the first backup failed; run ./deploy/backup.sh to see why" >&2
 

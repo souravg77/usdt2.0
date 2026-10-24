@@ -7,6 +7,22 @@ from half the strategy's normal risk up to the full amount. It never goes above 
 own risk, which is already capped at 1%. The filter does not invent trades and cannot open one
 that a strategy did not signal.
 
+## Spot AI and Futures AI each have their own
+
+Nothing here is shared between the two engines:
+
+| | Spot AI | Futures AI |
+|---|---|---|
+| AI filter models | `data/ai/models` | `data/ai/models_futures` |
+| Training set | `data/ai/dataset.csv` | `data/ai/dataset_futures.csv` |
+| Backtest teacher | `data/learn/teacher` | `data/learn/teacher_futures` |
+| Learns on | spot candles, long strategies, Spot AI's paper trades | the perpetuals' own candles (perp fees and funding), longs and short twins, Futures AI's paper trades |
+
+Each is trained, turned on and turned off in its own view on the dashboard, or with `--market futures`
+on the command line (`aitrader ai --market futures retrain`, `aitrader learn teach --market futures`).
+The ML strategies (`ml_boosted`, `ml_classifier`) already train on whichever engine's candles they
+trade, so their models are separate too. The models made before this split stay Spot AI's.
+
 ## What it learns from
 
 `aitrader ai dataset` backtests the strategies and writes one row per signal to

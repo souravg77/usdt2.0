@@ -906,6 +906,7 @@ def cmd_learn(s: Settings, args) -> int:
 
         from .ai import LiveFilter
         from .learn.teacher import TeacherFilter
+        from .learn.wallet import MARKETS, engine_path
 
         from .ops import EventLog
         from .trade import Control
@@ -925,11 +926,14 @@ def cmd_learn(s: Settings, args) -> int:
         trader = PaperTrader(store, args.registry, exchanges, pairs,
                              PaperConfig(start_equity=s.paper_start_usdt, backtest=cfg),
                              calendar=None if args.no_calendar else CalendarFilter(),
-                             ai_filter=None if args.no_ai else LiveFilter(args.models),
+                             # each engine its own AI filter and teacher (Futures AI: *_futures folders)
+                             ai_filter=None if args.no_ai else {m: LiveFilter(engine_path(args.models, m))
+                                                                for m in MARKETS},
                              control=Control(os.path.join(TRADE_DIR, "control.json")),
                              context=context, events=EventLog(service="paper"),
                              news=None if args.no_news else NewsFilter(),
-                             teacher=None if args.no_teacher else TeacherFilter(args.teacher_dir),
+                             teacher=None if args.no_teacher else {m: TeacherFilter(engine_path(args.teacher_dir, m))
+                                                                   for m in MARKETS},
                              market_symbols=per_market,
                              futures_store=CandleStore(futures_db_path(s.db_path)))
         try:
@@ -949,22 +953,27 @@ def _teach(s: Settings, args, reg, exchanges, symbols, cfg) -> int:
     from .learn.teacher import Teacher, collect, describe, teach
     from .ops import EventLog
 
-    teacher = Teacher(args.dir, events=EventLog(service="cli"))
+    from .learn.picks import learns_for
+    from .learn.wallet import engine_path
+
+    market = getattr(args, "market", "spot") or "spot"
+    name = "Futures AI" if market == "futures" else "Spot AI"
+    teacher = Teacher(engine_path(args.dir, market), events=EventLog(service="cli"))
     if args.learn_cmd == "teach-on":
         try:
             t = teacher.turn_on(args.by)
         except ValueError as exc:
             print(f"not turned on: {exc}", file=sys.stderr)
             return 1
-        print(f"paper trading now follows lessons {t['version']}; `learn teach-off` stops it")
+        print(f"{name} paper trading now follows lessons {t['version']}; `learn teach-off` stops it")
         return 0
     if args.learn_cmd == "teach-off":
         teacher.turn_off(args.by or "")
-        print("paper trading no longer follows the teacher's lessons")
+        print(f"{name} paper trading no longer follows the teacher's lessons")
         return 0
     entries = (list(reg.entries.values()) if args.all else reg.with_status("paper", "retired"))
     strategies = []
-    for e in entries:
+    for e in [e for e in entries if learns_for(e, market)]:  # what this engine could trade
         try:
             strategies.append((e.id, make_strategy(e)))
         except Exception as exc:  # one broken entry must not stop the lesson
@@ -972,7 +981,8 @@ def _teach(s: Settings, args, reg, exchanges, symbols, cfg) -> int:
     if not strategies:
         print("no strategies to learn from: start paper trading first, or pass --all", file=sys.stderr)
         return 1
-    store = CandleStore(s.db_path)
+    # Futures AI learns on the perpetuals' own candles, costed as perps; Spot AI on spot candles
+    store, symbols, cfg = _engine_market(s, market, symbols, cfg)
     try:
         frame = collect(store, strategies, exchanges, symbols, cfg)
     finally:
@@ -984,7 +994,7 @@ def _teach(s: Settings, args, reg, exchanges, symbols, cfg) -> int:
     teacher.save_candidate(result)
     w, f = result["check"]["without"], result["check"]["with"]
     c = result["counts"]
-    print(f"lessons {result['version']}: {result['signals']} backtest signals from {len(strategies)} strategies "
+    print(f"{name} lessons {result['version']}: {result['signals']} backtest signals from {len(strategies)} strategies "
           f"(learned on {result['learn_signals']}, checked on {result['check_signals']} they never saw)")
     print(f"  {c['trade']} situations to trade, {c['avoid']} to avoid, {c['unproven']} unproven; "
           f"1R profit-take helps in {result['exit_1r']}")
@@ -993,7 +1003,8 @@ def _teach(s: Settings, args, reg, exchanges, symbols, cfg) -> int:
     print(f"  unseen part with lessons:    {f['trades']} trades, win rate {f['win_rate'] or 0:.0%}, "
           f"{f['expectancy_r'] or 0:+.3f}R per trade")
     if result["passed"]:
-        print("PASSED: turn it on from the dashboard (Trading page) or `aitrader learn teach-on --by <name>`")
+        print("PASSED: turn it on from the dashboard (Teacher page) or `aitrader learn teach-on --by <name>"
+              + (" --market futures`" if market == "futures" else "`"))
     else:
         print(f"not usable: {result['why']}")
     best = sorted(((sid, key, x) for sid, by in result["lessons"].items() for key, x in by.items()
@@ -1004,19 +1015,34 @@ def _teach(s: Settings, args, reg, exchanges, symbols, cfg) -> int:
     return 0
 
 
-def _filter_strategies(reg, use_all: bool) -> list:
-    """(id, strategy) pairs the filter learns from: by default the strategies that passed the
-    backtest gate (paper, or retired after paper); with ``use_all`` every builtin and rule."""
+def _filter_strategies(reg, use_all: bool, market: str = "spot") -> list:
+    """(id, strategy) pairs ``market``'s filter learns from: by default the strategies that passed
+    the backtest gate (paper, or retired after paper); with ``use_all`` every builtin and rule.
+    Only what that engine could trade: Spot AI never shorts, and a pick copy is its engine's."""
     from .learn import make_strategy
+    from .learn.picks import learns_for
     from .learn.registry import Entry
     from .strategies import STRATEGIES
 
-    if not use_all:  # shorts too: they are learned (and judged) as longs on the flipped chart
+    if not use_all:  # Futures AI's shorts too: learned (and judged) as longs on the flipped chart
         entries = list(reg.with_status("paper", "retired"))
     else:
-        entries = [e for e in reg.entries.values() if e.kind == "rule"]
+        entries = [e for e in reg.entries.values() if e.kind in ("rule", "short")]
         entries += [Entry(id=f"builtin-{n}", kind="builtin", name=n) for n in STRATEGIES]
-    return [(e.id, make_strategy(e)) for e in entries]
+    return [(e.id, make_strategy(e)) for e in entries if learns_for(e, market)]
+
+
+def _engine_market(s: Settings, market: str, symbols: list[str], cfg):
+    """The candles one engine learns on: (store, pairs, backtest costs). Futures AI: the perpetuals'
+    own database, every pair stored there, perp fees and funding. Spot AI: spot candles as given."""
+    if market != "futures":
+        return CandleStore(s.db_path), symbols, cfg
+    from .backtest.engine import as_perp
+    from .data.perp import futures_db_path
+    from .ops.doctor import _newest_candles
+
+    store = CandleStore(futures_db_path(s.db_path))
+    return store, sorted(_newest_candles(store.conn)) or symbols, as_perp(cfg) if cfg is not None else None
 
 
 def cmd_ai(s: Settings, args) -> int:
@@ -1027,12 +1053,16 @@ def cmd_ai(s: Settings, args) -> int:
     from .backtest import BacktestConfig
     from .learn import Registry
 
-    models = ModelRegistry(args.models)
+    from .learn.wallet import engine_path
+
+    market = getattr(args, "market", "spot") or "spot"  # each engine its own filter and training set
+    models = ModelRegistry(engine_path(args.models, market))
+    args.dataset = engine_path(args.dataset, market)
     cmd = args.ai_cmd
 
     def make_dataset():
         reg = Registry(args.registry)
-        strategies = _filter_strategies(reg, args.all)
+        strategies = _filter_strategies(reg, args.all, market)
         if not strategies:
             print("no strategies to learn from: run `aitrader learn add-library --test` (or "
                   "`learn add-builtin` + `learn test`) first, or pass --all", file=sys.stderr)
@@ -1042,15 +1072,19 @@ def cmd_ai(s: Settings, args) -> int:
         from .data.perp import futures_db_path
 
         store, fstore = CandleStore(s.db_path), CandleStore(futures_db_path(s.db_path))
+        # Futures AI's filter learns on the perpetuals' candles and Futures AI's own paper trades
+        market_store, pairs, _ = _engine_market(s, market, args.symbol or s.symbols, None)
+        market_store.close()
         try:
-            frame = build_dataset(store, strategies, args.exchange or EXCHANGES,
-                                  args.symbol or s.symbols, cfg, args.include_final,
-                                  None if args.no_paper else args.paper_state, futures_store=fstore)
+            frame = build_dataset(fstore if market == "futures" else store, strategies,
+                                  args.exchange or EXCHANGES, args.symbol or pairs, cfg, args.include_final,
+                                  None if args.no_paper else args.paper_state,
+                                  futures_store=fstore if market != "futures" else None, market=market)
         finally:
             store.close()
             fstore.close()
         save_dataset(frame, args.dataset)
-        print(f"{len(frame)} signals from {len(strategies)} strategies -> {args.dataset}")
+        print(f"{market}: {len(frame)} signals from {len(strategies)} strategies -> {args.dataset}")
         if len(frame):
             by = frame.groupby("source").size().to_dict()
             print(f"  sources {by}, reached 1R {frame['hit_1r'].mean():.0%}, "
@@ -1144,7 +1178,7 @@ def cmd_ai(s: Settings, args) -> int:
             print("no active model; pass --model VERSION", file=sys.stderr)
             return 1
         model = models.load(version)
-        store = CandleStore(s.db_path)
+        store = _engine_market(s, market, [], None)[0]
         candles = store.load(args.score_exchange, args.score_symbol, args.timeframe)
         store.close()
         if not candles:
@@ -1836,12 +1870,16 @@ def build_parser() -> argparse.ArgumentParser:
     lte.add_argument("--all", action="store_true", help="every strategy in the registry, not only the ones "
                                                        "paper trading or retired after paper")
     lte.add_argument("--dir", default="data/learn/teacher")
+    lte.add_argument("--market", choices=("spot", "futures"), default="spot",
+                     help="whose lessons: Spot AI's (spot candles) or Futures AI's (perpetuals, in <dir>_futures)")
     lton = le_sub.add_parser("teach-on", help="paper trading follows the newest lessons (they must pass the check)")
     lton.add_argument("--by", required=True)
     lton.add_argument("--dir", default="data/learn/teacher")
+    lton.add_argument("--market", choices=("spot", "futures"), default="spot")
     ltoff = le_sub.add_parser("teach-off", help="paper trading stops following the lessons")
     ltoff.add_argument("--by")
     ltoff.add_argument("--dir", default="data/learn/teacher")
+    ltoff.add_argument("--market", choices=("spot", "futures"), default="spot")
     lp = le_sub.add_parser("paper", help="service: paper-trade every strategy that passed")
     lp.add_argument("--interval", type=float, default=60)
     lp.add_argument("--once", action="store_true")
@@ -1867,6 +1905,8 @@ def build_parser() -> argparse.ArgumentParser:
     ai.add_argument("--models", default="data/ai/models", help="model registry folder")
     ai.add_argument("--dataset", default="data/ai/dataset.csv")
     ai.add_argument("--registry", default="data/learn/registry.json", help="strategy registry")
+    ai.add_argument("--market", choices=("spot", "futures"), default="spot",
+                    help="whose filter: Spot AI's or Futures AI's (models, training set: <name>_futures)")
     ai_sub = ai.add_subparsers(dest="ai_cmd", required=True)
     for name, text in [("dataset", "backtest the strategies and save one row per signal"),
                        ("retrain", "build the training set, then train and test a new model "
