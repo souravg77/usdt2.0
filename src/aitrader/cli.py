@@ -1661,12 +1661,21 @@ def cmd_pairs(s: Settings, args) -> int:
             finally:
                 await client.close()
 
-        gainers.switch(True, args.count, path=gpath, window=args.window)
+        gainers.switch(True, args.count, path=gpath, window=args.window, list_name=args.list,
+                       chosen=args.pick if args.list == "chosen" or args.pick else None)
         data = asyncio.run(fetch())
         hot = gainers.symbols(gpath)
-        print(f"{name} top {data['top']} gainers over {data['window']} (24h turnover over "
-              f"{gainers.MIN_TURNOVER / 1e6:.0f}M USDT, spread at most {gainers.MAX_SPREAD_PCT:g}%):")
-        for p in data["pairs"][:data["top"]]:
+        lst = gainers.list_of(data)
+        if lst == "chosen":
+            print(f"{name} pairs you chose ({len(hot)}): {', '.join(hot) or 'none yet'}; "
+                  f"{len(data.get('universe', []))} pairs to choose from")
+            missing = [p for p in hot if p not in set(data.get("universe", []))]
+            if missing:
+                print(f"  not open for trading on Bybit {name.lower()} now (no prices will come): {', '.join(missing)}")
+        else:
+            print(f"{gainers.list_name(data, gm)}, top {data['top']} over {data['window']}:")
+        shown = data["pairs"] if lst == "chosen" else data["pairs"][:data["top"]]
+        for p in shown:
             print(f"  {p['symbol']:<14} score {p['score']:+7.2f}  24h {p['change']:+7.2f}%  "
                   f"turnover {p['turnover'] / 1e6:,.0f}M" + (f"  NOT TRADED: {p['pump']}" if p.get("pump") else ""))
         print(f"trading them in paper now ({len(hot)}); the collector downloads their prices on its next pass")
@@ -2038,6 +2047,10 @@ def build_parser() -> argparse.ArgumentParser:
     pa.add_argument("--market", choices=["spot", "futures"], default="futures",
                     help="gainers: the Spot scanner (Spot AI) or the Futures scanner (Futures AI)")
     pa.add_argument("--window", choices=["1h", "4h", "24h"], help="gainers: rank by the rise over this window")
+    pa.add_argument("--list", choices=["gainers", "losers", "volume", "new", "chosen"],
+                    help="gainers: which list the engine trades (top gainers, top losers, most traded, "
+                         "new listings, or the pairs given with --pick)")
+    pa.add_argument("--pick", action="append", help="gainers --list chosen: a pair to trade (repeat)")
     pa.add_argument("--exchange", default="bybit", help="rank: ccxt exchange id (public data only)")
     pa.add_argument("--min-turnover", type=float, default=2_000_000, help="rank: 24h USDT turnover floor")
     pa.add_argument("--depth-top", type=int, default=40, help="rank: order books to check")
