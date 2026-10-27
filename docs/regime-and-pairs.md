@@ -101,14 +101,14 @@ results look better than real trading would have been. Treat multi-year results 
 as an upper bound. The fixed list has the same problem to a smaller degree, because it was also
 picked from today's most-traded coins.
 
-## Futures top gainers: Perpetual or Futures (dated)
+## Futures AI pairs: Perpetual (hot pairs) or Futures (dated, top gainers)
 
 The Futures view's top gainers card has a **Contract** switch, like Bybit's own Perpetual / Futures
 choice:
 
 | Contract | What Futures AI trades | Leverage | Real money |
 |---|---|---|---|
-| Perpetual (default) | the top gainers among the USDT perpetuals | each coin's own maximum (up to 100x on BTC; paper only above 3x) | yes, behind the usual live gate, 3x max |
+| Perpetual (default) | the hot crypto perpetuals: the most traded over 24h, up or down, TradFi perps (stocks, metals) left out. Bybit's own Hot tab is hand-picked and not in its public API, so this is the nearest public measure | each coin's own maximum (up to 100x on BTC; paper only above 3x) | yes, behind the usual live gate, 3x max |
 | Futures (dated) | the top gainers among the dated USDT futures (BTCUSDT-30OCT26 and so on) | each contract's own maximum, read from Bybit | never: paper only |
 
 Switching scans that contract type afresh; the other type's list is not traded in the meantime.

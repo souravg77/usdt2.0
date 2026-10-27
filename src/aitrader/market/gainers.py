@@ -4,7 +4,10 @@
   without a spot listing: Futures AI reads only their own data (``data.perp``) and trades them. The
   admin picks the contract type, like Bybit's own Perpetual / Futures switch:
 
-  - ``perpetual`` (default): the USDT perpetuals (no expiry, up to 100x on BTC).
+  - ``perpetual`` (default): the hot crypto USDT perpetuals (no expiry, up to 100x on BTC), not
+    the risers. Bybit's own "Hot" tab is hand-picked and not in its public API, so the nearest
+    public measure is used: the ``top`` most traded crypto perpetuals by 24h turnover, up or down on
+    the day (BTC, ETH, SOL, XRP...), TradFi perpetuals (stocks, metals) left out.
   - ``dated``: the dated USDT futures that expire on a set day (BTCUSDT-30OCT26, saved as
     ``BTC/USDT:USDT-261030``). Bybit lists only a few of them, mostly BTC, ETH and SOL, with less
     turnover, so their own lower turnover floor (``DATED_MIN_TURNOVER``) applies. Contracts that
@@ -57,7 +60,8 @@ PUMP_1H_PCT, PUMP_24H_PCT = 15.0, 60.0
 DEFAULT_TOP = 10
 MIN_TOP, MAX_TOP = 3, 30
 MIN_TURNOVER = 10_000_000  # USDT of 24h perp turnover
-CONTRACTS = {"perpetual": "Perpetual", "dated": "Futures (dated)"}
+CONTRACTS = {"perpetual": "Perpetual: hot crypto pairs", "dated": "Futures (dated): top gainers"}
+TRADFI_TYPES = ("stock", "tradfi", "commodit", "forex", "metal", "index", "etf")  # Bybit TradFi perps
 DEFAULT_CONTRACT = "perpetual"
 DATED_MIN_TURNOVER = 100_000  # dated contracts trade far less than the perpetuals
 DATED_MIN_HOURS_LEFT = 48
@@ -72,6 +76,18 @@ def path_for(market: str) -> str:
 def window_of(data: dict) -> str:
     w = data.get("window")
     return w if w in WINDOWS else DEFAULT_WINDOW
+
+
+def is_tradfi(m: dict) -> bool:
+    """Whether a Bybit perpetual is a TradFi one (a stock, metal, index...) rather than a crypto coin,
+    from its ``symbolType`` in Bybit's instrument info."""
+    kind = str(((m.get("info") or {}).get("symbolType")) or "").lower()
+    return any(t in kind for t in TRADFI_TYPES)
+
+
+def hot(market: str, contract: str | None) -> bool:
+    """Futures on Perpetual trades the hot crypto pairs (the most traded), not the top gainers."""
+    return market != "spot" and contract == "perpetual"
 
 
 def contract_of(data: dict) -> str:
@@ -143,13 +159,15 @@ def _spread_pct(t: dict) -> float | None:
 
 def pick(markets: dict, tickers: dict, top: int = DEFAULT_TOP, min_turnover: float = MIN_TURNOVER,
          market: str = "futures", max_spread: float = MAX_SPREAD_PCT, window: str = "24h",
-         contract: str = DEFAULT_CONTRACT, now_ms: int | None = None) -> list[dict]:
+         contract: str | None = None, now_ms: int | None = None) -> list[dict]:
     """The ``top`` biggest 24h risers that pass the filters, before scoring; on a 1h or 4h
     ``window`` the ``top`` most traded that pass, up or down on the day (their 1h/4h rise is read
     from candles afterwards). ``markets`` and ``tickers`` are ccxt's ``load_markets`` /
     ``fetch_tickers`` results for that market. On Futures, ``contract`` "dated" takes the dated
-    USDT futures instead of the perpetuals (named by their ccxt name, BTC/USDT:USDT-261030)."""
+    USDT futures (named by their ccxt name, BTC/USDT:USDT-261030); "perpetual" takes the hot crypto
+    perpetuals instead of risers (None: the perpetuals' risers): the ``top`` most traded, up or down, TradFi perpetuals left out."""
     dated = market != "spot" and contract == "dated"
+    is_hot = hot(market, contract)
     if dated:
         min_turnover = min(min_turnover, DATED_MIN_TURNOVER)
     now_ms = now_ms or int(time.time() * 1000)
@@ -168,7 +186,7 @@ def pick(markets: dict, tickers: dict, top: int = DEFAULT_TOP, min_turnover: flo
             expiry = m.get("expiry") or expiry_ms(sym)
             if not expiry or expiry - now_ms < DATED_MIN_HOURS_LEFT * 3_600_000:
                 continue
-        if is_stablecoin(base) or is_leveraged_token(base):
+        if is_stablecoin(base) or is_leveraged_token(base) or (is_hot and is_tradfi(m)):
             continue
         t = tickers.get(sym) or {}
         change, turnover = t.get("percentage"), t.get("quoteVolume")
@@ -182,7 +200,7 @@ def pick(markets: dict, tickers: dict, top: int = DEFAULT_TOP, min_turnover: flo
         if expiry:
             row["expiry"] = int(expiry)
         rows.append(row)
-    if window in ("1h", "4h"):
+    if is_hot or window in ("1h", "4h"):
         rows.sort(key=lambda r: r["turnover"], reverse=True)
         return rows[:max(1, int(top))]
     rows.sort(key=lambda r: r["change"], reverse=True)
@@ -222,8 +240,12 @@ def enrich(row: dict, ohlcv: list) -> dict:
     return out
 
 
-def rank(rows: list[dict], window: str = DEFAULT_WINDOW) -> list[dict]:
-    """Score, flag pumps, and order: the best first, rises over the window only."""
+def rank(rows: list[dict], window: str = DEFAULT_WINDOW, is_hot: bool = False) -> list[dict]:
+    """Score, flag pumps, and order: the best first, rises over the window only. The hot pairs are
+    kept up or down, most traded first, scored by their 24h turnover in millions of USDT."""
+    if is_hot:
+        out = [{**r, "score": round(r["turnover"] / 1e6, 1), "pump": ""} for r in rows]
+        return sorted(out, key=lambda r: r["turnover"], reverse=True)
     out = []
     for r in rows:
         r = {**r, "score": score(r, window), "pump": pump_warning(r)}
@@ -272,16 +294,17 @@ async def refresh(client, path: str = DEFAULT_PATH, top: int | None = None, now_
     tickers = await client.fetch_tickers()
     now_ms = now_ms or int(time.time() * 1000)
     contract = contract_of(data) if market == "futures" else DEFAULT_CONTRACT
+    is_hot = hot(market, contract)
     rows = []
     short = window in ("1h", "4h")
-    for r in pick(markets, tickers, top=CANDIDATES_SHORT if short else CANDIDATES, market=market, window=window,
-                  contract=contract, now_ms=now_ms):
+    n = MAX_TOP if is_hot else CANDIDATES_SHORT if short else CANDIDATES
+    for r in pick(markets, tickers, top=n, market=market, window=window, contract=contract, now_ms=now_ms):
         try:
             r = enrich(r, await client.fetch_ohlcv(r["contract"], "1h", limit=26))
         except Exception as exc:  # one coin's candles failing must not stop the scan
             logging.getLogger(__name__).warning("gainers: no candles for %s: %s", r["symbol"], exc)
         rows.append(r)
     data.update(top=top, window=window, market=market, generated=now_ms, scanned_contract=contract,
-                scanned=len(rows), pairs=rank(rows, window)[:MAX_TOP])  # ``top`` decides what trades
+                scanned=len(rows), pairs=rank(rows, window, is_hot)[:MAX_TOP])  # ``top`` decides what trades
     save(data, path)
     return data

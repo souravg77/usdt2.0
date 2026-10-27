@@ -232,6 +232,7 @@ def _gainers_card(auth, token, now: int, job, market: str = "futures") -> str:
     futures = market != "spot"
     contract = gainers.contract_of(data) if futures else gainers.DEFAULT_CONTRACT
     dated = contract == "dated"
+    is_hot = gainers.hot(market, contract)
     shown = data.get("pairs", []) if data.get("scanned_contract", gainers.DEFAULT_CONTRACT) == contract else []
     limits = (perp_limits.load().get("max_leverage") or {}) if futures else {}
 
@@ -249,7 +250,7 @@ def _gainers_card(auth, token, now: int, job, market: str = "futures") -> str:
         return cell + (f'<td>{_ms(p["expiry"])}</td>' if dated and p.get("expiry") else "<td>-</td>" if dated else "")
 
     rows = "".join(
-        f'<tr><td>{_e(bybit_name(p["symbol"]))}</td><td><b>{p.get("score", p["change"]):+.1f}</b></td>'
+        f'<tr><td>{_e(bybit_name(p["symbol"]))}</td><td><b>{"-" if is_hot else format(p.get("score", p["change"]), "+.1f")}</b></td>'
         f'<td>{pct(p.get("change_1h"))}</td><td>{pct(p.get("change_4h"))}</td><td>{pct(p["change"])}</td>'
         f'<td>{num(p.get("relvol"), ".1f", "x")}</td><td>{num(p.get("spread"), ".3f", "%")}</td>'
         f'<td>{_usdt(p.get("turnover"))}</td>{extra(p)}'
@@ -277,11 +278,11 @@ def _gainers_card(auth, token, now: int, job, market: str = "futures") -> str:
             f'value="{top}" style="width:4.5em"></label>'
             f'<label class="small">over <select name="window" style="width:5em">{opts}</select></label>'
             + (f'<label class="small">Contract <select name="contract">{copts}</select></label>' if futures else "")
-            + f'<button{" disabled" if job else ""}>{"Refresh" if on else "Trade the top gainers"}</button></form>')
+            + f'<button{" disabled" if job else ""}>{"Refresh" if on else "Trade this list" if futures else "Trade the top gainers"}</button></form>')
     if on:
         form += (f'<form method="post" action="/pairs/gainers" class="row">{csrf}<input type="hidden" name="on" value="0">'
                  f'<input type="hidden" name="market" value="{market}">'
-                 '<button class="ghost">Stop trading the top gainers</button></form>')
+                 f'<button class="ghost">Stop trading {"this list" if futures else "the top gainers"}</button></form>')
     heads = ("<th>Max leverage</th>" + ("<th>Expires</th>" if dated else "")) if futures else ""
     table = ('<table><tr><th>Pair</th><th>Score</th><th>1h</th><th>4h</th><th>24h</th><th>Rel. volume</th>'
              f'<th>Spread</th><th>Turnover</th>{heads}<th>Paper</th></tr>{rows}</table>' if rows else "")
@@ -295,17 +296,24 @@ def _gainers_card(auth, token, now: int, job, market: str = "futures") -> str:
                 "A new weekly contract has little history, so the 4h and 1d strategies may need weeks before they "
                 "can read it.")
     else:
-        what = ("Bybit USDT perpetual futures (no expiry, the highest leverage: up to 100x on BTC). Futures AI trades "
-                "them long and short, on the perpetuals' own candles (never spot prices).")
+        what = ("Bybit USDT perpetual futures (no expiry, the highest leverage: up to 100x on BTC): the hot crypto "
+                "pairs, not the top gainers. Bybit's own Hot tab is hand-picked and not in its public data, so this "
+                "takes the most traded crypto perpetuals over 24h, up or down (TradFi perpetuals such as stocks are "
+                "left out). Futures AI trades them long and short, on the perpetuals' own candles (never spot "
+                "prices).")
     floor = gainers.DATED_MIN_TURNOVER if dated else gainers.MIN_TURNOVER
-    title = f"Futures top gainers: {gainers.CONTRACTS[contract]}" if futures else f"{name} top gainers"
+    title = f"Futures AI pairs: {gainers.CONTRACTS[contract]}" if futures else f"{name} top gainers"
+    if is_hot:
+        how = ('Most traded first; the window only changes the 1h / 4h columns. The strategies still decide, with '
+               'the usual risk limits. Refreshed every hour while on.')
+    else:
+        how = ('Score = rise over the window (%) + 2 x (relative volume - 1), at most +6, - 5 x spread (%). Up over '
+               f'{gainers.PUMP_1H_PCT:g}% in an hour or {gainers.PUMP_24H_PCT:g}% in a day is flagged as a pump and '
+               'not traded. A high score is not a buy signal: the strategies still decide, with the usual risk '
+               'limits. Refreshed every hour while on.')
     return (f'<div class="card"><h3>{_e(title)}</h3><p>{state}. Window <b>{_e(window)}</b>. {_e(when)}</p>'
             f'<p class="small muted">{what} Kept: over {floor / 1e6:g}M USDT of 24h turnover, spread '
-            f'at most {gainers.MAX_SPREAD_PCT:g}%. Score = rise over the window (%) + 2 x (relative volume - 1), at most '
-            '+6, - 5 x spread (%). Up over '
-            f'{gainers.PUMP_1H_PCT:g}% in an hour or {gainers.PUMP_24H_PCT:g}% in a day is flagged as a pump and not '
-            'traded. A high score is not a buy signal: the strategies still decide, with the usual risk limits. '
-            'Refreshed every hour while on.</p>'
+            f'at most {gainers.MAX_SPREAD_PCT:g}%. {how}</p>'
             f'{form}{table}</div>')
 
 
