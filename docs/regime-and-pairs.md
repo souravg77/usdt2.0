@@ -100,3 +100,23 @@ Those are exactly the coins a strategy would have held and lost money on. This m
 results look better than real trading would have been. Treat multi-year results on ranked pairs
 as an upper bound. The fixed list has the same problem to a smaller degree, because it was also
 picked from today's most-traded coins.
+
+## The pair list each engine trades (admin dropdown)
+
+On the Pairs page, each engine (in its own view) has one card, "Spot AI pair list" or "Futures AI
+pair list". Its dropdown picks which Bybit list that engine trades (`market/gainers.py`):
+
+| Choice | What it is |
+|---|---|
+| Top gainers | the biggest risers over 1h, 4h or 24h, scored (the default, as before) |
+| Top losers | the biggest fallers over the window (Futures shorts, Spot dips) |
+| Most traded | the highest 24h turnover |
+| New listings | listed in the last 30 days, newest first (1M USDT turnover floor) |
+| Pairs I choose | the admin ticks up to 30 pairs from every Bybit USDT pair (Spot) or USDT perpetual (Futures) open for trading |
+
+Futures AI trades only that list (plus pairs it still holds). Spot AI trades it next to its usual
+pairs. Scanned lists refresh every hour while on. The pairs you choose trade as soon as you press
+Save, with no scan. Each scan also saves the full list of pairs to choose from. Same thing on the
+command line:
+`aitrader pairs gainers --market futures --list chosen --pick BTC/USDT --pick SOL/USDT`
+(`--list gainers|losers|volume|new|chosen`).

@@ -36,7 +36,7 @@ def test_each_engine_has_its_own_learning_window(tmp_path, monkeypatch):
     csrf = Auth("admin", PW, "k").csrf(token)
 
     spot = client.get("/learning/spot").text
-    assert "Spot AI learning" in spot and 'href="/learning/futures"' in spot
+    assert "Spot AI learning" in spot and 'href="/learning/futures"' not in spot  # each view links only its own page
     assert "builtin-ml_boosted" in spot and "short-builtin-ml_boosted" not in spot  # Spot never shorts
     assert "40 trades · +0.210R" in spot and "5 trades · +0.500R" in spot
     assert "builtin-ema_crossover" not in spot.split("Strategy test")[0]  # only ML ones in the ML table

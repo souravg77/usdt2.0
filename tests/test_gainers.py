@@ -90,23 +90,24 @@ def test_pairs_page_button_and_markets_badge(tmp_path, monkeypatch):
     c.post("/login", data={"user": "admin", "password": PW})
     page = c.get("/pairs").text
     # each workspace shows only its own scanner: Spot first (the default view)
-    assert "Spot top gainers" in page and "Futures top gainers" not in page and "Trade the top gainers" in page
+    assert "Spot AI pair list: Top gainers" in page and "Futures AI pair list" not in page and "Trade this list" in page
+    assert '<option value="losers">Top losers</option>' in page and "Pairs I choose" in page  # the dropdown
     from aitrader.learn import wallet
     wallet.set_market(wallet.market_path(str(tmp_path / "paper.json")), True)
     page = c.get("/pairs").text
-    assert "Futures top gainers" in page and "Spot top gainers" not in page
+    assert "Futures AI pair list: Top gainers" in page and "Spot AI pair list" not in page
     csrf = Auth("admin", PW, "k").csrf(c.cookies.get(COOKIE))
     assert c.post("/pairs/gainers", data={"csrf": "x", "on": "1"}).status_code == 403
     r = c.post("/pairs/gainers", data={"csrf": csrf, "on": "1", "count": "5", "window": "4h"}, follow_redirects=False)
     assert r.status_code == 303 and "Scanning" in r.headers["location"]
     runner.wait_idle()
     [job] = [j for j in runner.list() if j["meta"].get("kind") == "gainers"]
-    assert job["steps"] == [["pairs", "gainers", "--market", "futures", "--count", "5", "--window", "4h"]]
+    assert job["steps"] == [["pairs", "gainers", "--market", "futures", "--count", "5", "--window", "4h", "--list", "gainers"]]
     # the list arrived: it is shown, traded and marked on the Markets page of its workspace
     gainers.switch(True, top=5)
     asyncio.run(gainers.refresh(FakePerps(), now_ms=int(time.time() * 1000)))
     page = c.get("/pairs").text
-    assert "PEPE/USDT" in page and "+31.50%" in page and "Stop trading the top gainers" in page
+    assert "PEPE/USDT" in page and "+31.50%" in page and "Stop trading this list" in page
     wallet.set_market(wallet.market_path(str(tmp_path / "paper.json")), False)
     assert 'data-symbol="PEPE/USDT"' not in c.get("/markets").text  # the Spot AI view: not its gainer
     wallet.set_market(wallet.market_path(str(tmp_path / "paper.json")), True)
