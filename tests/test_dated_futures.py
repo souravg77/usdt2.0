@@ -51,6 +51,17 @@ def test_dated_names_and_expiry():
     assert perp_symbol("BTC/USDT:USDT-261030") == "BTC/USDT:USDT-261030"  # its own candles, never the perp's
 
 
+def test_perpetual_hot_pairs_leave_out_tradfi_and_keep_fallers():
+    markets = {**MARKETS, "NBIS/USDT:USDT": {**market("NBIS/USDT:USDT", "NBIS", "swap"),
+                                             "info": {"symbolType": "xStocks"}}}
+    tickers = {**TICKERS, "NBIS/USDT:USDT": {"percentage": 5.0, "quoteVolume": 2e9, "last": 90, "bid": 90, "ask": 90.01},
+               "SOL/USDT:USDT": {**TICKERS["SOL/USDT:USDT"], "percentage": -3.0}}
+    hot = gainers.pick(markets, tickers, top=10, contract="perpetual", now_ms=NOW)
+    assert [p["symbol"] for p in hot] == ["BTC/USDT", "SOL/USDT"]  # NBIS is a stock perp; SOL kept though down
+    ranked = gainers.rank(hot, is_hot=True)
+    assert ranked[0]["score"] == 5000.0 and not ranked[1]["pump"]
+
+
 def test_each_contract_type_scans_only_its_own_contracts():
     perps = gainers.pick(MARKETS, TICKERS, top=10, min_turnover=1e6, now_ms=NOW)
     assert [p["symbol"] for p in perps] == ["SOL/USDT", "BTC/USDT"]
@@ -66,7 +77,7 @@ def test_switching_contract_type_drops_the_old_list_until_it_is_scanned(tmp_path
     path = str(tmp_path / "gainers.json")
     gainers.switch(True, top=5, path=path)
     asyncio.run(gainers.refresh(FakeBybit(), path, now_ms=NOW))
-    assert gainers.symbols(path, now_ms=NOW + 1) == ["SOL/USDT", "BTC/USDT"]
+    assert gainers.symbols(path, now_ms=NOW + 1) == ["BTC/USDT", "SOL/USDT"]  # hot pairs: most traded first
     gainers.switch(True, path=path, contract="dated")
     assert gainers.symbols(path, now_ms=NOW + 1) == []  # the perpetual list is not traded as dated futures
     asyncio.run(gainers.refresh(FakeBybit(), path, now_ms=NOW + 2))
@@ -91,8 +102,8 @@ def test_the_futures_card_has_the_contract_switch(tmp_path, monkeypatch):
     c.post("/login", data={"user": "admin", "password": PW})
     wallet.set_market(wallet.market_path(str(tmp_path / "paper.json")), True)
     page = c.get("/pairs").text
-    assert "Futures top gainers: Perpetual" in page and '<select name="contract">' in page
-    assert '<option value="dated">Futures (dated)</option>' in page
+    assert "Futures AI pairs: Perpetual: hot crypto pairs" in page and '<select name="contract">' in page
+    assert '<option value="dated">Futures (dated): top gainers</option>' in page
     csrf = Auth("admin", PW, "k").csrf(c.cookies.get(COOKIE))
     r = c.post("/pairs/gainers", data={"csrf": csrf, "on": "1", "count": "5", "window": "24h", "contract": "dated"},
                follow_redirects=False)
@@ -104,7 +115,7 @@ def test_the_futures_card_has_the_contract_switch(tmp_path, monkeypatch):
     perp_limits.save(perp_limits.from_markets(MARKETS), perp_limits.DEFAULT_PATH)
     asyncio.run(gainers.refresh(FakeBybit(), now_ms=NOW))
     page = c.get("/pairs").text
-    assert "Futures top gainers: Futures (dated)" in page and "paper only" in page
+    assert "Futures AI pairs: Futures (dated): top gainers" in page and "paper only" in page
     assert "ETHUSDT-26DEC25" in page and "<th>Expires</th>" in page and "<td>25x</td>" in page
 
 

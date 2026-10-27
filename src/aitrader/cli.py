@@ -1670,8 +1670,8 @@ def cmd_pairs(s: Settings, args) -> int:
         hot = gainers.symbols(gpath)
         dated = gm == "futures" and gainers.contract_of(data) == "dated"
         floor = gainers.DATED_MIN_TURNOVER if dated else gainers.MIN_TURNOVER
-        kind = f" {gainers.CONTRACTS[gainers.contract_of(data)].lower()}" if gm == "futures" else ""
-        print(f"{name}{kind} top {data['top']} gainers over {data['window']} (24h turnover over "
+        what = (gainers.CONTRACTS[gainers.contract_of(data)] if gm == "futures" else f"{name} top gainers")
+        print(f"{what}, top {data['top']} over {data['window']} (24h turnover over "
               f"{floor / 1e6:g}M USDT, spread at most {gainers.MAX_SPREAD_PCT:g}%):")
         for p in data["pairs"][:data["top"]]:
             print(f"  {p['symbol']:<22} score {p['score']:+7.2f}  24h {p['change']:+7.2f}%  "

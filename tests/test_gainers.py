@@ -68,10 +68,11 @@ def test_switch_refresh_and_configured_symbols(tmp_path):
     gainers.switch(True, top=3, path=path)
     assert gainers.due(path, now_ms=NOW)  # on, no list yet
     asyncio.run(gainers.refresh(FakePerps(), path, now_ms=NOW))
-    assert gainers.symbols(path, now_ms=NOW + 1) == ["PEPE/USDT", "WIF/USDT", "BTC/USDT"]
+    # Perpetual (the default) trades the hot pairs: the most traded, up or down
+    assert gainers.symbols(path, now_ms=NOW + 1) == ["BTC/USDT", "PEPE/USDT", "ONLYPERP/USDT"]
     assert not gainers.due(path, now_ms=NOW + 1) and gainers.due(path, now_ms=NOW + gainers.REFRESH_MS)
     fixed = ["BTC/USDT", "ETH/USDT"]
-    assert pairs.configured_symbols(fixed, env=env, now_ms=NOW + 1) == ["BTC/USDT", "ETH/USDT", "PEPE/USDT", "WIF/USDT"]
+    assert pairs.configured_symbols(fixed, env=env, now_ms=NOW + 1) == ["BTC/USDT", "ETH/USDT", "PEPE/USDT", "ONLYPERP/USDT"]
     # a list the collector stopped refreshing isn't traded
     assert pairs.configured_symbols(fixed, env=env, now_ms=NOW + 7 * 3_600_000) == fixed
     gainers.switch(False, path=path)
@@ -90,11 +91,11 @@ def test_pairs_page_button_and_markets_badge(tmp_path, monkeypatch):
     c.post("/login", data={"user": "admin", "password": PW})
     page = c.get("/pairs").text
     # each workspace shows only its own scanner: Spot first (the default view)
-    assert "Spot top gainers" in page and "Futures top gainers" not in page and "Trade the top gainers" in page
+    assert "Spot top gainers" in page and "Futures AI pairs" not in page and "Trade the top gainers" in page
     from aitrader.learn import wallet
     wallet.set_market(wallet.market_path(str(tmp_path / "paper.json")), True)
     page = c.get("/pairs").text
-    assert "Futures top gainers" in page and "Spot top gainers" not in page
+    assert "Futures AI pairs: Perpetual: hot crypto pairs" in page and "Spot top gainers" not in page
     csrf = Auth("admin", PW, "k").csrf(c.cookies.get(COOKIE))
     assert c.post("/pairs/gainers", data={"csrf": "x", "on": "1"}).status_code == 403
     r = c.post("/pairs/gainers", data={"csrf": csrf, "on": "1", "count": "5", "window": "4h"}, follow_redirects=False)
@@ -107,7 +108,7 @@ def test_pairs_page_button_and_markets_badge(tmp_path, monkeypatch):
     gainers.switch(True, top=5)
     asyncio.run(gainers.refresh(FakePerps(), now_ms=int(time.time() * 1000)))
     page = c.get("/pairs").text
-    assert "PEPE/USDT" in page and "+31.50%" in page and "Stop trading the top gainers" in page
+    assert "PEPE/USDT" in page and "+31.50%" in page and "Stop trading this list" in page
     wallet.set_market(wallet.market_path(str(tmp_path / "paper.json")), False)
     assert 'data-symbol="PEPE/USDT"' not in c.get("/markets").text  # the Spot AI view: not its gainer
     wallet.set_market(wallet.market_path(str(tmp_path / "paper.json")), True)
@@ -204,11 +205,11 @@ def test_spot_scanner_scores_and_flags_pumps(tmp_path):
            "AITRADER_SQUEEZE_FILE": str(tmp_path / "squeeze.json")}  # never the live list
     fixed = ["ETH/USDT"]
     assert pairs.configured_symbols(fixed, env=env, now_ms=NOW + 1, market="spot") == ["ETH/USDT", "BTC/USDT", "WIF/USDT"]
-    # Futures AI trades only its gainers while that list is on (plus pairs it still holds)
+    # Futures AI trades only its list while that list is on (plus pairs it still holds)
     assert pairs.configured_symbols(fixed, env=env, now_ms=NOW + 1, market="futures") == \
-        ["PEPE/USDT", "WIF/USDT", "BTC/USDT"]
+        ["BTC/USDT", "PEPE/USDT", "ONLYPERP/USDT"]
     assert pairs.configured_symbols(fixed, env=env, now_ms=NOW + 1, market="futures", keep=["SOL/USDT"]) == \
-        ["PEPE/USDT", "WIF/USDT", "BTC/USDT", "SOL/USDT"]
+        ["BTC/USDT", "PEPE/USDT", "ONLYPERP/USDT", "SOL/USDT"]
     # stale or off: Futures AI never falls back to the usual pairs (only what it still holds)
     assert pairs.configured_symbols(fixed, env=env, now_ms=NOW + 7 * 3_600_000, market="futures") == []
     gainers.switch(False, path=fut)
