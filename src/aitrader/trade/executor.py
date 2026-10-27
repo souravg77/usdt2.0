@@ -59,6 +59,7 @@ import time
 from datetime import datetime, timezone
 
 from ..data import derivs
+from ..data.perp import is_dated
 from ..models import TIMEFRAME_MS, OrderStatus, OrderType, Side
 from ..ops import EventLog, Heartbeat
 from . import futures
@@ -239,6 +240,9 @@ class Executor:
             if perp and not getattr(self.adapter, "supports_perps", False):
                 self._skip(mark, key, f"{'short' if short else 'Futures long'} signal: this exchange adapter "
                            "can't trade futures", out)
+                continue
+            if is_dated(symbol):  # dated (expiring) futures are paper only: never a real-money order
+                self._skip(mark, key, "dated futures contract: paper trading only", out)
                 continue
             market = futures.perp_symbol(symbol) if perp else symbol
             if perp and self._other_side_open(market, short):

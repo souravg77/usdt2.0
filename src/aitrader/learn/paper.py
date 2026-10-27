@@ -37,6 +37,7 @@ from datetime import datetime, timezone
 
 from ..backtest import BacktestConfig, metrics
 from ..backtest.engine import Trade, as_perp, capped, cost_r, simulate_signal, too_costly, too_little_reward
+from ..data.perp import expiry_ms
 from ..data.store import CandleStore
 from ..indicators import candles_to_frame
 from ..market import perp_limits
@@ -90,6 +91,7 @@ def max_data_age(tf: str) -> int:
 
 FUTURES_SUFFIX = "|futures"  # a perp long's position key: the same signal's spot buy keeps the plain key
 MISSING_ENTRY_BARS = 3  # bars to wait for a missing entry candle to be filled in before moving on
+EXPIRY_CLOSE_MS = 3_600_000  # a paper position on a dated futures contract closes this long before it expires
 
 
 @dataclass(frozen=True)
@@ -830,6 +832,9 @@ class PaperTrader:
             pos_mkt = "futures" if key.endswith(FUTURES_SUFFIX) or wallet.market_of(pos) == "futures" else "spot"
             if not closing and (breakers.get(pos_mkt) or {}).get("close"):  # the weekly loss limit
                 closing, reason = True, "weekly loss limit"
+            expires = expiry_ms(sym)  # a dated futures contract: out an hour before Bybit settles it
+            if not closing and expires and now_ms >= expires - EXPIRY_CLOSE_MS:
+                closing, reason = True, "contract expiry"
             hand_req = None
             if _asked_to_close(close_one.get(key), pos):
                 closing, reason, hand_req = True, "closed by hand", close_one.get(key)

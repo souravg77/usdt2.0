@@ -9,8 +9,12 @@ Spot AI keeps the main database with spot candles only.
 from __future__ import annotations
 
 import os
+import re
+from datetime import datetime, timezone
 
 from ..models import Candle
+
+_DATED = re.compile(r":USDT-(\d{2})(\d{2})(\d{2})$")
 
 
 def futures_db_path(db_path: str, env=None) -> str:
@@ -31,6 +35,37 @@ def db_for(db_path: str, market: str) -> str:
 def perp_symbol(symbol: str) -> str:
     """The ccxt name of a pair's USDT perpetual: BTC/USDT -> BTC/USDT:USDT."""
     return symbol if ":" in symbol else f"{symbol}:{symbol.split('/')[1]}"
+
+
+def is_dated(symbol: str) -> bool:
+    """Whether ``symbol`` is a dated (expiring) Bybit USDT futures contract, named the ccxt way
+    (``BTC/USDT:USDT-261030`` = BTCUSDT-30OCT26), rather than a perpetual."""
+    return bool(_DATED.search(symbol or ""))
+
+
+def expiry_ms(symbol: str) -> int | None:
+    """When a dated contract is delivered (Bybit settles them at 08:00 UTC on the expiry day), or
+    None for a perpetual."""
+    m = _DATED.search(symbol or "")
+    if not m:
+        return None
+    yy, mm, dd = (int(x) for x in m.groups())
+    try:
+        return int(datetime(2000 + yy, mm, dd, 8, tzinfo=timezone.utc).timestamp() * 1000)
+    except ValueError:
+        return None
+
+
+def bybit_name(symbol: str) -> str:
+    """How Bybit's app writes a dated contract (BTC/USDT:USDT-261030 -> BTCUSDT-30OCT26); other
+    symbols are returned as they are."""
+    m = _DATED.search(symbol or "")
+    if not m:
+        return symbol
+    yy, mm, dd = m.groups()
+    months = "JAN FEB MAR APR MAY JUN JUL AUG SEP OCT NOV DEC".split()
+    base = symbol.split("/")[0]
+    return f"{base}USDT-{dd}{months[int(mm) - 1] if 1 <= int(mm) <= 12 else mm}{yy}"
 
 
 class PerpCandles:
