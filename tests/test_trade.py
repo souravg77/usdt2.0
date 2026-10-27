@@ -1048,6 +1048,16 @@ def test_a_futures_long_buys_the_perpetual_with_a_resting_sell_stop(pl):
     assert row["pnl_usdt"] == pytest.approx((105.0 - 100.1) * p["amount"] - fees)
 
 
+def test_a_dated_futures_contract_is_paper_only(pl):
+    make, adapter, paper, events = pl
+    dated = "s1|bybit|BTC/USDT:USDT-261225|1h|futures"
+    _paper(paper, {dated: _pos(SIG)})
+    e = make()
+    out = run(e.tick())
+    assert out["opened"] == [] and adapter.sent == [] and adapter.prepared == []
+    assert "paper trading only" in e.state["skipped"][f"{dated}|{SIG}"]
+
+
 def test_a_futures_long_exits_at_its_stop_and_a_fired_stop_is_booked_once(pl):
     make, adapter, *_ = pl
     e = make()

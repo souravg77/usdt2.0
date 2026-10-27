@@ -18,7 +18,8 @@ from fastapi.responses import PlainTextResponse, RedirectResponse
 
 from ..config import EXCHANGE
 from ..data.store import CandleStore
-from ..market import gainers, squeeze
+from ..data.perp import bybit_name
+from ..market import gainers, perp_limits, squeeze
 from ..market.pairs import configured_symbols, load_ranking, open_paper_symbols, ranked_symbols
 from ..market.regime import current_regimes
 from .app import _csrf, _e, _ms, _q
@@ -45,8 +46,7 @@ def add_pair_routes(app, *, settings, auth, jobs, page, guard, ranking_path: str
 
     @app.post("/pairs/gainers")
     def gainers_switch(request: Request, csrf: str = Form(""), on: str = Form(""), count: str = Form(""),
-                       market: str = Form("futures"), window: str = Form(""), lst: str = Form("", alias="list"),
-                       pick: list[str] = Form([])):
+                       market: str = Form("futures"), window: str = Form(""), contract: str = Form("")):
         user, token, redirect = guard(request)
         if redirect:
             return redirect
@@ -54,35 +54,25 @@ def add_pair_routes(app, *, settings, auth, jobs, page, guard, ranking_path: str
             return PlainTextResponse("bad form token; reload the page", status_code=403)
         market = "spot" if market == "spot" else "futures"
         name = "Spot" if market == "spot" else "Futures"
-        path = gainers.path_for(market)
         if on != "1":
-            gainers.switch(False, path=path, by=user)
-            gone = ("nothing new until a list is on again" if market == "futures" else "back to the usual pairs")
-            return RedirectResponse("/pairs?msg=" + _q(f"{name} pair list off: {name} AI is {gone}. "
+            gainers.switch(False, path=gainers.path_for(market), by=user)
+            return RedirectResponse("/pairs?msg=" + _q(f"{name} top gainers off: {name} AI is back to the usual pairs. "
                                                        "Open trades on them still close normally."), status_code=303)
         if gainer_job():
-            return RedirectResponse("/pairs?error=" + _q("the pair list is already being fetched"), status_code=303)
-        data = gainers.load(path)
-        lst = lst if lst in gainers.LISTS else gainers.list_of(data)
+            return RedirectResponse("/pairs?error=" + _q("the top gainers are already being fetched"), status_code=303)
         n = gainers.clamp_top(count or gainers.DEFAULT_TOP)
-        window = window if window in gainers.WINDOWS else gainers.window_of(data)
-        chosen = gainers.clean_chosen(pick)
-        step = ["pairs", "gainers", "--market", market, "--count", str(n), "--window", window, "--list", lst]
-        if lst == "chosen":
-            step += [x for p in chosen for x in ("--pick", p)]
-            # saved now, so the engine trades them even before the scan fills in their numbers
-            gainers.switch(True, n, path=path, by=user, window=window, list_name=lst, chosen=chosen)
-        label = gainers.LISTS[lst].lower()
-        jobs.submit(f"{name} AI trades: {label}" + ("" if lst == "chosen" else f" (top {n}, {window})"),
-                    [step], meta={"kind": "gainers", "by": user})
-        if lst == "chosen":
-            text = (f"{name} AI now trades the {len(chosen)} pairs you chose." if chosen else
-                    f"Loading every Bybit {name.lower()} pair. When it's done, tick the pairs {name} AI should trade "
-                    "and press Save.")
-        else:
-            text = (f"Scanning Bybit {name.lower()} for the {label} (top {n}, {window}). {name} AI paper trading and "
-                    "the Markets page switch to them as soon as the list arrives.")
-        return RedirectResponse("/pairs?msg=" + _q(text + " The collector downloads their prices on its next pass."),
+        saved = gainers.load(gainers.path_for(market))
+        window = window if window in gainers.WINDOWS else gainers.window_of(saved)
+        step = ["pairs", "gainers", "--market", market, "--count", str(n), "--window", window]
+        kind = name.lower()
+        if market == "futures":  # Perpetual or dated Futures, like Bybit's own switch
+            contract = contract if contract in gainers.CONTRACTS else gainers.contract_of(saved)
+            step += ["--contract", contract]
+            kind = "dated futures" if contract == "dated" else "perpetual"
+        jobs.submit(f"Trade the top {n} {kind} gainers ({window})", [step], meta={"kind": "gainers", "by": user})
+        return RedirectResponse("/pairs?msg=" + _q(f"Scanning Bybit {kind} for the top {n} gainers over {window}. "
+                                                   f"{name} AI paper trading and the Markets page add them as soon as the "
+                                                   "list arrives; the collector downloads their prices on its next pass."),
                                 status_code=303)
 
     def squeeze_job() -> dict | None:
@@ -232,14 +222,18 @@ def _futures_regimes(symbols: list[str], hot: set[str], by_pair: dict, squeezed:
 
 
 def _gainers_card(auth, token, now: int, job, market: str = "futures") -> str:
-    """The admin's dropdown for the list this engine trades, its settings and the latest list."""
+    """One scanner's switch, window and today's scored list."""
     path = gainers.path_for(market)
     name = "Spot" if market == "spot" else "Futures"
     data = gainers.load(path)
     on, top = bool(data.get("on")), gainers.clamp_top(data.get("top", gainers.DEFAULT_TOP))
-    window, lst = gainers.window_of(data), gainers.list_of(data)
+    window = gainers.window_of(data)
     live = gainers.symbols(path, now_ms=now)
-    chosen = gainers.clean_chosen(data.get("chosen"))
+    futures = market != "spot"
+    contract = gainers.contract_of(data) if futures else gainers.DEFAULT_CONTRACT
+    dated = contract == "dated"
+    shown = data.get("pairs", []) if data.get("scanned_contract", gainers.DEFAULT_CONTRACT) == contract else []
+    limits = (perp_limits.load().get("max_leverage") or {}) if futures else {}
 
     def pct(x):
         return "-" if x is None else f'<span class="{"good" if x >= 0 else "bad"}">{x:+.2f}%</span>'
@@ -247,74 +241,71 @@ def _gainers_card(auth, token, now: int, job, market: str = "futures") -> str:
     def num(x, fmt: str, unit: str) -> str:
         return "-" if x is None else f"{x:{fmt}}{unit}"
 
-    shown = data.get("pairs", []) if lst == "chosen" else data.get("pairs", [])[:top]
-    if data.get("list", "gainers") != lst:
-        shown = []  # a list scanned under the previous choice
+    def extra(p) -> str:  # Futures: Bybit's maximum leverage, and when a dated contract expires
+        if not futures:
+            return ""
+        lev = limits.get(p["symbol"])
+        cell = f'<td>{lev:g}x</td>' if lev else "<td>-</td>"
+        return cell + (f'<td>{_ms(p["expiry"])}</td>' if dated and p.get("expiry") else "<td>-</td>" if dated else "")
+
     rows = "".join(
-        f'<tr><td>{_e(p["symbol"])}</td><td><b>{p.get("score", p["change"]):+.1f}</b></td>'
+        f'<tr><td>{_e(bybit_name(p["symbol"]))}</td><td><b>{p.get("score", p["change"]):+.1f}</b></td>'
         f'<td>{pct(p.get("change_1h"))}</td><td>{pct(p.get("change_4h"))}</td><td>{pct(p["change"])}</td>'
         f'<td>{num(p.get("relvol"), ".1f", "x")}</td><td>{num(p.get("spread"), ".3f", "%")}</td>'
-        f'<td>{_usdt(p.get("turnover"))}</td>'
+        f'<td>{_usdt(p.get("turnover"))}</td>{extra(p)}'
         f'<td>{"trading" if p["symbol"] in live else ("<span class=warn>" + _e(p["pump"]) + "</span>" if p.get("pump") else "-")}</td></tr>'
-        for p in shown)
+        for p in shown[:top])
     when = (f"List from {_ms(data['generated'])}, {data.get('scanned', len(data.get('pairs', [])))} candidates scanned."
-            if data.get("generated") else "No list yet.")
-    if lst == "chosen":
-        when = (f"{len(chosen)} pairs chosen." + (f" Prices from {_ms(data['generated'])}." if data.get("generated") else ""))
+            if data.get("generated") and shown else
+            f"No {gainers.CONTRACTS[contract].lower()} list yet: press the button to scan." if data.get("generated")
+            else "No list yet.")
     if job:
         state = f'<span class="warn">scanning</span> (<a href="/jobs/{_e(job["id"])}">job</a>)'
     elif on and live:
         state = f'<span class="good">ON</span>: {len(live)} trading in {name} AI paper'
-    elif on and lst == "chosen":
-        state = '<span class="warn">ON</span>, but no pairs are chosen yet'
     elif on:
         state = '<span class="warn">ON</span>, but the list is missing or old (the collector refreshes it every hour)'
     else:
         state = '<span class="muted">OFF</span>'
     csrf = _csrf(auth, token)
-    lists = "".join(f'<option value="{k}"{" selected" if k == lst else ""}>{_e(v)}</option>'
-                    for k, v in gainers.LISTS.items())
     opts = "".join(f'<option value="{w}"{" selected" if w == window else ""}>{w}</option>' for w in gainers.WINDOWS)
-    universe = data.get("universe") or []
-    ticks = "".join(
-        f'<label class="small" style="display:inline-block;min-width:9em"><input type="checkbox" name="pick" '
-        f'value="{_e(p)}"{" checked" if p in chosen else ""}> {_e(p)}</label>'
-        for p in [*[c for c in chosen if c not in universe], *universe])
-    picker = (f'<details{" open" if lst == "chosen" and not chosen else ""}><summary class="small">Pairs I choose: '
-              f'{len(chosen)} ticked, up to {gainers.MAX_CHOSEN} (used when the list is "Pairs I choose")</summary>'
-              f'<p class="small muted">Every Bybit USDT {"perpetual" if market == "futures" else "spot pair"} open for '
-              'trading, the most traded first.</p>'
-              f'<div style="max-height:24em;overflow:auto">{ticks}</div></details>' if universe else
-              '<p class="small muted">To choose pairs yourself, pick "Pairs I choose" and press Save: that loads '
-              f'every Bybit {"perpetual" if market == "futures" else "spot pair"} to tick from.</p>')
-    form = (f'<form method="post" action="/pairs/gainers">{csrf}<input type="hidden" name="on" value="1">'
-            f'<input type="hidden" name="market" value="{market}"><div class="row">'
-            f'<label class="small">{name} AI trades <select name="list" style="width:11em">{lists}</select></label>'
+    copts = "".join(f'<option value="{c}"{" selected" if c == contract else ""}>{_e(label)}</option>'
+                    for c, label in gainers.CONTRACTS.items())
+    form = (f'<form method="post" action="/pairs/gainers" class="row">{csrf}<input type="hidden" name="on" value="1">'
+            f'<input type="hidden" name="market" value="{market}">'
             f'<label class="small">Top <input type="number" name="count" min="{gainers.MIN_TOP}" max="{gainers.MAX_TOP}" '
             f'value="{top}" style="width:4.5em"></label>'
             f'<label class="small">over <select name="window" style="width:5em">{opts}</select></label>'
-            f'<button{" disabled" if job else ""}>{"Save" if on else "Trade this list"}</button></div>{picker}</form>')
+            + (f'<label class="small">Contract <select name="contract">{copts}</select></label>' if futures else "")
+            + f'<button{" disabled" if job else ""}>{"Refresh" if on else "Trade the top gainers"}</button></form>')
     if on:
         form += (f'<form method="post" action="/pairs/gainers" class="row">{csrf}<input type="hidden" name="on" value="0">'
                  f'<input type="hidden" name="market" value="{market}">'
-                 f'<button class="ghost">Stop trading this list</button></form>')
+                 '<button class="ghost">Stop trading the top gainers</button></form>')
+    heads = ("<th>Max leverage</th>" + ("<th>Expires</th>" if dated else "")) if futures else ""
     table = ('<table><tr><th>Pair</th><th>Score</th><th>1h</th><th>4h</th><th>24h</th><th>Rel. volume</th>'
-             f'<th>Spread</th><th>Turnover</th><th>Paper</th></tr>{rows}</table>' if rows else "")
-    what = ("Bybit USDT spot pairs. Spot AI buys them, next to its usual pairs." if market == "spot" else
-            "Bybit USDT perpetual futures. Futures AI trades only this list, long and short, on the perpetuals' own "
-            "candles (never spot prices).")
-    return (f'<div class="card"><h3>{name} AI pair list: {_e(gainers.LISTS[lst])}</h3>'
-            f'<p>{state}. ' + ("" if lst in ("chosen", "volume", "new") else f'Window <b>{_e(window)}</b>. ') +
-            f'{_e(when)}</p><p class="small muted">{what} Choose the list in the dropdown: <b>Top gainers</b> (biggest '
-            'risers over the window), <b>Top losers</b> (biggest fallers), <b>Most traded</b> (24h turnover), '
-            f'<b>New listings</b> (last {gainers.NEW_DAYS} days, newest first) or <b>Pairs I choose</b> (tick them '
-            f'below). Scanned lists keep pairs with over {gainers.MIN_TURNOVER / 1e6:.0f}M USDT of 24h turnover (new '
-            f'listings {gainers.NEW_MIN_TURNOVER / 1e6:.0f}M) and a spread of at most {gainers.MAX_SPREAD_PCT:g}%. '
-            f'Gainers score = rise over the window (%) + 2 x (relative volume - 1), at most +6, - 5 x spread (%); losers '
-            'the same with the fall; the others show their turnover in millions. Up over '
+             f'<th>Spread</th><th>Turnover</th>{heads}<th>Paper</th></tr>{rows}</table>' if rows else "")
+    if not futures:
+        what = "Bybit USDT spot pairs. Spot AI buys them."
+    elif dated:
+        what = ("Bybit dated USDT futures (they expire on a set day, like BTCUSDT-30OCT26). Bybit lists only a few, "
+                "mostly BTC, ETH and SOL, so the list is short. Futures AI trades them long and short on their own "
+                f"candles, in paper only: real-money trading stays on the perpetuals. Contracts expiring within "
+                f"{gainers.DATED_MIN_HOURS_LEFT} hours are left out and a paper trade closes an hour before expiry. "
+                "A new weekly contract has little history, so the 4h and 1d strategies may need weeks before they "
+                "can read it.")
+    else:
+        what = ("Bybit USDT perpetual futures (no expiry, the highest leverage: up to 100x on BTC). Futures AI trades "
+                "them long and short, on the perpetuals' own candles (never spot prices).")
+    floor = gainers.DATED_MIN_TURNOVER if dated else gainers.MIN_TURNOVER
+    title = f"Futures top gainers: {gainers.CONTRACTS[contract]}" if futures else f"{name} top gainers"
+    return (f'<div class="card"><h3>{_e(title)}</h3><p>{state}. Window <b>{_e(window)}</b>. {_e(when)}</p>'
+            f'<p class="small muted">{what} Kept: over {floor / 1e6:g}M USDT of 24h turnover, spread '
+            f'at most {gainers.MAX_SPREAD_PCT:g}%. Score = rise over the window (%) + 2 x (relative volume - 1), at most '
+            '+6, - 5 x spread (%). Up over '
             f'{gainers.PUMP_1H_PCT:g}% in an hour or {gainers.PUMP_24H_PCT:g}% in a day is flagged as a pump and not '
-            'traded (except pairs you chose). Being on the list is not a buy signal: the strategies still decide, with '
-            'the usual risk limits. Refreshed every hour while on.</p>'
+            'traded. A high score is not a buy signal: the strategies still decide, with the usual risk limits. '
+            'Refreshed every hour while on.</p>'
             f'{form}{table}</div>')
 
 

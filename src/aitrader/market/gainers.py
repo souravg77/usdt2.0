@@ -1,20 +1,15 @@
-"""The traded pair list: two scanners, one per trading workspace (the admin's dropdown on the Pairs
-page picks which list each one makes; top gainers by default).
+"""Top gainers: two scanners, one per trading workspace.
 
-Lists (``LISTS``), all from Bybit's public market data:
+- **Futures** (``DEFAULT_PATH``): Bybit USDT linear contracts that are open for trading, with or
+  without a spot listing: Futures AI reads only their own data (``data.perp``) and trades them. The
+  admin picks the contract type, like Bybit's own Perpetual / Futures switch:
 
-- **Top gainers** (``gainers``): the biggest risers, scored as below.
-- **Top losers** (``losers``): the biggest fallers over the window (shorts on Futures, dips on Spot).
-- **Most traded** (``volume``): the highest 24h turnover.
-- **New listings** (``new``): listed in the last ``NEW_DAYS`` days, newest first (only where Bybit
-  gives a listing date), with a lower turnover floor (``NEW_MIN_TURNOVER``).
-- **Pairs I choose** (``chosen``): the admin ticks pairs from every USDT pair (spot) or USDT
-  perpetual (futures) that is open for trading; each scan saves that full list (``universe``).
-
-Top gainers in detail:
-
-- **Futures** (``DEFAULT_PATH``): Bybit USDT linear perpetuals that are open for trading, with
-  or without a spot listing: Futures AI reads only perpetual data (``data.perp``) and trades them.
+  - ``perpetual`` (default): the USDT perpetuals (no expiry, up to 100x on BTC).
+  - ``dated``: the dated USDT futures that expire on a set day (BTCUSDT-30OCT26, saved as
+    ``BTC/USDT:USDT-261030``). Bybit lists only a few of them, mostly BTC, ETH and SOL, with less
+    turnover, so their own lower turnover floor (``DATED_MIN_TURNOVER``) applies. Contracts that
+    expire within ``DATED_MIN_HOURS_LEFT`` hours are left out, paper positions on one are closed an
+    hour before it expires, and they are paper only: the live executor never trades them.
 - **Spot** (``SPOT_PATH``): Bybit USDT spot pairs. Spot AI trades them.
 
 Each scanner has its own switch on the Pairs page, its own count and its own window (1h, 4h or 24h).
@@ -47,6 +42,7 @@ import json
 import os
 import time
 
+from ..data.perp import expiry_ms
 from .pairs import is_leveraged_token, is_stablecoin
 
 DEFAULT_PATH = "data/pairs/gainers.json"  # the Futures scanner (its name from before the spot one)
@@ -61,16 +57,12 @@ PUMP_1H_PCT, PUMP_24H_PCT = 15.0, 60.0
 DEFAULT_TOP = 10
 MIN_TOP, MAX_TOP = 3, 30
 MIN_TURNOVER = 10_000_000  # USDT of 24h perp turnover
+CONTRACTS = {"perpetual": "Perpetual", "dated": "Futures (dated)"}
+DEFAULT_CONTRACT = "perpetual"
+DATED_MIN_TURNOVER = 100_000  # dated contracts trade far less than the perpetuals
+DATED_MIN_HOURS_LEFT = 48
 REFRESH_MS = 3_600_000
 MAX_AGE_HOURS = 6.0
-DAY_MS = 86_400_000
-LISTS = {"gainers": "Top gainers", "losers": "Top losers", "volume": "Most traded", "new": "New listings",
-         "chosen": "Pairs I choose"}
-DEFAULT_LIST = "gainers"
-NEW_DAYS = 30
-NEW_MIN_TURNOVER = 1_000_000
-UNIVERSE_MIN_TURNOVER = 100_000  # the full list to choose from leaves out pairs nobody trades
-MAX_CHOSEN = MAX_TOP
 
 
 def path_for(market: str) -> str:
@@ -82,26 +74,10 @@ def window_of(data: dict) -> str:
     return w if w in WINDOWS else DEFAULT_WINDOW
 
 
-def list_of(data: dict) -> str:
-    lst = data.get("list")
-    return lst if lst in LISTS else DEFAULT_LIST
-
-
-def list_name(data: dict, market: str = "futures") -> str:
-    """"Futures top gainers", "Spot pairs I choose"... for messages and titles."""
-    return f"{'Spot' if market == 'spot' else 'Futures'} {LISTS[list_of(data)].lower()}"
-
-
-def clean_chosen(pairs) -> list[str]:
-    """``BTC/USDT``-style pairs, upper case, no repeats, at most ``MAX_CHOSEN``."""
-    out = []
-    for p in pairs or []:
-        p = str(p).strip().upper()
-        if p and "/" not in p:
-            p = f"{p.removesuffix('USDT')}/USDT"
-        if p.endswith("/USDT") and len(p) > 5 and p not in out:
-            out.append(p)
-    return out[:MAX_CHOSEN]
+def contract_of(data: dict) -> str:
+    """The Futures contract type the admin chose: "perpetual" or "dated"."""
+    c = data.get("contract")
+    return c if c in CONTRACTS else DEFAULT_CONTRACT
 
 
 def clamp_top(n) -> int:
@@ -130,25 +106,23 @@ def save(data: dict, path: str = DEFAULT_PATH) -> None:
 
 
 def switch(on: bool, top: int | None = None, path: str = DEFAULT_PATH, by: str = "",
-           window: str | None = None, list_name: str | None = None, chosen: list[str] | None = None) -> dict:
+           window: str | None = None, contract: str | None = None) -> dict:
     data = load(path)
     data.update(on=bool(on), top=clamp_top(top if top is not None else data.get("top", DEFAULT_TOP)), by=by,
                 window=window if window in WINDOWS else window_of(data),
-                list=list_name if list_name in LISTS else list_of(data))
-    if chosen is not None:
-        data["chosen"] = clean_chosen(chosen)
+                contract=contract if contract in CONTRACTS else contract_of(data))
     save(data, path)
     return data
 
 
 def symbols(path: str = DEFAULT_PATH, now_ms: int | None = None, max_age_hours: float = MAX_AGE_HOURS) -> list[str]:
-    """The pairs to trade now from the list the admin picked: [] when the switch is off or a scanned
-    list is missing or stale. The admin's own pairs (``chosen``) need no scan."""
+    """The gainers to trade now: [] when the switch is off, the list is missing or stale, or it was
+    scanned for the other contract type (the admin just switched Perpetual / Futures)."""
     data = load(path)
     now_ms = now_ms or int(time.time() * 1000)
-    if data.get("on") and list_of(data) == "chosen":
-        return clean_chosen(data.get("chosen"))
     if not data.get("on") or not data.get("generated") or now_ms - int(data["generated"]) > max_age_hours * 3_600_000:
+        return []
+    if data.get("scanned_contract", DEFAULT_CONTRACT) != contract_of(data):
         return []
     return [p["symbol"] for p in data.get("pairs", []) if not p.get("pump")][: clamp_top(data.get("top", DEFAULT_TOP))]
 
@@ -169,27 +143,31 @@ def _spread_pct(t: dict) -> float | None:
 
 def pick(markets: dict, tickers: dict, top: int = DEFAULT_TOP, min_turnover: float = MIN_TURNOVER,
          market: str = "futures", max_spread: float = MAX_SPREAD_PCT, window: str = "24h",
-         list_name: str = DEFAULT_LIST, now_ms: int | None = None) -> list[dict]:
-    """The candidates for one list, before scoring. Top gainers: the ``top`` biggest 24h risers that
-    pass the filters; on a 1h or 4h ``window`` the ``top`` most traded that pass, up or down on the
-    day (their 1h/4h move is read from candles afterwards). Top losers the same, falling. Most
-    traded: by 24h turnover. New listings: listed in the last ``NEW_DAYS`` days, newest first.
-    ``markets`` and ``tickers`` are ccxt's ``load_markets`` / ``fetch_tickers`` results for that market."""
-    from .pairs import _listed_ms
-
+         contract: str = DEFAULT_CONTRACT, now_ms: int | None = None) -> list[dict]:
+    """The ``top`` biggest 24h risers that pass the filters, before scoring; on a 1h or 4h
+    ``window`` the ``top`` most traded that pass, up or down on the day (their 1h/4h rise is read
+    from candles afterwards). ``markets`` and ``tickers`` are ccxt's ``load_markets`` /
+    ``fetch_tickers`` results for that market. On Futures, ``contract`` "dated" takes the dated
+    USDT futures instead of the perpetuals (named by their ccxt name, BTC/USDT:USDT-261030)."""
+    dated = market != "spot" and contract == "dated"
+    if dated:
+        min_turnover = min(min_turnover, DATED_MIN_TURNOVER)
     now_ms = now_ms or int(time.time() * 1000)
-    if list_name == "new":
-        min_turnover = min(min_turnover, NEW_MIN_TURNOVER)
     rows = []
     for sym, m in markets.items():
         if market == "spot":
             if not (m.get("spot") and m.get("quote") == "USDT" and m.get("active", True)):
                 continue
-        elif not (m.get("swap") and m.get("linear") and m.get("quote") == "USDT" and m.get("settle") == "USDT"
-                  and m.get("active", True)):
+        elif not (m.get("future" if dated else "swap") and m.get("linear") and m.get("quote") == "USDT"
+                  and m.get("settle") == "USDT" and m.get("active", True)):
             continue
         base = m.get("base") or ""
-        pair = f"{base}/USDT"
+        pair = sym if dated else f"{base}/USDT"
+        expiry = None
+        if dated:
+            expiry = m.get("expiry") or expiry_ms(sym)
+            if not expiry or expiry - now_ms < DATED_MIN_HOURS_LEFT * 3_600_000:
+                continue
         if is_stablecoin(base) or is_leveraged_token(base):
             continue
         t = tickers.get(sym) or {}
@@ -201,31 +179,14 @@ def pick(markets: dict, tickers: dict, top: int = DEFAULT_TOP, min_turnover: flo
             continue
         row = {"symbol": pair, "contract": sym, "change": round(float(change), 2), "turnover": float(turnover),
                "price": t.get("last"), "spread": None if spread is None else round(spread, 4)}
-        if list_name == "new":
-            listed = _listed_ms(m)
-            if not listed or now_ms - listed > NEW_DAYS * DAY_MS:
-                continue
-            row["listed"] = listed
+        if expiry:
+            row["expiry"] = int(expiry)
         rows.append(row)
-    n = max(1, int(top))
-    if list_name == "new":
-        return sorted(rows, key=lambda r: r["listed"], reverse=True)[:n]
-    if list_name == "volume" or window in ("1h", "4h"):
+    if window in ("1h", "4h"):
         rows.sort(key=lambda r: r["turnover"], reverse=True)
-        return rows[:n]
-    if list_name == "losers":
-        rows.sort(key=lambda r: r["change"])
-        return [r for r in rows if r["change"] < 0][:n]
+        return rows[:max(1, int(top))]
     rows.sort(key=lambda r: r["change"], reverse=True)
-    return [r for r in rows if r["change"] > 0][:n]
-
-
-def universe(markets: dict, tickers: dict, market: str = "futures") -> list[dict]:
-    """Every pair the admin can choose from: open for trading, quoted in USDT, not a stablecoin or a
-    leveraged token, with some 24h turnover; the most traded first."""
-    rows = pick(markets, tickers, top=10_000, min_turnover=UNIVERSE_MIN_TURNOVER, market=market,
-                max_spread=float("inf"), list_name="volume")
-    return [{"symbol": r["symbol"], "turnover": r["turnover"], "change": r["change"]} for r in rows]
+    return [r for r in rows if r["change"] > 0][:max(1, int(top))]
 
 
 def pump_warning(row: dict) -> str:
@@ -237,16 +198,12 @@ def pump_warning(row: dict) -> str:
     return ""
 
 
-def score(row: dict, window: str = DEFAULT_WINDOW, list_name: str = DEFAULT_LIST) -> float:
-    """The open score. Top gainers: the rise over the window, plus a capped bonus for unusual volume,
-    minus the spread. Top losers: the fall instead of the rise. Most traded, new listings and the
-    admin's own pairs: the 24h turnover in millions of USDT."""
-    if list_name in ("volume", "new", "chosen"):
-        return round((row.get("turnover") or 0.0) / 1e6, 1)
-    move = row.get({"1h": "change_1h", "4h": "change_4h"}.get(window, "change")) or 0.0
+def score(row: dict, window: str = DEFAULT_WINDOW) -> float:
+    """The open score: the rise over the window, plus a capped bonus for unusual volume, minus the spread."""
+    rise = row.get({"1h": "change_1h", "4h": "change_4h"}.get(window, "change")) or 0.0
     relvol = row.get("relvol")
     bonus = 0.0 if relvol is None else max(-2.0, min(6.0, 2.0 * (relvol - 1.0)))
-    return round((-move if list_name == "losers" else move) + bonus - 5.0 * (row.get("spread") or 0.0), 2)
+    return round(rise + bonus - 5.0 * (row.get("spread") or 0.0), 2)
 
 
 def enrich(row: dict, ohlcv: list) -> dict:
@@ -265,22 +222,15 @@ def enrich(row: dict, ohlcv: list) -> dict:
     return out
 
 
-def rank(rows: list[dict], window: str = DEFAULT_WINDOW, list_name: str = DEFAULT_LIST) -> list[dict]:
-    """Score, flag pumps, and order: the best first. Top gainers keep rises over the window only,
-    top losers falls only; new listings stay newest first; the admin's own pairs stay in their order."""
+def rank(rows: list[dict], window: str = DEFAULT_WINDOW) -> list[dict]:
+    """Score, flag pumps, and order: the best first, rises over the window only."""
     out = []
     for r in rows:
-        # a fall is never a pump; the admin's own pairs trade as chosen
-        pump = "" if list_name in ("losers", "chosen") else pump_warning(r)
-        r = {**r, "score": score(r, window, list_name), "pump": pump}
-        move = r.get({"1h": "change_1h", "4h": "change_4h"}.get(window, "change"))
-        if list_name == "gainers" and not (move is not None and move > 0):
-            continue
-        if list_name == "losers" and not (move is not None and move < 0):
-            continue
-        out.append(r)
-    if list_name in ("gainers", "losers", "volume"):
-        out.sort(key=lambda r: r["score"], reverse=True)
+        r = {**r, "score": score(r, window), "pump": pump_warning(r)}
+        rise = r.get({"1h": "change_1h", "4h": "change_4h"}.get(window, "change"))
+        if rise is not None and rise > 0:
+            out.append(r)
+    out.sort(key=lambda r: r["score"], reverse=True)
     return out
 
 
@@ -314,34 +264,24 @@ async def refresh(client, path: str = DEFAULT_PATH, top: int | None = None, now_
     data = load(path)
     top = clamp_top(top if top is not None else data.get("top", DEFAULT_TOP))
     window = window if window in WINDOWS else window_of(data)
-    lst = list_of(data)
-    now_ms = now_ms or int(time.time() * 1000)
     markets = await client.load_markets()
     if market == "futures" and limits_path:
         from . import perp_limits
 
         perp_limits.save(perp_limits.from_markets(markets), limits_path, now_ms)
     tickers = await client.fetch_tickers()
-    everything = universe(markets, tickers, market)
-    if lst == "chosen":  # the admin's own pairs: their numbers, in the admin's order
-        chosen = clean_chosen(data.get("chosen"))
-        rows = pick(markets, tickers, top=10_000, min_turnover=0, market=market, max_spread=float("inf"),
-                    list_name="volume")
-        by_pair = {r["symbol"]: r for r in rows}
-        cands = [by_pair[p] for p in chosen if p in by_pair]
-    else:
-        short = window in ("1h", "4h")
-        cands = pick(markets, tickers, top=CANDIDATES_SHORT if short and lst in ("gainers", "losers") else CANDIDATES,
-                     market=market, window=window, list_name=lst, now_ms=now_ms)
+    now_ms = now_ms or int(time.time() * 1000)
+    contract = contract_of(data) if market == "futures" else DEFAULT_CONTRACT
     rows = []
-    for r in cands:
+    short = window in ("1h", "4h")
+    for r in pick(markets, tickers, top=CANDIDATES_SHORT if short else CANDIDATES, market=market, window=window,
+                  contract=contract, now_ms=now_ms):
         try:
             r = enrich(r, await client.fetch_ohlcv(r["contract"], "1h", limit=26))
         except Exception as exc:  # one coin's candles failing must not stop the scan
-            logging.getLogger(__name__).warning("pair list: no candles for %s: %s", r["symbol"], exc)
+            logging.getLogger(__name__).warning("gainers: no candles for %s: %s", r["symbol"], exc)
         rows.append(r)
-    data.update(top=top, window=window, market=market, generated=now_ms, list=lst,
-                scanned=len(rows), pairs=rank(rows, window, lst)[:MAX_TOP],  # ``top`` decides what trades
-                universe=[u["symbol"] for u in everything])
+    data.update(top=top, window=window, market=market, generated=now_ms, scanned_contract=contract,
+                scanned=len(rows), pairs=rank(rows, window)[:MAX_TOP])  # ``top`` decides what trades
     save(data, path)
     return data

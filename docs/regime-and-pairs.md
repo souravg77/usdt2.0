@@ -101,22 +101,22 @@ results look better than real trading would have been. Treat multi-year results 
 as an upper bound. The fixed list has the same problem to a smaller degree, because it was also
 picked from today's most-traded coins.
 
-## The pair list each engine trades (admin dropdown)
+## Futures top gainers: Perpetual or Futures (dated)
 
-On the Pairs page, each engine (in its own view) has one card, "Spot AI pair list" or "Futures AI
-pair list". Its dropdown picks which Bybit list that engine trades (`market/gainers.py`):
+The Futures view's top gainers card has a **Contract** switch, like Bybit's own Perpetual / Futures
+choice:
 
-| Choice | What it is |
-|---|---|
-| Top gainers | the biggest risers over 1h, 4h or 24h, scored (the default, as before) |
-| Top losers | the biggest fallers over the window (Futures shorts, Spot dips) |
-| Most traded | the highest 24h turnover |
-| New listings | listed in the last 30 days, newest first (1M USDT turnover floor) |
-| Pairs I choose | the admin ticks up to 30 pairs from every Bybit USDT pair (Spot) or USDT perpetual (Futures) open for trading |
+| Contract | What Futures AI trades | Leverage | Real money |
+|---|---|---|---|
+| Perpetual (default) | the top gainers among the USDT perpetuals | each coin's own maximum (up to 100x on BTC; paper only above 3x) | yes, behind the usual live gate, 3x max |
+| Futures (dated) | the top gainers among the dated USDT futures (BTCUSDT-30OCT26 and so on) | each contract's own maximum, read from Bybit | never: paper only |
 
-Futures AI trades only that list (plus pairs it still holds). Spot AI trades it next to its usual
-pairs. Scanned lists refresh every hour while on. The pairs you choose trade as soon as you press
-Save, with no scan. Each scan also saves the full list of pairs to choose from. Same thing on the
-command line:
-`aitrader pairs gainers --market futures --list chosen --pick BTC/USDT --pick SOL/USDT`
-(`--list gainers|losers|volume|new|chosen`).
+Switching scans that contract type afresh; the other type's list is not traded in the meantime.
+Dated contracts are few (mostly BTC, ETH and SOL) and trade less, so they need only 0.1M USDT of
+24h turnover. Contracts that expire within 48 hours are left out, and a paper trade on one closes an
+hour before Bybit settles it (08:00 UTC on the expiry day). A weekly contract has only a few weeks of
+candles, so strategies on 4h and 1d may not have enough history to read it.
+
+```
+docker compose run --rm -T collector pairs gainers --market futures --contract dated
+```

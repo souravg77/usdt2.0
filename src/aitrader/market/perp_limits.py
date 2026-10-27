@@ -26,7 +26,8 @@ def load(path: str = DEFAULT_PATH) -> dict:
 
 
 def max_leverage(symbol: str, path: str = DEFAULT_PATH) -> float | None:
-    """Bybit's maximum leverage for ``symbol``'s USDT perpetual (BTC/USDT), or None if unknown."""
+    """Bybit's maximum leverage for ``symbol``'s USDT perpetual (BTC/USDT) or for a dated contract
+    (BTC/USDT:USDT-261030), or None if unknown."""
     v = (load(path).get("max_leverage") or {}).get(symbol)
     try:
         return float(v) if v else None
@@ -40,14 +41,16 @@ def due(path: str = DEFAULT_PATH, now_ms: int | None = None) -> bool:
 
 
 def from_markets(markets: dict) -> dict:
-    """{"BTC/USDT": 100.0, ...} from ccxt's ``load_markets`` (USDT linear perpetuals only)."""
+    """{"BTC/USDT": 100.0, "BTC/USDT:USDT-261030": 100.0, ...} from ccxt's ``load_markets``: the USDT
+    linear perpetuals under the pair's name, the dated USDT futures under their own ccxt name."""
     out = {}
-    for m in markets.values():
-        if not (m.get("swap") and m.get("linear") and m.get("quote") == "USDT" and m.get("settle") == "USDT"):
+    for sym, m in markets.items():
+        if not ((m.get("swap") or m.get("future")) and m.get("linear") and m.get("quote") == "USDT"
+                and m.get("settle") == "USDT"):
             continue
         top = ((m.get("limits") or {}).get("leverage") or {}).get("max")
         if top:
-            out[f"{m.get('base')}/USDT"] = float(top)
+            out[f"{m.get('base')}/USDT" if m.get("swap") else sym] = float(top)
     return out
 
 
