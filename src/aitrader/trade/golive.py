@@ -59,10 +59,26 @@ class _R:
         self.r, self.cost_r = float(r), 0.0
 
 
-def passed_backtest(entry) -> bool:
-    """The strategy's latest backtest ran on data and passed the backtest gate."""
-    bt = entry.backtest or {}
+MARKETS = ("spot", "futures")
+
+
+def _bt(entry, market: str = "spot") -> dict:
+    """The strategy's backtest for one engine: spot candles for Spot AI, the perpetuals' for Futures AI."""
+    return (entry.backtest_futures if market == "futures" else entry.backtest) or {}
+
+
+def passed_backtest(entry, market: str = "spot") -> bool:
+    """The strategy's latest backtest for that engine ran on data and passed the backtest gate."""
+    bt = _bt(entry, market)
     return not bt.get("failed") and (bt.get("out_of_sample") or {}).get("trades", 0) > 0
+
+
+def trade_market(t: dict) -> str:
+    """The engine a paper trade belongs to: Spot AI or Futures AI."""
+    from ..learn import wallet
+
+    m = t.get("market")
+    return m if m in MARKETS else wallet.market_of(t)
 
 
 class GoLive:
@@ -102,32 +118,37 @@ class GoLive:
 
     # ---- the gate -------------------------------------------------------------------------------
 
-    def _strategies(self, ids: list[str] | None):
+    def _strategies(self, ids: list[str] | None, market: str = "spot"):
         from ..learn import Registry
 
         reg = Registry(self.registry_path)
         if ids:
             entries = [reg.get(i) for i in ids]
         else:  # paper trading also runs strategies that failed or skipped the backtest: not live candidates
-            entries = [e for e in reg.with_status("paper") if passed_backtest(e)]
+            entries = [e for e in reg.with_status("paper") if passed_backtest(e, market)]
         return reg, entries
 
-    def evaluate(self, strategy_ids: list[str] | None = None) -> dict:
+    def evaluate(self, strategy_ids: list[str] | None = None, market: str = "spot") -> dict:
+        """The gate for one engine: Spot AI (spot buys) or Futures AI (perpetual longs). A strategy
+        is judged only on that engine's paper trades and backtest, and an approval covers only it."""
+        if market not in MARKETS:
+            raise ValueError("market must be spot or futures")
         cfg, now = self.cfg, self.clock()
-        _reg, entries = self._strategies(strategy_ids)
+        _reg, entries = self._strategies(strategy_ids, market)
         ids = {e.id for e in entries}
         try:
             with open(self.paper_state, encoding="utf-8") as fh:
                 paper = json.load(fh)
         except (OSError, ValueError):
             paper = {"trades": []}
-        trades = sorted((t for t in paper.get("trades", []) if t.get("entry_id") in ids),
+        trades = sorted((t for t in paper.get("trades", [])
+                         if t.get("entry_id") in ids and trade_market(t) == market),
                         key=lambda t: t["exit_ts"])
         m = metrics([_R(t["r"]) for t in trades])
-        bt = [(e.backtest.get("out_of_sample") or {}) for e in entries]
+        bt = [(_bt(e, market).get("out_of_sample") or {}) for e in entries]
         bt_n = sum(b.get("trades", 0) for b in bt)
         bt_exp = (sum(b.get("expectancy_r", 0) * b.get("trades", 0) for b in bt) / bt_n) if bt_n else 0.0
-        bt_ok = bool(entries) and all(passed_backtest(e) and (e.backtest.get("out_of_sample") or {})
+        bt_ok = bool(entries) and all(passed_backtest(e, market) and (_bt(e, market).get("out_of_sample") or {})
                                       .get("expectancy_r", 0) > 0 for e in entries)
         each = {}
         for t in trades:
@@ -138,7 +159,9 @@ class GoLive:
         stab_ok, stab_text = self._stability(now)
         att = self._load("attestations.json")
         kill_ok, kill_text = self._kill_tested(now, att)
+        engine = "Futures AI" if market == "futures" else "Spot AI"
         rows = [
+            ("Engine", "one engine per approval", engine, True),
             ("Strategies selected", "at least 1, status paper",
              ", ".join(sorted(ids)) or "none", bool(entries) and all(e.status == "paper" for e in entries)),
             ("Paper trades completed", f">= {cfg.min_paper_trades}", str(m["trades"]),
@@ -160,7 +183,7 @@ class GoLive:
              "(aitrader golive attest kill_switch)",
              kill_text, kill_ok),
         ]
-        report = {"at": now, "strategies": sorted(ids), "config": asdict(cfg),
+        report = {"at": now, "market": market, "strategies": sorted(ids), "config": asdict(cfg),
                   "criteria": [{"name": n, "threshold": t, "value": v, "passed": bool(p)} for n, t, v, p in rows],
                   "paper": {k: m[k] for k in ("trades", "expectancy_r", "max_drawdown_r", "win_rate")},
                   "backtest_expectancy_r": bt_exp}
@@ -204,24 +227,26 @@ class GoLive:
         return {"strategies": {e.id: json.dumps(e.spec, sort_keys=True) if e.spec else e.name for e in entries},
                 "ai_model": ModelRegistry(self.models_dir).active}
 
-    def approve(self, strategy_ids: list[str], by: str, confirmation: str, max_strategies: int = 2) -> dict:
-        """LIVE ENABLED for named strategies. ``confirmation`` is what the person typed at the
-        terminal; it must be exactly ``confirmation_phrase(strategy_ids)``."""
+    def approve(self, strategy_ids: list[str], by: str, confirmation: str, max_strategies: int = 2,
+                market: str = "spot") -> dict:
+        """LIVE ENABLED for named strategies on one engine (``market``). ``confirmation`` is what the
+        person typed at the terminal; it must be exactly ``confirmation_phrase(strategy_ids, market)``."""
         if not by:
             raise ValueError("say who approves (--by)")
         if not strategy_ids or len(strategy_ids) > max_strategies:
             raise ValueError(f"the pilot runs 1 to {max_strategies} named strategies")
-        if confirmation != confirmation_phrase(strategy_ids):
+        if confirmation != confirmation_phrase(strategy_ids, market):
             raise ValueError("not confirmed: type the phrase exactly as shown")
-        report = self.evaluate(strategy_ids)
+        report = self.evaluate(strategy_ids, market)
         if not report["passed"]:
             failed = [c["name"] for c in report["criteria"] if not c["passed"]]
             raise ValueError("the go/no-go gate does not pass: " + ", ".join(failed))
-        approval = {"by": by, "at": self.clock(), "report": report, **self._fingerprint(strategy_ids),
-                    "confirmation": confirmation}
+        approval = {"by": by, "at": self.clock(), "market": market, "report": report,
+                    **self._fingerprint(strategy_ids), "confirmation": confirmation}
         approval["seal"] = _seal(approval)
         self._save("approval.json", approval)
-        self.events.emit("gate", f"go-live approved by {by} for {', '.join(strategy_ids)}", level="warning")
+        self.events.emit("gate", f"go-live approved by {by} for {', '.join(strategy_ids)} "
+                         f"({'Futures AI' if market == 'futures' else 'Spot AI'} only)", level="warning")
         return approval
 
     def revoke(self, by: str = "") -> None:
@@ -229,8 +254,8 @@ class GoLive:
             self._save("approval.json", {})
             self.events.emit("gate", f"go-live approval revoked{' by ' + by if by else ''}", level="warning")
 
-    def guard(self, entry_id: str) -> list[str]:
-        """Problems that block a live entry for this strategy (empty = allowed)."""
+    def guard(self, entry_id: str, market: str = "spot") -> list[str]:
+        """Problems that block a live entry for this strategy on this engine (empty = allowed)."""
         a = self._load("approval.json")
         if not a:
             return ["no go-live approval (aitrader golive approve)"]
@@ -238,6 +263,10 @@ class GoLive:
             return ["the approval file was edited or not made by `golive approve`: back to paper"]
         if entry_id not in a["strategies"]:
             return [f"{entry_id} is not one of the approved strategies"]
+        approved = approval_market(a)
+        if market != approved:
+            return [f"{entry_id} is approved for {'Futures AI' if approved == 'futures' else 'Spot AI'} only; "
+                    "its paper results on the other engine were not judged"]
         now = self._fingerprint(list(a["strategies"]))
         problems = []
         if now["strategies"].get(entry_id) != a["strategies"][entry_id]:
@@ -263,10 +292,17 @@ class GoLive:
         return None
 
 
-def confirmation_phrase(strategy_ids: list[str]) -> str:
-    """What the person types to approve: it names the strategies, so a phrase typed for one set
-    doesn't approve another."""
-    return f"I approve {', '.join(sorted(strategy_ids))} for real-money trading"
+def confirmation_phrase(strategy_ids: list[str], market: str = "spot") -> str:
+    """What the person types to approve: it names the strategies and the engine, so a phrase typed
+    for one set (or one engine) doesn't approve another."""
+    where = "Futures" if market == "futures" else "Spot"
+    return f"I approve {', '.join(sorted(strategy_ids))} for real-money {where} trading"
+
+
+def approval_market(a: dict) -> str:
+    """The engine an approval covers."""
+    m = a.get("market") or (a.get("report") or {}).get("market")
+    return m if m in MARKETS else "spot"
 
 
 def _seal(approval: dict) -> str:
@@ -283,7 +319,7 @@ def approval_intact(a: dict) -> bool:
     ``.env`` is a separate step."""
     try:
         return (a.get("seal") == _seal(a)
-                and a.get("confirmation") == confirmation_phrase(list(a["strategies"]))
+                and a.get("confirmation") == confirmation_phrase(list(a["strategies"]), approval_market(a))
                 and bool((a.get("report") or {}).get("passed")) and bool(a.get("by")))
     except (KeyError, TypeError, AttributeError):
         return False

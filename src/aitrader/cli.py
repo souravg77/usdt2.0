@@ -1442,7 +1442,7 @@ async def _trade_run(s: Settings, args, control) -> int:
     return 0
 
 
-def confirm_live_approval(strategy_ids: list[str], ask=input, isatty=None) -> str | None:
+def confirm_live_approval(strategy_ids: list[str], ask=input, isatty=None, market: str = "spot") -> str | None:
     """LIVE ENABLED needs a person at a terminal typing the phrase that names the strategies.
     There is deliberately no --yes flag, and piped input is refused. Returns what was typed, or
     None when it wasn't confirmed."""
@@ -1452,8 +1452,9 @@ def confirm_live_approval(strategy_ids: list[str], ask=input, isatty=None) -> st
         print("approving live trading needs a person: run it in a terminal "
               "(with docker: `docker compose run --rm -it collector golive approve ...`)", file=sys.stderr)
         return None
-    phrase = confirmation_phrase(strategy_ids)
-    print("This lets the live executor place REAL orders with real money for: " + ", ".join(sorted(strategy_ids)))
+    phrase = confirmation_phrase(strategy_ids, market)
+    print("This lets the live executor place REAL orders with real money for: " + ", ".join(sorted(strategy_ids))
+          + (" on Futures AI (perpetual longs) only" if market == "futures" else " on Spot AI (spot buys) only"))
     print("Nothing here promises a profit. To approve, type exactly:\n  " + phrase)
     try:
         typed = ask("> ").strip()
@@ -1472,7 +1473,8 @@ def cmd_golive(s: Settings, args) -> int:
     gl = GoLive(events=_events("cli"), cfg=GateConfig.from_env())
     cmd = args.golive_cmd
     if cmd == "check":
-        rep = gl.evaluate(args.strategy or None)
+        rep = gl.evaluate(args.strategy or None, args.market)
+        print(f"engine: {'Futures AI' if args.market == 'futures' else 'Spot AI'} (an approval covers one engine)")
         for c in rep["criteria"]:
             print(f"[{'PASS' if c['passed'] else 'FAIL'}] {c['name']}: {c['value']}  (needs {c['threshold']})")
         print("GATE PASSES: you may approve (aitrader golive approve)" if rep["passed"] else "gate does not pass yet")
@@ -1483,11 +1485,11 @@ def cmd_golive(s: Settings, args) -> int:
         print(f"recorded: {args.item} confirmed by {a['by']}")
         return 0
     if cmd == "approve":
-        phrase = confirm_live_approval(args.strategy or [])
+        phrase = confirm_live_approval(args.strategy or [], market=args.market)
         if phrase is None:
             return 1
         try:
-            gl.approve(args.strategy or [], by=args.by, confirmation=phrase)
+            gl.approve(args.strategy or [], by=args.by, confirmation=phrase, market=args.market)
         except ValueError as exc:
             print(f"not approved: {exc}", file=sys.stderr)
             return 1
@@ -2017,6 +2019,8 @@ def build_parser() -> argparse.ArgumentParser:
     gl_sub = gl.add_subparsers(dest="golive_cmd", required=True)
     glc = gl_sub.add_parser("check", help="evaluate every gate criterion")
     glc.add_argument("--strategy", action="append")
+    glc.add_argument("--market", choices=["spot", "futures"], default="spot",
+                     help="the engine to judge: Spot AI's spot buys or Futures AI's perpetual longs")
     gla = gl_sub.add_parser("attest", help="confirm a manual item: keys, kill_switch or compliance")
     gla.add_argument("item", choices=["keys", "kill_switch", "compliance"])
     gla.add_argument("--by", required=True)
@@ -2024,6 +2028,8 @@ def build_parser() -> argparse.ArgumentParser:
     glp = gl_sub.add_parser("approve", help="approve 1-2 strategies for the live pilot (gate must pass)")
     glp.add_argument("--strategy", action="append", required=True)
     glp.add_argument("--by", required=True)
+    glp.add_argument("--market", choices=["spot", "futures"], default="spot",
+                     help="the one engine this approval covers: Spot AI or Futures AI")
     glr = gl_sub.add_parser("revoke", help="withdraw the approval: live goes back to paper")
     glr.add_argument("--by")
 

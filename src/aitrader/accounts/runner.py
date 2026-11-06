@@ -107,14 +107,30 @@ class UsersRunner:
         self.risk = risk or RiskEngine(RiskLimits.from_env())
         self.clock = clock
         self._ex: dict[int, tuple[tuple, Executor]] = {}
+        self._lock_noted: set[int] = set()  # accounts told that the platform's lock is closed
 
     def _wanted(self) -> dict[int, tuple]:
         """user id -> (mode, key fingerprint, pilot) for every user who should be running."""
         out = {}
         lock_open = not live_gate_problems(self.settings)
         for u in self.store.list():
-            live_on = u.mode == "live" and u.live_allowed and u.status == "active" and lock_open
-            draining = not live_on and _has_positions(os.path.join(user_dir(self.root, u.id), "live_state.json"))
+            user_live = u.mode == "live" and u.live_allowed and u.status == "active"
+            held = _has_positions(os.path.join(user_dir(self.root, u.id), "live_state.json"))
+            if user_live and not lock_open:
+                # Only the platform's lock in .env is closed (an edit or a typo there): no order can be
+                # sent, so nothing runs, and the account is NOT marked to sell everything: that kill
+                # would otherwise go off the moment the lock opened again. Resting stops on Bybit keep
+                # protecting any open position meanwhile.
+                if held and u.id not in self._lock_noted:
+                    self._lock_noted.add(u.id)
+                    EventLog(self.events_path or os.path.join(user_dir(self.root, u.id), "events.jsonl"),
+                             service=f"user{u.id}-live").emit(
+                        "halt", "the platform's live lock in .env is closed: this account's open live positions "
+                        "are not managed until it is open again (their stops still rest on Bybit)", level="error")
+                continue
+            self._lock_noted.discard(u.id)
+            live_on = user_live and lock_open
+            draining = not live_on and held
             if draining:
                 stop = live_stop_control(self.root, u.id)
                 if not stop.killed:

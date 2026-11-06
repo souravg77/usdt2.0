@@ -201,11 +201,21 @@ It can't approve anything.
 When the gate passes, approve one or two strategies by id (`aitrader learn list` shows them):
 
 ```bash
-docker compose run --rm -it collector golive approve --strategy <id> --by Shawn
+docker compose run --rm -it collector golive approve --strategy <id> --by Shawn                    # Spot AI
+docker compose run --rm -it collector golive approve --strategy <id> --by Shawn --market futures   # Futures AI
 ```
 
+An approval covers **one engine**. The gate judges a strategy only on that engine's paper trades
+and backtest (Spot AI's spot buys, or Futures AI's perpetual longs), and the live executor only
+lets it trade on that engine. `golive check --market futures` checks the Futures AI gate; the
+dashboard's "Check the gate now" button checks the engine whose view is open. Approvals made
+before November 2026 judged both engines together and no longer count: approve again.
+
+Real money opens **longs only** (Shawn, November 2026). Short signals are traded in paper only;
+the live executor skips them.
+
 It re-runs the gate, then shows what you are approving and asks you to type a phrase that names
-the strategies, for example `I approve <id> for real-money trading`. Only that exact phrase,
+the strategies and the engine, for example `I approve <id> for real-money Spot trading`. Only that exact phrase,
 typed at a terminal, approves. There is no `--yes` flag, piped input is refused (so the `-it`
 matters), and the website has no way to approve.
 

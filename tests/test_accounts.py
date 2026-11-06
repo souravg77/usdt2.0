@@ -317,7 +317,7 @@ def test_users_runner_trades_each_account_separately(tmp_path):
     live = Settings(mode=Mode.LIVE, live_unlocked=True, live_confirm=LIVE_CONFIRM_PHRASE)
     platform = Control(str(tmp_path / "platform.json"))
     runner = UsersRunner(st, v, live, str(paper), root=str(tmp_path / "users"), platform_control=platform,
-                         adapter_factory=factory, live_guard=lambda sid: [], live_monitor=lambda c: None,
+                         adapter_factory=factory, live_guard=lambda sid, market="spot": [], live_monitor=lambda c: None,
                          clock=lambda: NOW)
     res = run(runner.tick())
     assert set(res) == {a.id, b.id} and "C" * 20 not in adapters
@@ -380,7 +380,7 @@ def test_switching_live_off_sells_live_positions(tmp_path):
     live = Settings(mode=Mode.LIVE, live_unlocked=True, live_confirm=LIVE_CONFIRM_PHRASE)
     root = str(tmp_path / "users")
     runner = UsersRunner(st, v, live, str(paper), root=root, platform_control=Control(str(tmp_path / "p.json")),
-                         adapter_factory=factory, live_guard=lambda sid: [], live_monitor=lambda c: None,
+                         adapter_factory=factory, live_guard=lambda sid, market="spot": [], live_monitor=lambda c: None,
                          clock=lambda: NOW)
     run(runner.tick())
     real = adapters["L" + "R" * 20]
@@ -440,3 +440,41 @@ def test_logins_posted_from_another_site_are_refused(site):
     r = client.post("/login", data={"user": "admin", "password": PW}, headers={"origin": "http://testserver"},
                     follow_redirects=False)
     assert r.status_code == 303 and client.cookies.get(COOKIE)  # this site's own form
+
+
+def test_a_closed_platform_lock_never_marks_live_positions_for_selling(tmp_path):
+    """An .env typo that closes the live lock must not arm a kill that sells everything once it reopens."""
+    from aitrader.accounts.live import live_stop_control
+
+    st = UserStore(str(tmp_path / "a.db"))
+    v = Vault(SECRET)
+    paper = tmp_path / "paper.json"
+    _paper(paper, {KEY: _pos(SIG)})
+    adapters = {}
+
+    def factory(exchange, settings, keys):
+        k = "L" + keys.api_key
+        adapters[k] = adapters.get(k) or FakeAdapter(usdt=2000)
+        return adapters[k]
+
+    u = st.create("a@example.com", "a long enough password", status="active")
+    st.save_keys(v, u.id, "bybit", False, "R" * 20, "y" * 20, {})
+    st.allow_live(u.id, True)
+    st.set_mode(u.id, "live", 300)
+    root = str(tmp_path / "users")
+    kw = dict(root=root, platform_control=Control(str(tmp_path / "p.json")), adapter_factory=factory,
+              live_guard=lambda sid, market="spot": [], live_monitor=lambda c: None, clock=lambda: NOW,
+              events_path=str(tmp_path / "ev.jsonl"))
+    live = Settings(mode=Mode.LIVE, live_unlocked=True, live_confirm=LIVE_CONFIRM_PHRASE)
+    run(UsersRunner(st, v, live, str(paper), **kw).tick())
+    real = adapters["L" + "R" * 20]
+    assert len(real.sent) == 1  # bought
+    typo = Settings(mode=Mode.LIVE, live_unlocked=True, live_confirm="I accept real money risk")
+    locked = UsersRunner(st, v, typo, str(paper), **kw)
+    run(locked.tick())
+    run(locked.tick())
+    assert not live_stop_control(root, u.id).killed and len(real.sent) == 1 and u.id not in locked._ex
+    halts = [e for e in EventLog(str(tmp_path / "ev.jsonl")).read() if e["kind"] == "halt"]
+    assert len(halts) == 1 and "live lock" in halts[0]["text"]
+    run(UsersRunner(st, v, live, str(paper), **kw).tick())  # the lock is fixed: nothing is sold
+    assert len(real.sent) == 1 and not live_stop_control(root, u.id).killed

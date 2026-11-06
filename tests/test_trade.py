@@ -203,7 +203,7 @@ def ex(tmp_path):
     events = EventLog(str(tmp_path / "ev.jsonl"), service="executor-live")
 
     def make(**kw):
-        kw.setdefault("live_guard", lambda sid: [])
+        kw.setdefault("live_guard", lambda sid, market="spot": [])
         return Executor(adapter, kw.pop("mode", "live"), "bybit", str(paper),
                         state_path=str(tmp_path / "state.json"), control=Control(str(tmp_path / "c.json")),
                         events=events, clock=lambda: NOW, **kw)
@@ -368,9 +368,9 @@ def test_executor_pilot_cap_and_live_guard(ex):
         make(live_guard=None)  # no guard
     with pytest.raises(ValueError):
         make(mode="testnet")  # demo trading is gone
-    e = make(mode="live", live_guard=lambda sid: ["not approved"], pilot_max_usdt=500)
+    e = make(mode="live", live_guard=lambda sid, market="spot": ["not approved"], pilot_max_usdt=500)
     assert run(e.tick())["skipped"] == [KEY] and not adapter.sent
-    e2 = make(mode="live", live_guard=lambda sid: [], pilot_max_usdt=500)
+    e2 = make(mode="live", live_guard=lambda sid, market="spot": [], pilot_max_usdt=500)
     e2.state["skipped"] = {}
     run(e2.tick())
     assert adapter.sent and adapter.sent[0].filled * 100.1 <= 500 * 0.25 + 1e-6
@@ -447,6 +447,44 @@ def test_approval_breaks_when_rules_change_and_monitor(tmp_path):
     assert "below the paper" in gl.monitor([{"mode": "live", "r": -0.1}] * 25)
     gl.revoke(by="Shawn")
     assert gl.guard("s1")
+
+
+def test_the_gate_judges_and_approves_one_engine_at_a_time(tmp_path):
+    """Spot AI's paper trades never count for Futures AI (and the other way): an approval covers one engine."""
+    gl, events, reg = _gate_world(tmp_path)
+    reg = Registry(str(tmp_path / "reg.json"))
+    reg.entries["s1"].backtest_futures = {"out_of_sample": {"trades": 80, "expectancy_r": 0.3}}
+    reg.save()
+    _beats(events)
+    gl.attest("kill_switch", by="Shawn")
+    gl.attest("keys", by="Shawn")
+    # every paper trade in the world is a spot buy (plain key, no market): Futures AI has none
+    assert gl.evaluate()["passed"]
+    fut = gl.evaluate(market="futures")
+    assert not fut["passed"] and fut["market"] == "futures" and fut["paper"]["trades"] == 0
+    with pytest.raises(ValueError):
+        gl.approve(["s1"], by="Shawn", confirmation=confirmation_phrase(["s1"], "futures"), market="futures")
+    with pytest.raises(ValueError):  # the Spot phrase doesn't approve Futures
+        gl.approve(["s1"], by="Shawn", confirmation=confirmation_phrase(["s1"]), market="futures")
+    gl.approve(["s1"], by="Shawn", confirmation=confirmation_phrase(["s1"]))
+    assert gl.guard("s1") == [] and gl.guard("s1", "spot") == []
+    assert "Spot AI only" in gl.guard("s1", "futures")[0]
+    # Futures AI's perpetual longs are judged on their own
+    with open(tmp_path / "paper.json") as fh:
+        paper = json.load(fh)
+    for t in paper["trades"]:
+        t.update(key=t["key"] + "|futures", market="futures", perp=True, r=-0.5)
+    with open(tmp_path / "paper.json", "w") as fh:
+        json.dump(paper, fh)
+    assert not gl.evaluate(market="futures")["passed"] and gl.evaluate()["paper"]["trades"] == 0
+
+
+def test_the_live_executor_asks_the_guard_about_the_right_engine(pl):
+    make, adapter, *_ = pl
+    asked = []
+    e = make(live_guard=lambda sid, market="spot": asked.append(market) or (["spot only"] if market != "spot" else []))
+    out = run(e.tick())
+    assert asked == ["futures"] and out["skipped"] == [FKEY] and not adapter.sent
 
 
 # ---- Telegram ---------------------------------------------------------------------------------
@@ -927,7 +965,7 @@ def px(ex, monkeypatch):
     adapter = PerpAdapter()
 
     def make2(**kw):
-        e = make(**kw)
+        e = make(**{"allow_shorts": True, **kw})  # the short mechanics, for shorts opened before longs-only
         e.adapter = adapter
         return e
 
@@ -993,7 +1031,8 @@ def test_no_short_without_isolated_margin_or_near_liquidation(px, monkeypatch):
     out = run(e.tick())
     assert out["skipped"] == [KEY] and not adapter.sent
     assert "Isolated Margin" in next(iter(e.state["skipped"].values()))
-    # at 3x the liquidation price is ~32.8% up; a stop 20% up uses more than half of that room
+    # at 3x the liquidation price is ~32.8% up; a stop 20% up uses more than half of that room, so
+    # (like paper) it trades at a lower leverage instead
     monkeypatch.setenv("AITRADER_LEVERAGE", "3")
     far = _pos(SIG, stop=120.0)
     far["signal"].update(side="sell", target=90.0)
@@ -1002,7 +1041,15 @@ def test_no_short_without_isolated_margin_or_near_liquidation(px, monkeypatch):
     e2 = make()
     e2.state["skipped"] = {}
     out = run(e2.tick())
-    assert out["skipped"] == [KEY] and "liquidation" in next(iter(e2.state["skipped"].values()))
+    assert out["opened"] == [KEY] and 1.0 <= e2.state["positions"][KEY]["leverage"] < 3.0
+    # a stop even 1x can't hold before liquidation (~99.5% up) is skipped
+    too_far = _pos(SIG + 1, stop=160.0)
+    too_far["signal"].update(side="sell", target=90.0)
+    _paper(paper, {KEY: too_far})
+    e3 = make()
+    e3.state["skipped"] = {}
+    out = run(e3.tick())
+    assert out["skipped"] == [KEY] and "liquidation" in e3.state["skipped"][f"{KEY}|{SIG + 1}"]
 
 
 # ---- Futures AI longs on the perpetual ----------------------------------------------------------
@@ -1100,7 +1147,7 @@ def test_a_perpetual_never_holds_a_long_and_a_short_at_once(pl):
     short = _pos(SIG, stop=105.0)
     short["signal"].update(side="sell", target=90.0)
     _paper(paper, {"s2|bybit|BTC/USDT|1h": short, FKEY: _pos(SIG)})
-    e = make()
+    e = make(allow_shorts=True)
     out = run(e.tick())
     # the first in the paper file opens; the other would only shrink it in one-way mode
     assert out["opened"] == ["s2|bybit|BTC/USDT|1h"] and out["skipped"] == [FKEY]
@@ -1120,8 +1167,14 @@ def test_a_futures_long_needs_a_perp_adapter_and_room_before_liquidation(ex, pl,
     _paper(paper, {FKEY: _pos(SIG, stop=80.0)})  # at 3x liquidation is ~33% down: 20% uses over half
     e2 = make()
     e2.state["skipped"] = {}
-    out = run(e2.tick())
-    assert out["skipped"] == [FKEY] and "liquidation" in e2.state["skipped"][f"{FKEY}|{SIG}"]
+    out = run(e2.tick())  # like paper: a lower leverage, so the stop stays at most halfway to liquidation
+    p = e2.state["positions"][FKEY]
+    assert out["opened"] == [FKEY] and 1.0 <= p["leverage"] < 3.0 and adapter.prepared[-1] == (PERP, p["leverage"])
+    _paper(paper, {FKEY: _pos(SIG + 1, stop=40.0)})  # even 1x is liquidated ~99.5% down: 60% is too far
+    e3 = make()
+    e3.state = {**e3.state, "positions": {}, "skipped": {}}
+    out = run(e3.tick())
+    assert out["skipped"] == [FKEY] and "liquidation" in e3.state["skipped"][f"{FKEY}|{SIG + 1}"]
 
 
 def test_leverage_is_never_above_three():
@@ -1249,3 +1302,47 @@ def test_an_open_loss_trips_the_daily_cap_before_the_stop(ex):
     assert KEY in e.state["positions"] and e.state["positions"][KEY]["mark"] == 96.0
     s = e.control.state()
     assert s["paused"] and "in open positions" in s["reason"] and not e.control.stops_paper
+
+
+
+def test_real_money_skips_short_signals_by_default(ex, monkeypatch):
+    """Shawn, Nov 2026: real money opens longs only; the short is left to paper."""
+    make, _adapter, paper, _events = ex
+    monkeypatch.setenv("AITRADER_LEVERAGE", "2")
+    adapter = PerpAdapter()
+    short = _pos(SIG, stop=105.0)
+    short["signal"].update(side="sell", target=90.0)
+    _paper(paper, {KEY: short})
+    e = make()
+    e.adapter = adapter
+    out = run(e.tick())
+    assert out["skipped"] == [KEY] and not adapter.sent and not adapter.prepared
+    assert "longs only" in e.state["skipped"][f"{KEY}|{SIG}"]
+
+
+def test_a_futures_long_is_never_judged_on_the_spot_price_stream(pl):
+    """The stream carries spot prices: a perpetual's stop is checked on the perpetual's own book."""
+    make, adapter, *_ = pl
+    prices = FakePrices()
+    prices.age["BTC/USDT"], prices.bid["BTC/USDT"] = 1.0, 100.0
+    e = make(prices=prices)
+    assert run(e.tick())["opened"] == [FKEY]
+    prices.bid["BTC/USDT"] = 94.0  # spot falls through the stop, the perpetual's book is still at 100
+    assert not e._stop_hit()
+    out = run(e.tick())
+    assert out["closed"] == [] and e.state["positions"][FKEY]["status"] == "open"
+    adapter.bid = 94.0  # now the perpetual itself is at the stop
+    assert run(e.tick())["closed"] == [FKEY]
+
+
+def test_live_uses_each_coins_own_maintenance_margin(pl, tmp_path):
+    """Like paper (PR #117): a 25x coin is liquidated sooner (2% maintenance margin) than BTC (0.5%)."""
+    from aitrader.market import perp_limits
+
+    make, *_ = pl
+    path = str(tmp_path / "limits.json")
+    perp_limits.save({"BTC/USDT": 100.0, "NEW/USDT": 25.0}, path, 0)
+    e = make(perp_limits_path=path)
+    assert e._mmr("BTC/USDT") == pytest.approx(0.005)
+    assert e._mmr("NEW/USDT") == pytest.approx(0.02)
+    assert e._mmr("UNKNOWN/USDT") == pytest.approx(0.005)

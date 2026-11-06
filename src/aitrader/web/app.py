@@ -1033,13 +1033,20 @@ after {_e(window.split(" to ")[1])}; the next one waits for the next night.</p>
 
     @app.post("/trading/gate")
     def trading_gate(request: Request, csrf: str = Form("")):
+        try:  # the gate judges the engine whose view is open: Spot AI or Futures AI
+            market = "futures" if _futures_state(paths)[0] else "spot"
+        except Exception:
+            market = "spot"
+
         def act(_user):
             from ..trade import GateConfig, GoLive
             from ..ops import EventLog
 
             rep = GoLive(paths.golive_dir, paths.registry, paths.paper_state, paths.models,
-                         events=EventLog(paths.events, service="dashboard"), cfg=GateConfig.from_env()).evaluate()
-            return "Gate checked: " + ("PASSES" if rep["passed"] else "does not pass yet")
+                         events=EventLog(paths.events, service="dashboard"),
+                         cfg=GateConfig.from_env()).evaluate(market=market)
+            engine = "Futures AI" if market == "futures" else "Spot AI"
+            return f"Gate checked for {engine}: " + ("PASSES" if rep["passed"] else "does not pass yet")
         return _control_post(request, csrf, act)
 
     return app
