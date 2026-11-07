@@ -16,7 +16,13 @@ built() { [ -f "$FAKE_STATE/built" ]; }
 case "$*" in
   "image inspect"*) exit 0 ;;
   "tag "*) exit 0 ;;
-  "compose build"*) touch "$FAKE_STATE/built"; exit 0 ;;
+  "compose build"*|"build "*)
+    n=$(cat "$FAKE_STATE/build_fails" 2>/dev/null || echo 0)
+    if [ "$n" -gt 0 ]; then echo $((n - 1)) > "$FAKE_STATE/build_fails"; echo "TLS handshake timeout" >&2; exit 1; fi
+    touch "$FAKE_STATE/built"; exit 0 ;;
+  "compose up -d --remove-orphans"*)
+    n=$(cat "$FAKE_STATE/up_fails" 2>/dev/null || echo 0)
+    if [ "$n" -gt 0 ]; then echo $((n - 1)) > "$FAKE_STATE/up_fails"; echo "TLS handshake timeout" >&2; exit 1; fi ;;
   "compose ps --services --status running") printf 'collector\npaper\n' ;;
   "compose ps --format"*)
     if built && [ -n "$FAKE_BAD_SERVICE" ]; then printf 'collector running\npaper restarting\n'
@@ -69,7 +75,8 @@ def server(tmp_path):
     state = tmp_path / "state"
     state.mkdir()
     env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "FAKE_LOG": str(tmp_path / "docker.log"),
-           "FAKE_STATE": str(state), "AITRADER_UPDATE_WAIT": "0"}
+           "FAKE_STATE": str(state), "AITRADER_UPDATE_WAIT": "0",
+           "AITRADER_RETRY_WAIT": "0"}
 
     def release(version):
         (dev / "app.txt").write_text(f"{version}\n")
@@ -85,6 +92,7 @@ def server(tmp_path):
         p = tmp_path / "docker.log"
         return p.read_text().splitlines() if p.exists() else []
 
+    run.state = state
     return work, release, run, calls
 
 
@@ -150,3 +158,26 @@ def test_refuses_with_local_edits(server):
     (work / "app.txt").write_text("edited on the server\n")
     r = run()
     assert r.returncode == 1 and "commit or 'git stash'" in r.stdout
+
+
+def test_update_retries_a_download_that_timed_out(server):
+    """Docker Hub can time out on a slow line ("TLS handshake timeout"): try again, don't roll back."""
+    work, release, run, calls = server
+    release("v2")
+    (run.state / "build_fails").write_text("3")  # compose build, docker build, compose build fail
+    (run.state / "up_fails").write_text("1")
+    r = run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "try 1 of 4" in r.stdout and "rolled back" not in r.stdout
+    assert (work / "app.txt").read_text() == "v2\n"
+    c = calls()
+    assert sum(x.startswith("docker compose up -d --remove-orphans") for x in c) == 2
+
+
+def test_update_rolls_back_when_downloads_keep_failing(server):
+    work, release, run, calls = server
+    release("v2")
+    (run.state / "build_fails").write_text("99")
+    r = run()
+    assert r.returncode == 1 and "try 3 of 4" in r.stdout and "rolled back" in r.stdout
+    assert (work / "app.txt").read_text() == "v1\n"

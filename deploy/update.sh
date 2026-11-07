@@ -30,6 +30,15 @@ ROLLBACK_IMAGE="aitrader:rollback"
 cd "$(dirname "$0")/.."
 log() { printf '%s update: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 die() { log "$*"; exit 1; }
+RETRY_WAIT="${AITRADER_RETRY_WAIT:-15}"
+retry() {  # retry CMD...: up to 4 tries, since Docker Hub downloads can time out ("TLS handshake timeout")
+  local n=1
+  until "$@"; do
+    [ "$n" -ge 4 ] && return 1
+    log "'$*' failed (try $n of 4); trying again in $((n * RETRY_WAIT))s"
+    sleep $((n * RETRY_WAIT)); n=$((n + 1))
+  done
+}
 
 mkdir -p data
 for d in data data/backups; do
@@ -114,16 +123,18 @@ git log --format='  %h %s' "$PREV..$NEXT" | head -n 30
 
 # COMPOSE_BAKE=false: newer Compose's "bake" builder refuses the build's host network ("additional
 # privileges requested"); plain `docker build` is the fallback when this Compose ignores it
-if ! COMPOSE_BAKE=false docker compose build --pull; then
+build_image() {
+  COMPOSE_BAKE=false docker compose build --pull && return 0
   log "compose couldn't build; building with docker build instead"
   docker build --pull --network host --build-arg UID="$(id -u)" -t aitrader:latest .
-fi
+}
+retry build_image
 MIGRATED=1
 docker compose run --rm -T collector migrate
 
 if [ -n "$RUNNING" ]; then
   # shellcheck disable=SC2086
-  docker compose up -d --remove-orphans $RUNNING
+  retry docker compose up -d --remove-orphans $RUNNING
   log "waiting ${WAIT}s for services to settle"
   sleep "$WAIT"
 fi
