@@ -4,6 +4,10 @@ FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 PIP_DEFAULT_TIMEOUT=120 PIP_RETRIES=10
 WORKDIR /app
 
+# PyTorch for ml_cusum_resnet_lstm (the paper's ResNet-LSTM), in its own layer so updates reuse it.
+# The CPU-only build: about 200 MB to download instead of the several-GB GPU build PyPI would give.
+RUN pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.5"
+
 # The libraries first, in their own layer: Docker reuses it on every update that doesn't change
 # pyproject.toml, so a code update downloads nothing from PyPI.
 COPY pyproject.toml README.md ./

@@ -3,7 +3,8 @@
 Source: P. Grądzki, P. Wójcik, S. Lessmann, "Algorithmic crypto trading using information-driven
 bars, triple barrier labeling and deep learning", *Financial Innovation* 11:136 (2025), open access
 (CC BY 4.0). Uploaded by Shawn on 2026-11-07. Built as the strategy `ml_cusum_barrier`
-(`src/aitrader/strategies/ml.py`), with its short twin.
+(`src/aitrader/strategies/ml.py`), with its short twin, and its best model as
+`ml_cusum_resnet_lstm` (`src/aitrader/strategies/deep.py`, needs PyTorch).
 
 ## What the paper tested
 
@@ -37,7 +38,7 @@ bars, triple barrier labeling and deep learning", *Financial Innovation* 11:136 
 | Triple barrier ±5 %, 24 bars | ±5 %, time barrier 3 days (72 x 1h, 18 x 4h); at the time barrier a rise must beat the 0.15 % round-trip fee |
 | Learn and trade on events only | Same: training rows and trade candles are CUSUM events only |
 | Features: EMA and SD 5/10/15/20/50, MACD, RSI 6/10/14, stochastic, Williams %R, Bollinger 5, returns, CMF 21, MFI 14, hour and weekday sine/cosine | The same, price-free, plus the CUSUM sums (the paper's advice to put volatility in the inputs) |
-| ResNet-LSTM (PyTorch) | Not installed here. Gradient-boosted trees (the paper's XGBoost) and a small scikit-learn neural network vote |
+| ResNet-LSTM on the sampled bars, 96 steps, sizes tuned by Hyperband, 3 runs averaged | `ml_cusum_barrier`: gradient-boosted trees (the paper's XGBoost) and a small scikit-learn network vote. `ml_cusum_resnet_lstm` (4h): the candles between events joined into CUSUM bars, the paper's features on those bars, the last 32 bars into a ResNet-LSTM (3 convolutions with a skip connection, then an LSTM; fixed sizes), early stopping on the newest 15 %, 3 seeds averaged, retrained every 90 days on the events of the last 720 days |
 | Long above 60 % | 70 % (Shawn's ML threshold); shorts through the short twin, which learns the upside-down chart |
 | Expanding window, retrained each quarter | Retrained every 250 candles on the events of the last 3,000 candles, walk-forward |
 | Stop and target | Stop -5 %, target +5 % (1R), time stop 3 days |
@@ -47,7 +48,8 @@ bars, triple barrier labeling and deep learning", *Financial Innovation* 11:136 
 - The paper's results are a backtest on two coins in 2022-2023. BTC lost money in most of its
   setups. Nothing here promises a profit; the strategy has to pass the same strategy test,
   walk-forward, Monte Carlo and holdout gate as every other one, per engine.
-- Its best model is a deep network this platform does not run. The stand-in models are the kind
-  the paper found weaker, so judge `ml_cusum_barrier` on its own test results.
+- `ml_cusum_barrier` uses the kind of models the paper found weaker; `ml_cusum_resnet_lstm` is the
+  paper's best model with the same events, labels, stop and target, so the strategy test compares
+  the two directly. Its network sizes are fixed rather than searched, and it reads 32 bars, not 96.
 - One setting for every coin. The paper notes each coin may need its own; tuning per coin here
   would fit the test to the coins it is judged on.

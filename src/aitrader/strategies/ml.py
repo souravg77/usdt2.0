@@ -696,4 +696,6 @@ class MlCusumBarrier(MlBoosted):
         return f"time_stop={self._horizon(tf)}"
 
 
-ML_STRATEGIES = (MlBoosted, MlEnsemble, MlBoostedFund, MlEnsembleFund, MlCusumBarrier)
+from .deep import MlCusumResnetLstm  # noqa: E402  (it builds on the classes above)
+
+ML_STRATEGIES = (MlBoosted, MlEnsemble, MlBoostedFund, MlEnsembleFund, MlCusumBarrier, MlCusumResnetLstm)

@@ -271,12 +271,21 @@ and after 3 days with neither, the direction of the move (a rise has to beat the
 The inputs are the paper's 30: distance from EMA 5/10/15/20/50 and the close's spread over the same
 lengths, MACD, RSI 6/10/14, stochastic %K/%D, Williams %R, Bollinger (5, 2), the last return, Chaikin
 money flow 21, money flow index 14, sine and cosine of the hour and weekday, plus the two CUSUM totals.
-Gradient-boosted trees and a small neural network vote; the paper's best model, a ResNet-LSTM, needs
-PyTorch, which the platform doesn't install. A long opens at the next open after an event candle whose
+Gradient-boosted trees and a small neural network vote. A long opens at the next open after an event candle whose
 chance is 70 % or more (Shawn's ML threshold; the paper used 60 %), with a stop 5 % below and a target 5 %
 above (1R) and a 3-day time stop. Retrained every 250 candles on the events of the last 3,000 candles,
 walk-forward. 1h and 4h; the short twin learns the upside-down chart. Add it with
 `learn add-builtin ml_cusum_barrier`, `learn add-shorts`, then `learn test` per engine.
+
+**ml_cusum_resnet_lstm** is the same strategy with the paper's best model (4h only). The candles
+between two events are joined into one CUSUM bar (first open, highest high, lowest low, last close,
+summed volume); the 30 inputs are worked out on those bars, and a ResNet-LSTM reads the last 32: batch
+normalisation and three 1-D convolutions with ReLU (a skip connection around the third), dropout, an
+LSTM and one output. Adam with early stopping on the newest 15 % of the training events; three seeds,
+averaged. Retrained every 90 days on the events of the last 720 days (the paper retrained quarterly).
+Same events, barriers, 70 % threshold, stop, target and time stop as `ml_cusum_barrier`, so the
+strategy test shows whether the deep network adds anything. It needs PyTorch: the server image
+installs the CPU-only build (about 200 MB download); without it the strategy gives no signals.
 
 ## New indicators
 
