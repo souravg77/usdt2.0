@@ -85,7 +85,7 @@ def sx(tmp_path):
     def make(**kw):
         return Executor(adapter, "live", "bybit", str(paper), state_path=str(tmp_path / "state.json"),
                         control=Control(str(tmp_path / "c.json")), events=events,
-                        clock=lambda: clock[0], live_guard=lambda sid: [], **kw)
+                        clock=lambda: clock[0], live_guard=lambda sid, market="spot": [], **kw)
 
     return make, adapter, paper, events, clock
 

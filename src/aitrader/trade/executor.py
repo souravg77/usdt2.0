@@ -13,7 +13,10 @@ with real orders on one exchange:
   the executor sells, and a stop that fired is booked as the exit;
 - every fill is compared with its paper twin, so real slippage is measured.
 
-Short signals (the short twins) are sold on the coin's USDT perpetual instead (``trade.futures``):
+Real money opens longs only (Shawn, Nov 2026): a short signal is skipped here and traded in paper
+only. Shorts opened before that keep being managed to their exit as below.
+
+Short signals (the short twins) were sold on the coin's USDT perpetual (``trade.futures``):
 isolated margin at ``AITRADER_LEVERAGE``, sized by the same risk engine from the stop distance
 (only the margin comes out of free cash), a reduce-only stop resting on Bybit above the entry,
 bought back with a reduce-only order. The account must already be in Isolated Margin mode.
@@ -99,7 +102,8 @@ class Executor:
                  events: EventLog | None = None, live_guard=None, monitor=None,
                  pilot_max_usdt: float | None = None, quote: str = "USDT",
                  max_signal_age_bars: int = 2, paper_stale_s: float = 300, clock=time.time,
-                 prices=None, price_max_age: float = 10.0):
+                 prices=None, price_max_age: float = 10.0, allow_shorts: bool = False,
+                 perp_limits_path: str = "data/pairs/perp_limits.json"):
         if mode != "live":
             raise ValueError("mode must be live (paper trading is `learn paper`)")
         if live_guard is None:
@@ -116,6 +120,10 @@ class Executor:
         self.max_signal_age_bars, self.paper_stale_s, self.clock = max_signal_age_bars, paper_stale_s, clock
         self.heartbeat = Heartbeat(self.events)
         self.prices, self.price_max_age = prices, price_max_age
+        # Shawn, Nov 2026: real money opens longs only. Short signals are skipped (paper still trades
+        # them); shorts already open are still managed to their exit. Only tests turn this on.
+        self.allow_shorts = allow_shorts
+        self.perp_limits_path = perp_limits_path
         self.state = {"positions": {}, "closed": [], "orders": [], "skipped": {}, "failures": 0,
                       "disconnected": False, "paper_stale": False, "flattened": False, "checked": False}
         if os.path.exists(self.state_path):
@@ -186,12 +194,9 @@ class Executor:
 
     def _stop_hit(self) -> bool:
         for p in self._open():
-            if p["status"] == "open" and not self.prices.stale(p["symbol"], self.price_max_age):
-                if _short(p):  # the spot stream stands in for the perpetual's price
-                    ask = self.prices.best_ask(p["symbol"])
-                    if ask is not None and ask >= p["stop"]:
-                        return True
-                    continue
+            # the stream carries spot prices: a perpetual position is never judged on them (its stop
+            # is checked on the perpetual's own order book each tick, and rests on Bybit on the mark price)
+            if p["status"] == "open" and not _perp(p) and not self.prices.stale(p["symbol"], self.price_max_age):
                 bid = self.prices.best_bid(p["symbol"])
                 if bid is not None and bid <= p["stop"]:
                     return True
@@ -203,17 +208,17 @@ class Executor:
                 and self.prices.stale(symbol, 3 * self.price_max_age))
 
     async def _bid(self, symbol: str, market: str | None = None) -> float | None:
-        if self.prices is not None and not self.prices.stale(symbol, self.price_max_age):
+        """The best bid: from the spot stream for a spot pair, else (a perpetual, or no fresh
+        streamed price) from that market's own order book."""
+        spot = market is None or market == symbol
+        if spot and self.prices is not None and not self.prices.stale(symbol, self.price_max_age):
             bid = self.prices.best_bid(symbol)
             if bid is not None:
                 return bid
         return (await self.adapter.get_orderbook(market or symbol, 5)).best_bid
 
     async def _ask(self, p: dict) -> float | None:
-        if self.prices is not None and not self.prices.stale(p["symbol"], self.price_max_age):
-            ask = self.prices.best_ask(p["symbol"])
-            if ask is not None:
-                return ask
+        """The best ask on the position's own market (a short is always a perpetual: never the spot stream)."""
         return (await self.adapter.get_orderbook(_market(p), 5)).best_ask
 
     # ---- entries --------------------------------------------------------------------------------
@@ -241,6 +246,9 @@ class Executor:
                 self._skip(mark, key, f"{'short' if short else 'Futures long'} signal: this exchange adapter "
                            "can't trade futures", out)
                 continue
+            if short and not self.allow_shorts:  # real money opens longs only; paper keeps trading shorts
+                self._skip(mark, key, "short signal: real-money trading opens longs only (paper still trades it)", out)
+                continue
             if is_dated(symbol):  # dated (expiring) futures are paper only: never a real-money order
                 self._skip(mark, key, "dated futures contract: paper trading only", out)
                 continue
@@ -252,11 +260,12 @@ class Executor:
             if now_ms - sig["ts"] > self.max_signal_age_bars * TIMEFRAME_MS[tf]:
                 self._skip(mark, key, "signal is too old to enter now", out)
                 continue
-            if self._price_stale(symbol):
+            if not perp and self._price_stale(symbol):  # the stream is spot prices: it says nothing of a perp
                 log.info("%s: no fresh streamed price for %s; entry waits", self.mode, symbol)
                 continue  # not a skip: it may still enter once prices flow again
             if self.live_guard is not None:
-                problems = self.live_guard(entry_id)
+                # an approval covers one engine: Spot AI (spot buys) or Futures AI (the perpetual)
+                problems = self.live_guard(entry_id, "futures" if perp else "spot")
                 if problems:
                     self._skip(mark, key, "live trading not approved: " + "; ".join(problems), out)
                     continue
@@ -274,17 +283,23 @@ class Executor:
                 if not price or price >= sig["stop"]:
                     self._skip(mark, key, f"price {price} is at or above the stop {sig['stop']}", out)
                     continue
-                if not futures.short_stop_ok(price, sig["stop"], lev):
-                    self._skip(mark, key, f"stop {sig['stop']} is too close to the liquidation price at {lev:g}x", out)
-                    continue
             else:
                 price = book.best_ask
                 if not price or price <= sig["stop"]:
                     self._skip(mark, key, f"price {price} is at or below the stop {sig['stop']}", out)
                     continue
-                if perp_long and not futures.long_stop_ok(price, sig["stop"], lev):
-                    self._skip(mark, key, f"stop {sig['stop']} is too close to the liquidation price at {lev:g}x", out)
+            if perp:
+                # like paper: the setting (at most 3x), lowered when the stop is too wide for it so the
+                # stop still sits at most halfway to liquidation, with the coin's own maintenance margin
+                # (smaller coins are liquidated sooner); skipped only when even 1x can't hold the stop
+                cap = lev
+                lev = futures.safe_leverage(price, sig["stop"], short, cap, self._mmr(symbol))
+                if not lev:
+                    self._skip(mark, key, f"stop {sig['stop']} is too close to the liquidation price even at 1x", out)
                     continue
+                if lev < cap:
+                    log.info("%s %s: %gx instead of %gx so the stop comes well before liquidation",
+                             self.mode, key, lev, cap)
             if perp:
                 try:
                     await self.adapter.prepare_perp(market, lev)
@@ -672,7 +687,7 @@ class Executor:
                                      f"{STOP_GRACE_S}s after it filled", out)
         if self.prices is not None:
             quiet = sorted({p["symbol"] for p in self._open() if p["status"] == "open"
-                            and p["symbol"] in self.prices.symbols
+                            and not _perp(p) and p["symbol"] in self.prices.symbols
                             and self.prices.stale(p["symbol"], feed_halt_s())})
             if quiet and not self.state.get("feed_halted"):
                 self.state["feed_halted"] = True  # once per quiet spell
@@ -781,6 +796,16 @@ class Executor:
             equity = min(equity, self.pilot_max_usdt)
             free = max(0.0, min(free, self.pilot_max_usdt - invested - margin))
         return equity, free
+
+    def _mmr(self, symbol: str) -> float:
+        """The maintenance margin rate of the coin's lowest Bybit tier (from its maximum leverage)."""
+        from ..market import perp_limits
+
+        try:
+            top = perp_limits.max_leverage(symbol, self.perp_limits_path)
+        except Exception:  # an unreadable file: the big coins' rate
+            top = None
+        return futures.maintenance_rate(top)
 
     def _other_side_open(self, market: str, short: bool) -> bool:
         """A position (or one being entered or closed) on ``market`` the other way."""

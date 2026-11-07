@@ -41,9 +41,11 @@ def gate_problems(golive) -> list[str]:
     approval = golive._load("approval.json")
     if not approval.get("strategies"):
         return ["the go/no-go gate hasn't been passed and approved yet"]
+    from ..trade.golive import approval_market
+
     problems = []
     for sid in approval["strategies"]:
-        p = golive.guard(sid)
+        p = golive.guard(sid, approval_market(approval))
         if not p:
             return []
         problems += p

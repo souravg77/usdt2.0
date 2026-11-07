@@ -122,7 +122,7 @@ it with a small budget.
 
 You run `aitrader golive approve --strategy <id> --by <name>` for one or two strategies after reading the
 gate report and the risk settings. The approval re-runs the gate and is refused if it fails. It
-then asks you to type `I approve <ids> for real-money trading` with the strategy ids; anything
+then asks you to type `I approve <ids> for real-money Spot trading` (or `... Futures trading` with `--market futures`) with the strategy ids; anything
 else, no terminal, or piped input means no approval, and there is no flag that skips the
 question. The approval file is sealed, so a hand-written or edited one counts for nothing. It is
 tied to the strategies' rules and the active AI model: if either changes, the strategy drops back
