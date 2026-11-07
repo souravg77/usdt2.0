@@ -709,3 +709,24 @@ def test_paper_pnl_tile_counts_from_the_wallet_restart(tmp_path):
     html = _trading_stats(c, Settings(), paths, paper, [], {}, "spot")
     assert "+25.50" in html and "-1,974.50" not in html.split("all time")[0]
     assert "1 closed since the wallet restart" in html and "all time -1,974.50 over 2 trades" in html
+
+
+def test_every_page_folds_long_text_and_fills_the_width(web):
+    """static/layout.js folds long explanations behind "Read more" and packs card grids into
+    columns; the page itself is no longer capped at a fixed width, so wide screens are filled."""
+    client, *_ = web
+    login(client)
+    for path in ("/", "/trading", "/settings"):
+        r = client.get(path)
+        assert '<script src="/static/layout.js" defer></script>' in r.text, path
+        assert "<script>" not in r.text  # the page's security policy blocks inline scripts
+    js = client.get("/static/layout.js")
+    assert js.status_code == 200 and js.headers["content-type"].startswith("text/javascript")
+    for part in ("Read more", "Show less", "sessionStorage", "mcol", "resize"):
+        assert part in js.text, part
+    from aitrader.web.app import CSS
+
+    assert "max-width:1200px" not in CSS and "max-width:1320px" not in CSS
+    assert ".more.closed .more-body" in CSS and ".grid.masonry" in CSS
+    # the chart scripts read these colours, so they stay plain colours
+    assert "--card:#161a1e" in CSS and "--bg:#0b0e11" in CSS
