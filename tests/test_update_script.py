@@ -12,6 +12,10 @@ SCRIPT = Path(__file__).resolve().parents[1] / "deploy" / "update.sh"
 
 FAKE_DOCKER = r"""#!/usr/bin/env bash
 echo "docker $*" >> "$FAKE_LOG"
+# Docker unreachable: entirely, or only through a DOCKER_HOST that points at a dead socket
+if [ -n "$FAKE_DOCKER_DOWN" ] || { [ -n "$FAKE_DEAD_HOST" ] && [ -n "$DOCKER_HOST" ]; }; then
+  echo "Cannot connect to the Docker daemon at $DOCKER_HOST" >&2; exit 1
+fi
 built() { [ -f "$FAKE_STATE/built" ]; }
 case "$*" in
   "image inspect"*) exit 0 ;;
@@ -181,3 +185,24 @@ def test_update_rolls_back_when_downloads_keep_failing(server):
     r = run()
     assert r.returncode == 1 and "try 3 of 4" in r.stdout and "rolled back" in r.stdout
     assert (work / "app.txt").read_text() == "v1\n"
+
+
+def test_update_ignores_a_docker_host_that_does_not_answer(server):
+    """A DOCKER_HOST left by another tool (here Podman's socket, which isn't there) is dropped and
+    the system Docker is used, instead of every docker command failing."""
+    work, release, run, calls = server
+    release("v2")
+    r = run(DOCKER_HOST="unix:///run/user/1000/podman/podman.sock", FAKE_DEAD_HOST="1")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "doesn't answer; using the system Docker" in r.stdout
+    assert (work / "app.txt").read_text() == "v2\n"
+
+
+def test_update_stops_before_changing_anything_when_docker_is_down(server):
+    work, release, run, calls = server
+    release("v2")
+    r = run(FAKE_DOCKER_DOWN="1")
+    assert r.returncode == 1 and "can't be reached" in r.stdout and "Nothing was changed" in r.stdout
+    assert (work / "app.txt").read_text() == "v1\n" and "rolled back" not in r.stdout
+    assert not (work / "data" / "backups").exists() or not any((work / "data" / "backups").iterdir())
+    assert not any("build" in c or "backup" in c for c in calls())
