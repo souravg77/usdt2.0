@@ -20,6 +20,7 @@ so they can live in the repository. The books themselves are not committed (they
 | [12-price-action-strategies-woods.md](12-price-action-strategies-woods.md) | Price-action setups: inside bars, NR7, three-bar reversal, trend bar failure, M2B, Hikkake, engulfing, volume pullbacks | Galen Woods, *How to Trade with Price Action: Strategies* |
 | [13-price-action-master-woods.md](13-price-action-master-woods.md) | Price-action trading with one moving average: inside-bar statistics, pullbacks, pin-bar re-entry, NR7, Hikkake | Galen Woods, *How to Trade with Price Action: Master Edition* |
 | [14-ml-strategy-design-asgari-khasteh.md](14-ml-strategy-design-asgari-khasteh.md) | Machine learning for 4h crypto direction: k-NN, Random Forest, XGBoost, 60-candle inputs, fee-threshold labels, results and limits | Asgari & Khasteh, *Profitable Strategy Design for Trades on Cryptocurrency Markets with Machine Learning Techniques* |
+| [15-ml-cusum-triple-barrier-gradzki.md](15-ml-cusum-triple-barrier-gradzki.md) | CUSUM-filter events, triple-barrier labels (±5 %, 3 days), the paper's 30 inputs; built as `ml_cusum_barrier` | Grądzki, Wójcik & Lessmann, *Algorithmic crypto trading using information-driven bars, triple barrier labeling and deep learning* (2025) |
 | [rules-from-books.md](rules-from-books.md) | Every concrete rule we took from the books and where it lives in the code | All |
 
 ## Sources

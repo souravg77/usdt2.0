@@ -261,6 +261,23 @@ Labels stay price-only; fundamentals are never used to make a label.
 - Not included (paid or not published): exchange flows, STH/LTH supply and cost basis, liquidations, TVL and
   fee revenue per coin. Long/short ratio has only about a month of history, too little to train on.
 
+## ml_cusum_barrier (Grądzki, Wójcik & Lessmann: CUSUM events and the triple barrier)
+
+From the paper Shawn supplied on 2026-11-07 ([docs/knowledge/15](knowledge/15-ml-cusum-triple-barrier-gradzki.md)).
+The CUSUM filter adds up the candle-to-candle rises and falls and marks an **event** when either total
+passes 2 %; then both totals start again. Only events are learned from and traded. Each past event is
+labelled with a **triple barrier**: a win if the price rose 5 % before it fell 5 %, a loss if it fell first,
+and after 3 days with neither, the direction of the move (a rise has to beat the 0.15 % round-trip fee).
+The inputs are the paper's 30: distance from EMA 5/10/15/20/50 and the close's spread over the same
+lengths, MACD, RSI 6/10/14, stochastic %K/%D, Williams %R, Bollinger (5, 2), the last return, Chaikin
+money flow 21, money flow index 14, sine and cosine of the hour and weekday, plus the two CUSUM totals.
+Gradient-boosted trees and a small neural network vote; the paper's best model, a ResNet-LSTM, needs
+PyTorch, which the platform doesn't install. A long opens at the next open after an event candle whose
+chance is 70 % or more (Shawn's ML threshold; the paper used 60 %), with a stop 5 % below and a target 5 %
+above (1R) and a 3-day time stop. Retrained every 250 candles on the events of the last 3,000 candles,
+walk-forward. 1h and 4h; the short twin learns the upside-down chart. Add it with
+`learn add-builtin ml_cusum_barrier`, `learn add-shorts`, then `learn test` per engine.
+
 ## New indicators
 
 Added to `aitrader.indicators` with unit tests (warm-up, value checks, no look-ahead):
