@@ -146,7 +146,14 @@ done
 grep -q '^AITRADER_LIVE_UNLOCKED=true' .env && echo "NOTE: live trading is unlocked in .env" || true
 
 say "Building and starting (the first build takes a few minutes)"
-$DOCKER compose build
+# Newer Docker Compose builds with "bake", which refuses the host network the build uses
+# (build.network: host, for VPSes whose Docker network stalls downloads) with "additional
+# privileges requested". COMPOSE_BAKE=false keeps the classic builder; if this Compose ignores it,
+# plain `docker build` makes the same image.
+if ! ${DOCKER%docker} env COMPOSE_BAKE=false docker compose build; then
+  say "Compose couldn't build; building with docker build instead"
+  $DOCKER build --network host --build-arg UID="$(id -u)" -t aitrader:latest .
+fi
 $DOCKER compose run --rm -T collector migrate
 $DOCKER compose up -d collector context news paper web
 # Bybit demo trading is gone (not offered everywhere): remove its old trader if it is still there.

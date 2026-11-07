@@ -112,7 +112,12 @@ MOVED=1
 log "code updated:"
 git log --format='  %h %s' "$PREV..$NEXT" | head -n 30
 
-docker compose build --pull
+# COMPOSE_BAKE=false: newer Compose's "bake" builder refuses the build's host network ("additional
+# privileges requested"); plain `docker build` is the fallback when this Compose ignores it
+if ! COMPOSE_BAKE=false docker compose build --pull; then
+  log "compose couldn't build; building with docker build instead"
+  docker build --pull --network host --build-arg UID="$(id -u)" -t aitrader:latest .
+fi
 MIGRATED=1
 docker compose run --rm -T collector migrate
 
