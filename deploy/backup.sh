@@ -13,6 +13,8 @@
 set -euo pipefail
 umask 077  # backups hold password hashes and encrypted keys: readable by you only
 cd "$(dirname "$0")/.."
+# a DOCKER_HOST from another tool (Podman's socket, for one) that doesn't answer: use the system Docker
+if [ -n "${DOCKER_HOST:-}" ] && ! ${DOCKER:-docker} info >/dev/null 2>&1; then unset DOCKER_HOST; fi
 fromenv() { [ -f .env ] && grep -E "^$1=" .env | tail -n1 | cut -d= -f2- || true; }
 : "${AITRADER_BACKUP_KEEP:=$(fromenv AITRADER_BACKUP_KEEP)}"
 : "${AITRADER_BACKUP_COPY_TO:=$(fromenv AITRADER_BACKUP_COPY_TO)}"

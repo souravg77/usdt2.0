@@ -71,6 +71,30 @@ if [ "$MODE" = "--check" ]; then
   exit 0
 fi
 
+# ---- can this user reach Docker? ---------------------------------------------------------------
+# A DOCKER_HOST or docker context left by another tool (Podman's socket, for one) that doesn't answer
+# sends every docker command nowhere ("Cannot connect to the Docker daemon"); the platform runs on
+# the system Docker, so fall back to it. Stop here, before the backup, if Docker can't be reached.
+
+docker_ok() { docker info >/dev/null 2>&1; }
+if ! docker_ok && [ -n "${DOCKER_HOST:-}" ]; then
+  log "DOCKER_HOST=$DOCKER_HOST doesn't answer; using the system Docker instead"
+  unset DOCKER_HOST
+fi
+if ! docker_ok; then
+  ctx="$(docker context show 2>/dev/null || true)"
+  if [ -n "$ctx" ] && [ "$ctx" != default ]; then
+    log "docker context '$ctx' doesn't answer; using the default one instead"
+    export DOCKER_CONTEXT=default
+  fi
+fi
+if ! docker_ok; then
+  if [ -S /var/run/docker.sock ] && [ ! -w /var/run/docker.sock ]; then
+    die "$(id -un) can't use Docker yet: log out and back in once (the installer added you to the docker group), then run this again"
+  fi
+  die "Docker isn't running or can't be reached: run 'sudo systemctl start docker', then run this again. Nothing was changed."
+fi
+
 # ---- before: state to compare and to roll back to -----------------------------------------------
 
 live_state() {  # prints "locked", "UNLOCKED" or "unknown"

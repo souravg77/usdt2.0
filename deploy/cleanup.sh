@@ -12,6 +12,8 @@
 #   (install.sh runs it and adds this weekly cron line for you)
 set -uo pipefail
 cd "$(dirname "$0")/.."
+# a DOCKER_HOST from another tool (Podman's socket, for one) that doesn't answer: use the system Docker
+if [ -n "${DOCKER_HOST:-}" ] && ! ${DOCKER:-docker} info >/dev/null 2>&1; then unset DOCKER_HOST; fi
 DOCKER="${DOCKER:-docker}"
 before=$(df -Pk . | awk 'NR==2 {print $4}')
 $DOCKER image prune -f >/dev/null || true                         # untagged leftovers
