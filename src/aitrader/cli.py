@@ -1286,7 +1286,8 @@ def cmd_backup(s: Settings, args) -> int:
             fstore.close()
     for path in ("data/learn/registry.json", "data/learn/paper_state.json", "data/ai/models/registry.json",
                  "data/trade/live_state.json", "data/trade/control.json",
-                 "data/golive/approval.json", "data/golive/attestations.json", "data/settings/keys.enc"):
+                 "data/golive/approval.json", "data/golive/approval-futures.json",
+                 "data/golive/attestations.json", "data/settings/keys.enc"):
         if os.path.exists(path):
             target = os.path.join(args.dest, path.replace("/", "__"))
             shutil.copy2(path, target)
@@ -1399,18 +1400,19 @@ async def _trade_run(s: Settings, args, control) -> int:
             print("set AITRADER_PILOT_MAX_USDT in .env: the most USDT the live pilot may use", file=sys.stderr)
             return 1
         gl = GoLive(events=events, cfg=GateConfig.from_env())
-        approval = gl._load("approval.json")
-        approved = sorted((approval.get("strategies") or {}))
-        if approved and not approval_intact(approval):
-            print("the go-live approval was edited or not made by `golive approve`: approve again", file=sys.stderr)
+        approvals = gl.approvals()
+        if any(not approval_intact(a) for a in approvals.values()):
+            print("a go-live approval was edited or not made by `golive approve`: approve again", file=sys.stderr)
             return 1
-        if not approved:
-            print("no go-live approval: run `aitrader golive check` then `aitrader golive approve`",
+        approved = {m: set(a.get("strategies") or {}) for m, a in approvals.items()}
+        if not any(approved.values()):
+            print("no go-live approval: run `aitrader golive approve` (add --market futures for Futures AI)",
                   file=sys.stderr)
             return 1
-        strategies = (strategies or set(approved)) & set(approved)
-        if not strategies or len(strategies) > 2:
-            print("the live pilot runs 1 or 2 approved strategies", file=sys.stderr)
+        everyone = set().union(*approved.values())
+        strategies = (strategies or everyone) & everyone
+        if not strategies or any(len(ids & strategies) > 2 for ids in approved.values()):
+            print("the live pilot runs 1 or 2 approved strategies per engine", file=sys.stderr)
             return 1
         guard, monitor = gl.guard, gl.monitor
     adapter = make_adapter(args.exchange, s)
@@ -1466,6 +1468,87 @@ def confirm_live_approval(strategy_ids: list[str], ask=input, isatty=None, marke
     return typed
 
 
+def _engine_name(market: str) -> str:
+    return "Futures AI" if market == "futures" else "Spot AI"
+
+
+def _approve_cmd(market: str) -> str:
+    return ("docker compose run --rm -it collector golive approve"
+            + (" --market futures" if market == "futures" else ""))
+
+
+def _golive_list(gl, market: str) -> int:
+    """The strategy ids that can be approved for one engine, each judged by the gate on its own."""
+    cands = gl.candidates(market)
+    print(f"{_engine_name(market)}: strategies in paper trading that passed the "
+          f"{'perpetual' if market == 'futures' else 'spot'} backtest")
+    if not cands:
+        print("  none yet: a strategy needs paper status and a passed backtest for this engine")
+        return 1
+    for n, c in enumerate(cands, 1):
+        state = "READY" if c["passed"] else "not yet: " + ", ".join(c["failed"])
+        print(f"  {n}. {c['id']}  ({c['name']}, {c['paper_trades']} paper trades, "
+              f"{c['expectancy_r']:+.2f}R)  {state}")
+    print("To approve, run (it lists these again and asks for the numbers):\n  " + _approve_cmd(market))
+    return 0 if any(c["passed"] for c in cands) else 1
+
+
+def _golive_status(gl) -> int:
+    from .trade.golive import approval_intact
+
+    approvals = gl.approvals()
+    for m in ("spot", "futures"):
+        a = approvals.get(m)
+        if not a:
+            print(f"{_engine_name(m)}: not approved")
+        elif not approval_intact(a):
+            print(f"{_engine_name(m)}: the approval file was edited: it counts for nothing, approve again")
+        else:
+            when = time.strftime("%Y-%m-%d", time.gmtime(a.get("at", 0)))
+            problems = [p for sid in a["strategies"] for p in gl.guard(sid, m)]
+            print(f"{_engine_name(m)}: approved by {a['by']} on {when} for {', '.join(sorted(a['strategies']))}"
+                  + ("" if not problems else "  (" + "; ".join(problems) + ")"))
+    return 0
+
+
+def pick_strategies(gl, market: str, ask=input, isatty=None) -> list[str]:
+    """No --strategy given: show the engine's strategies with their gate result and let the person
+    pick 1 or 2 by number. Only strategies that pass the gate on their own can be picked."""
+    if not (isatty or sys.stdin.isatty)():
+        print("approving live trading needs a person: run it in a terminal:\n  " + _approve_cmd(market),
+              file=sys.stderr)
+        return []
+    _golive_list(gl, market)
+    ready = [c for c in gl.candidates(market) if c["passed"]]
+    if not ready:
+        print("nothing to approve yet: no strategy passes the go/no-go gate for "
+              f"{_engine_name(market)} (see `golive check" + (" --market futures" if market == "futures" else "")
+              + "`)", file=sys.stderr)
+        return []
+    every = gl.candidates(market)
+    try:
+        typed = ask("Number(s) of 1 or 2 READY strategies, like 1 or 1,2: ").replace(" ", "")
+    except EOFError:
+        typed = ""
+    try:
+        picked = [every[int(x) - 1] for x in typed.split(",") if x]
+    except (ValueError, IndexError):
+        picked = []
+    if not picked or len(picked) > 2 or not all(c["passed"] for c in picked):
+        print("not approved: pick 1 or 2 numbers marked READY", file=sys.stderr)
+        return []
+    return [c["id"] for c in picked]
+
+
+def _ask_name(ask=input) -> str:
+    if not sys.stdin.isatty():
+        return ""
+    try:
+        return ask("Your name (recorded with the approval): ").strip()
+    except EOFError:
+        return ""
+
+
 def cmd_golive(s: Settings, args) -> int:
     """Phase 6 go/no-go gate: check it, record the manual items, approve or revoke."""
     from .trade import GateConfig, GoLive
@@ -1477,28 +1560,45 @@ def cmd_golive(s: Settings, args) -> int:
         print(f"engine: {'Futures AI' if args.market == 'futures' else 'Spot AI'} (an approval covers one engine)")
         for c in rep["criteria"]:
             print(f"[{'PASS' if c['passed'] else 'FAIL'}] {c['name']}: {c['value']}  (needs {c['threshold']})")
-        print("GATE PASSES: you may approve (aitrader golive approve)" if rep["passed"] else "gate does not pass yet")
+        print(("GATE PASSES: you may approve: " + _approve_cmd(args.market)) if rep["passed"] else "gate does not pass yet")
         print(f"live lock in .env: {'open' if not live_gate_problems(s) else 'locked'}")
         return 0 if rep["passed"] else 1
     if cmd == "attest":
         a = gl.attest(args.item, by=args.by, note=args.note or "")
         print(f"recorded: {args.item} confirmed by {a['by']}")
         return 0
+    if cmd == "list":
+        return _golive_list(gl, args.market)
+    if cmd == "status":
+        return _golive_status(gl)
     if cmd == "approve":
-        phrase = confirm_live_approval(args.strategy or [], market=args.market)
+        ids = args.strategy or pick_strategies(gl, args.market)
+        if not ids:
+            return 1
+        by = args.by or _ask_name()
+        if not by:
+            print("not approved: say who approves (--by NAME)", file=sys.stderr)
+            return 1
+        phrase = confirm_live_approval(ids, market=args.market)
         if phrase is None:
             return 1
         try:
-            gl.approve(args.strategy or [], by=args.by, confirmation=phrase, market=args.market)
+            gl.approve(ids, by=by, confirmation=phrase, market=args.market)
         except ValueError as exc:
             print(f"not approved: {exc}", file=sys.stderr)
             return 1
-        print("approved. Live orders still need the live lock in .env opened by you, "
+        other = "spot" if args.market == "futures" else "futures"
+        print(f"approved for {_engine_name(args.market)}. The {_engine_name(other)} approval, if any, is unchanged.")
+        print("Live orders still need the live lock in .env opened by you, "
               "AITRADER_PILOT_MAX_USDT, and the executor-live service started.")
         return 0
     if cmd == "revoke":
-        gl.revoke(by=args.by or "")
-        print("approval revoked: the live executor stops opening trades")
+        done = gl.revoke(by=args.by or "", market=args.market)
+        if not done:
+            print("there was no approval to revoke")
+            return 0
+        print("approval revoked for " + " and ".join(_engine_name(m) for m in done)
+              + ": the live executor stops opening trades there")
         return 0
     raise SystemExit(f"unknown golive command {cmd}")
 
@@ -2025,13 +2125,18 @@ def build_parser() -> argparse.ArgumentParser:
     gla.add_argument("item", choices=["keys", "kill_switch", "compliance"])
     gla.add_argument("--by", required=True)
     gla.add_argument("--note")
-    glp = gl_sub.add_parser("approve", help="approve 1-2 strategies for the live pilot (gate must pass)")
-    glp.add_argument("--strategy", action="append", required=True)
-    glp.add_argument("--by", required=True)
+    gll = gl_sub.add_parser("list", help="the strategy ids you can approve for one engine, with the gate result")
+    gll.add_argument("--market", choices=["spot", "futures"], default="spot")
+    gl_sub.add_parser("status", help="what is approved for Spot AI and for Futures AI")
+    glp = gl_sub.add_parser("approve", help="approve 1-2 strategies for the live pilot (gate must pass); "
+                            "without --strategy it lists them and asks")
+    glp.add_argument("--strategy", action="append", help="a strategy id; leave out to pick from a list")
+    glp.add_argument("--by", help="your name; asked for when left out")
     glp.add_argument("--market", choices=["spot", "futures"], default="spot",
                      help="the one engine this approval covers: Spot AI or Futures AI")
-    glr = gl_sub.add_parser("revoke", help="withdraw the approval: live goes back to paper")
+    glr = gl_sub.add_parser("revoke", help="withdraw an approval: live goes back to paper")
     glr.add_argument("--by")
+    glr.add_argument("--market", choices=["spot", "futures"], help="one engine; both when left out")
 
     tg = sub.add_parser("telegram", help="service: Telegram alerts and /status /pause /resume /kill")
     tg.add_argument("--test", action="store_true", help="send one test message and exit")

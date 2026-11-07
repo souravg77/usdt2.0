@@ -38,17 +38,16 @@ def gate_problems(golive) -> list[str]:
     """Why the go/no-go approval doesn't currently allow any live strategy (empty = it does)."""
     if golive is None:
         return ["the go/no-go gate isn't available"]
-    approval = golive._load("approval.json")
-    if not approval.get("strategies"):
+    approvals = golive.approvals()
+    if not any(a.get("strategies") for a in approvals.values()):
         return ["the go/no-go gate hasn't been passed and approved yet"]
-    from ..trade.golive import approval_market
-
     problems = []
-    for sid in approval["strategies"]:
-        p = golive.guard(sid, approval_market(approval))
-        if not p:
-            return []
-        problems += p
+    for market, approval in approvals.items():
+        for sid in approval.get("strategies") or {}:
+            p = golive.guard(sid, market)
+            if not p:
+                return []
+            problems += p
     return problems or ["no approved strategy is still valid"]
 
 

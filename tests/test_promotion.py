@@ -79,7 +79,7 @@ def test_approval_needs_the_gate_and_the_exact_phrase(tmp_path):
             gl.approve(["s1"], by="Shawn", confirmation=typed)
     with pytest.raises(TypeError):
         gl.approve(["s1"], by="Shawn")  # there is no default confirmation
-    assert gl.guard("s1") == ["no go-live approval (aitrader golive approve)"]
+    assert gl.guard("s1") == ["no go-live approval for Spot AI (aitrader golive approve)"]
     a = gl.approve(["s1"], by="Shawn", confirmation=confirmation_phrase(["s1"]))
     assert approval_intact(a) and a["confirmation"] == "I approve s1 for real-money Spot trading"
     assert gl.guard("s1") == []

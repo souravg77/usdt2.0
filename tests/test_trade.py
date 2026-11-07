@@ -417,7 +417,7 @@ def test_gate_fails_until_everything_is_in_place(tmp_path):
     gl.attest("kill_switch", by="Shawn", note="pulled it with nothing open")
     rep = gl.evaluate()
     assert rep["passed"], [c for c in rep["criteria"] if not c["passed"]]
-    assert gl.guard("s1") == ["no go-live approval (aitrader golive approve)"]
+    assert gl.guard("s1") == ["no go-live approval for Spot AI (aitrader golive approve)"]
     gl.approve(["s1"], by="Shawn", confirmation=confirmation_phrase(["s1"]))
     assert gl.guard("s1") == []
     assert gl.guard("other")
@@ -468,7 +468,7 @@ def test_the_gate_judges_and_approves_one_engine_at_a_time(tmp_path):
         gl.approve(["s1"], by="Shawn", confirmation=confirmation_phrase(["s1"]), market="futures")
     gl.approve(["s1"], by="Shawn", confirmation=confirmation_phrase(["s1"]))
     assert gl.guard("s1") == [] and gl.guard("s1", "spot") == []
-    assert "Spot AI only" in gl.guard("s1", "futures")[0]
+    assert "no go-live approval for Futures AI" in gl.guard("s1", "futures")[0]
     # Futures AI's perpetual longs are judged on their own
     with open(tmp_path / "paper.json") as fh:
         paper = json.load(fh)
@@ -1346,3 +1346,59 @@ def test_live_uses_each_coins_own_maintenance_margin(pl, tmp_path):
     assert e._mmr("BTC/USDT") == pytest.approx(0.005)
     assert e._mmr("NEW/USDT") == pytest.approx(0.02)
     assert e._mmr("UNKNOWN/USDT") == pytest.approx(0.005)
+
+
+def _ready_both(tmp_path):
+    """s1 passes the gate on both engines: half its paper trades are spot buys, half perpetual longs."""
+    gl, events, _ = _gate_world(tmp_path, n_trades=240)
+    reg = Registry(str(tmp_path / "reg.json"))
+    reg.entries["s1"].backtest_futures = {"out_of_sample": {"trades": 80, "expectancy_r": 0.3}}
+    reg.save()
+    with open(tmp_path / "paper.json") as fh:
+        paper = json.load(fh)
+    for t in [t for t in paper["trades"] if t["exit_ts"] % 4 < 2]:  # each engine gets both kinds of trade
+        t.update(key=t["key"] + "|futures", market="futures", perp=True)
+    with open(tmp_path / "paper.json", "w") as fh:
+        json.dump(paper, fh)
+    _beats(events)
+    gl.attest("kill_switch", by="Shawn")
+    gl.attest("keys", by="Shawn")
+    return gl
+
+
+def test_approving_futures_keeps_the_spot_approval(tmp_path):
+    from aitrader.trade.golive import load_approvals
+
+    gl = _ready_both(tmp_path)
+    gl.approve(["s1"], by="Shawn", confirmation=confirmation_phrase(["s1"]))
+    gl.approve(["s1"], by="Shawn", confirmation=confirmation_phrase(["s1"], "futures"), market="futures")
+    assert gl.guard("s1", "spot") == [] and gl.guard("s1", "futures") == []
+    assert set(load_approvals(str(tmp_path / "golive"))) == {"spot", "futures"}
+    assert gl.monitor([{"mode": "live", "r": -1.0, "market": "BTC/USDT:USDT"}] * 11).endswith("10R limit")
+    assert "Futures AI" in gl.monitor([{"mode": "live", "r": -1.0, "market": "BTC/USDT:USDT"}] * 11)
+    assert gl.revoke(by="Shawn", market="futures") == ["futures"]
+    assert gl.guard("s1", "spot") == [] and gl.guard("s1", "futures")
+    assert gl.revoke(by="Shawn") == ["spot"] and gl.guard("s1", "spot")
+
+
+def test_an_approval_from_before_the_split_moves_to_its_engine(tmp_path):
+    gl = _ready_both(tmp_path)
+    gl.approve(["s1"], by="Shawn", confirmation=confirmation_phrase(["s1"], "futures"), market="futures")
+    root = tmp_path / "golive"
+    os.replace(root / "approval-futures.json", root / "approval.json")  # how #176 stored it
+    assert gl.guard("s1", "futures") == [] and gl.guard("s1", "spot")
+    gl.approve(["s1"], by="Shawn", confirmation=confirmation_phrase(["s1"]))
+    assert gl.guard("s1", "futures") == [] and gl.guard("s1", "spot") == []
+
+
+def test_golive_approve_lists_the_strategies_and_takes_a_number(tmp_path, capsys):
+    from aitrader import cli
+
+    gl = _ready_both(tmp_path)
+    assert [c["id"] for c in gl.candidates("futures") if c["passed"]] == ["s1"]
+    assert cli.pick_strategies(gl, "futures", ask=lambda _: "1", isatty=lambda: True) == ["s1"]
+    out = capsys.readouterr().out
+    assert "1. s1" in out and "READY" in out and "golive approve --market futures" in out
+    assert cli.pick_strategies(gl, "futures", ask=lambda _: "7", isatty=lambda: True) == []
+    assert cli.pick_strategies(gl, "futures", ask=lambda _: "1", isatty=lambda: False) == []
+    assert "-it collector" in capsys.readouterr().err

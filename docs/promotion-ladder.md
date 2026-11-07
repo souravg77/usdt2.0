@@ -24,7 +24,7 @@ The dashboard's strategy list and `aitrader learn list` show each strategy's run
 | RESEARCH, BACKTESTED, OUT-OF-SAMPLE VALIDATED, PAPER, REJECTED, UNDER REVIEW, RETIRED | the strategy registry (`data/learn/registry.json`, field `status`) | the backtest gate (`learn test`), the paper service, `learn retire`, `learn paper-all` |
 | SHADOW MONITORED | counted from `data/learn/paper_state.json` | the paper service |
 | LIVE-ELIGIBLE | read from `data/golive/report.json` | the go/no-go gate (`golive check`) |
-| LIVE ENABLED | read from `data/golive/approval.json`, checked by `GoLive.guard` | only you, with `golive approve --strategy <id> --by <name>` at a terminal, typing the confirmation phrase |
+| LIVE ENABLED | read from `data/golive/approval.json` (Spot AI) and `approval-futures.json` (Futures AI), checked by `GoLive.guard` | only you, with `golive approve --strategy <id> --by <name>` at a terminal, typing the confirmation phrase |
 
 The top three rungs are never written into the registry: the registry refuses those statuses.
 So editing the registry can't make a strategy look approved, and the only way to LIVE ENABLED is
@@ -120,7 +120,8 @@ it with a small budget.
 
 ### LIVE ENABLED WITH EXPLICIT APPROVAL
 
-You run `aitrader golive approve --strategy <id> --by <name>` for one or two strategies after reading the
+You run `aitrader golive approve` (it lists the strategies and asks for numbers; add `--market futures`
+for Futures AI) for one or two strategies after reading the
 gate report and the risk settings. The approval re-runs the gate and is refused if it fails. It
 then asks you to type `I approve <ids> for real-money Spot trading` (or `... Futures trading` with `--market futures`) with the strategy ids; anything
 else, no terminal, or piped input means no approval, and there is no flag that skips the
