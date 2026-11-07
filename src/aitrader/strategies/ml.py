@@ -26,7 +26,8 @@ from collections import OrderedDict
 import numpy as np
 import pandas as pd
 
-from ..indicators import adx, atr, bollinger, cci, directional_index, ema, macd, relative_volume, rsi
+from ..indicators import (adx, atr, bollinger, cci, cmf, directional_index, ema, macd, mfi, relative_volume, rsi,
+                          stochastic, williams_r)
 from ..models import TIMEFRAME_MS
 from .families import BASE, NO_TRADE, SOURCE, _exit_rule
 from .master import TREND_RANGE, _df_key, _Master, _spec
@@ -515,4 +516,186 @@ class MlEnsembleFund(MlEnsemble):
         return np.hstack([X, F.to_numpy(float)]), ok & _fund_needed(F)
 
 
-ML_STRATEGIES = (MlBoosted, MlEnsemble, MlBoostedFund, MlEnsembleFund)
+# ---- Grądzki, Wójcik & Lessmann (2025): CUSUM-filter events and triple-barrier labels ----------
+
+
+def cusum_events(close: pd.Series, threshold: float) -> pd.DataFrame:
+    """The CUSUM filter (the paper's Eq. 10-12): running sums of up and down returns, each floored
+    at zero; a bar is an event when either sum passes ``threshold`` (0.02 = 2 %), and both sums then
+    start again. Only past closes are read, so an event is known when its candle closes.
+    Returns columns ``event`` (bool), ``up`` and ``down`` (the sums before any reset, as features)."""
+    c = close.to_numpy(float)
+    r = np.r_[np.nan, c[1:] / c[:-1] - 1]
+    n = len(r)
+    ev, up, dn = np.zeros(n, bool), np.full(n, np.nan), np.full(n, np.nan)
+    sp = sn = 0.0
+    for t in range(1, n):
+        if not np.isfinite(r[t]):
+            sp = sn = 0.0
+            continue
+        sp, sn = max(0.0, sp + r[t]), min(0.0, sn + r[t])
+        up[t], dn[t] = sp, sn
+        if sp >= threshold or -sn >= threshold:
+            ev[t] = True
+            sp = sn = 0.0
+    return pd.DataFrame({"event": ev, "up": up, "down": dn}, index=close.index)
+
+
+def triple_barrier_labels(df: pd.DataFrame, horizon: int, barrier: float, fee: float = 0.0015) -> np.ndarray:
+    """The paper's triple barrier (Lopez de Prado): 1 when the price rises ``barrier`` (5 %) before it
+    falls ``barrier`` within ``horizon`` bars, 0 when it falls first. When neither is touched by the
+    time barrier, the sign of the move then decides (a rise has to beat the round-trip ``fee``).
+    A bar touching both counts as a fall. NaN for the last ``horizon`` bars (outcome not known)."""
+    hi, lo, c = (df[k].to_numpy(float) for k in ("high", "low", "close"))
+    n = len(df)
+    out = np.full(n, np.nan)
+    for t in range(n - horizon):
+        up, dn = c[t] * (1 + barrier), c[t] * (1 - barrier)
+        res = None
+        for j in range(t + 1, t + horizon + 1):
+            if lo[j] <= dn:
+                res = 0.0
+                break
+            if hi[j] >= up:
+                res = 1.0
+                break
+        out[t] = res if res is not None else float(c[t + horizon] / c[t] - 1 > fee)
+    return out
+
+
+def gradzki_features(df: pd.DataFrame, events: pd.DataFrame) -> pd.DataFrame:
+    """The paper's feature set (its section 'Feature engineering'), made price-free so one coin
+    reads like another: EMA and standard deviation of the close over 5/10/15/20/50 bars, MACD
+    12/26, RSI 6/10/14, stochastic %K/%D 14, Williams %R 14, Bollinger bands (5 bars, 2 SD), the
+    last return, Chaikin money flow 21, money flow index 14, sine and cosine of the hour and the
+    weekday; plus the CUSUM sums themselves (the paper's advice: put volatility in the inputs)."""
+    c = df["close"]
+    cols = {}
+    for n in (5, 10, 15, 20, 50):
+        cols[f"ema{n}_dist"] = c / ema(c, n) - 1
+        cols[f"std{n}"] = c.rolling(n, min_periods=n).std(ddof=0) / c
+    m = macd(c)
+    cols.update(macd=m["macd"] / c, macd_signal=m["signal"] / c, macd_hist=m["hist"] / c)
+    for n in (6, 10, 14):
+        cols[f"rsi{n}"] = (rsi(c, n) - 50) / 50
+    st = stochastic(df, 14)
+    cols.update(stoch_k=st["k"] / 100 - 0.5, stoch_d=st["d"] / 100 - 0.5, williams_r=williams_r(df, 14) / 100 + 0.5)
+    b = bollinger(c, 5, 2.0)
+    cols.update(bb_pct=(c - b["lower"]) / (b["upper"] - b["lower"]).replace(0, np.nan), bb_width=(b["upper"] - b["lower"]) / c)
+    cols.update(ret1=c.pct_change(1), cmf21=cmf(df, 21), mfi14=(mfi(df, 14) - 50) / 50)
+    when = pd.to_datetime(df["ts"], unit="ms", utc=True)
+    hour, day = when.dt.hour.to_numpy(float), when.dt.day_of_week.to_numpy(float)
+    cols.update(hour_sin=np.sin(2 * np.pi * hour / 24), hour_cos=np.cos(2 * np.pi * hour / 24),
+                day_sin=np.sin(2 * np.pi * day / 7), day_cos=np.cos(2 * np.pi * day / 7))
+    cols.update(cusum_up=events["up"], cusum_down=events["down"])
+    return pd.DataFrame(cols, index=df.index).replace([np.inf, -np.inf], np.nan)
+
+
+class MlCusumBarrier(MlBoosted):
+    spec = _spec(
+        name="ml_cusum_barrier",
+        source=SOURCE + ": machine learning, Grądzki, Wójcik & Lessmann (2025) 'Algorithmic crypto trading "
+        "using information-driven bars, triple barrier labeling and deep learning' (Financial Innovation 11:136)",
+        timeframes=("1h", "4h"),
+        regime="Volatile, moving markets: the paper found the method earns most when volatility is high "
+        "and least in quiet ranges.",
+        setup="The CUSUM filter watches the candles: it adds up rises and falls and marks an event when "
+        "either total passes 2 % (the paper's best range was 2-2.5 %). Only events are learned from and "
+        "traded, so the model looks when the market has moved, not on every candle. For each past event a "
+        "triple barrier says what happened next: +5 % first (a win), -5 % first (a loss), or after 3 days "
+        "the direction of the move. Two models learn from the paper's 30 inputs (EMA and spread of the "
+        "close over 5/10/15/20/50 candles, MACD, RSI 6/10/14, stochastic, Williams %R, Bollinger 5, last "
+        "return, Chaikin money flow, money flow index, hour and weekday, and the CUSUM totals) and vote: "
+        "gradient-boosted trees (the paper's XGBoost) and a small neural network. Setup: an event candle "
+        "whose chance of +5 % first is 70 % or more (Shawn's ML threshold; the paper used 60 %).",
+        entry="Market order at the next bar's open.",
+        stop="Entry - 5 % (the lower barrier the models were trained on).",
+        target="+5 % (the upper barrier, 1R); time stop after 3 days (the time barrier).",
+        filter="Retrained every 250 candles on the events of up to the last 3,000 candles, only on events "
+        "whose 3-day outcome was already known; each model predicts only later events (walk-forward, no "
+        "leakage). No prediction until 100 labelled events exist. " + NO_TRADE,
+        size="0.5% of equity at risk.",
+        decisions=("The paper's best model was a ResNet-LSTM deep network; it needs PyTorch, which this "
+                   "platform doesn't install, so the trees plus a small scikit-learn network stand in. The "
+                   "paper's own tree model (XGBoost) did worse than its deep network, so judge this one on "
+                   "its own strategy test.",
+                   "The paper sampled from 1-minute data; here the filter runs on the 1h and 4h candles, so "
+                   "an event is seen at the candle close.",
+                   "The paper's profits were on ETH (and MATIC, LINK); on BTC most settings lost, and every "
+                   "result was before the time the platform trades. It has to pass the same walk-forward, "
+                   "Monte Carlo and holdout gate as every other strategy, per engine.",
+                   "One setting (2 % filter, 5 % barriers, 3 days) for every coin: the paper says each coin "
+                   "may need its own, but tuning per coin would fit the test to the coins it is judged on.",
+                   "The paper found volatility-scaled barriers made results worse, so the barriers are "
+                   "fixed percentages."),
+    )
+    reason = "CUSUM event: ML chance of +5 % before -5 % at 70 % or more"
+    history_bars = 3000 + 72 + 2 * 250
+
+    @classmethod
+    def default_params(cls):
+        return {**BASE, "cusum": 0.02, "barrier": 0.05, "hours": 72, "fee": 0.0015, "min_train": 100,
+                "train_bars": 3000, "retrain": 250, "threshold": 0.7, "target_r": 1.0}
+
+    def _horizon(self, timeframe: str) -> int:
+        return max(1, round(self.params["hours"] * 3_600_000 / TIMEFRAME_MS[timeframe]))
+
+    def _events(self, df):
+        key = (_df_key(df), self.params["cusum"])
+        if getattr(self, "_ev_memo", (None,))[0] != key:
+            self._ev_memo = (key, cusum_events(df["close"], self.params["cusum"]))
+        return self._ev_memo[1]
+
+    def _features(self, df):
+        ev = self._events(df)
+        X = gradzki_features(df, ev)
+        return X.to_numpy(float), X.notna().all(axis=1).to_numpy() & ev["event"].to_numpy()
+
+    def _labels(self, df):
+        p = self.params
+        return triple_barrier_labels(df, self._horizon(getattr(self, "_tf", None) or self.spec.timeframes[0]),
+                                     p["barrier"], p["fee"])
+
+    def _model(self, X, y, key):
+        model = _MODELS.get(key)
+        if model is None:
+            from sklearn.ensemble import HistGradientBoostingClassifier
+            from sklearn.neural_network import MLPClassifier
+            from sklearn.pipeline import make_pipeline
+            from sklearn.preprocessing import StandardScaler
+
+            import warnings
+
+            from sklearn.exceptions import ConvergenceWarning
+
+            vote = _Vote([
+                HistGradientBoostingClassifier(max_iter=100, learning_rate=0.05, max_depth=3, min_samples_leaf=10,
+                                               l2_regularization=1.0, early_stopping=False, random_state=0),
+                make_pipeline(StandardScaler(), MLPClassifier(hidden_layer_sizes=(32, 16), alpha=1.0,
+                                                              max_iter=400, random_state=0)),
+            ])
+            with warnings.catch_warnings():  # a few hundred events: the small network stops at max_iter
+                warnings.simplefilter("ignore", ConvergenceWarning)
+                model = vote.fit(X, y)
+            _remember(_MODELS, key, model, MAX_MODELS)
+        else:
+            _MODELS.move_to_end(key)
+        return model
+
+    def setup(self, df, timeframe):
+        key = (_df_key(df), timeframe)
+        if getattr(self, "_memo", (None,))[0] != key:
+            self._memo = (key, self.probabilities(df, timeframe))
+        return self._events(df)["event"] & (self._memo[1] >= self.params["threshold"])
+
+    def stop_series(self, df):
+        return df["close"] * (1 - self.params["barrier"])
+
+    def exit_key(self):
+        tf = getattr(self, "_tf", None) or self.spec.timeframes[0]
+        return f"time_stop={self._horizon(tf)}"
+
+
+from .deep import MlCusumResnetLstm  # noqa: E402  (it builds on the classes above)
+
+ML_STRATEGIES = (MlBoosted, MlEnsemble, MlBoostedFund, MlEnsembleFund, MlCusumBarrier, MlCusumResnetLstm)

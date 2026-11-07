@@ -16,6 +16,7 @@ DATA = {"buy_the_dip": dict(vol=0.03, drift=0.0015),
         "rsi_reversal": dict(seed=0),
         "rsi_divergence": dict(seed=0),
         "ml_classifier": dict(seed=0),
+        "ml_cusum_resnet_lstm": dict(seed=0, vol=0.015, n=2500, tf_ms=14_400_000),
         "price_channel_two_bars_above": dict(seed=0, vol=0.012, tf_ms=300_000, split_wicks=True),
         "pin_bar_reentry_long": dict(seed=3, vol=0.012, tf_ms=900_000, split_wicks=True),
         "m2b_two_legged_pullback_ema20": dict(seed=0, vol=0.012, tf_ms=300_000, split_wicks=True),
@@ -54,6 +55,18 @@ def with_funding(df):
     return df
 
 
+# smaller settings so the network trains in seconds here (the strategy's own tests use the defaults' shape)
+PARAMS = {"ml_cusum_resnet_lstm": dict(min_train=150, retrain=100, seeds=1, epochs=10, patience=3,
+                                         threshold=0.5)}
+
+
+def _needs_torch(name):
+    import importlib.util
+
+    if name == "ml_cusum_resnet_lstm" and importlib.util.find_spec("torch") is None:
+        pytest.skip("ml_cusum_resnet_lstm needs PyTorch (the server image installs it)")
+
+
 def data_for(name):
     df = synthetic(**DATA.get(name, {}))
     return with_funding(df) if STRATEGIES[name].needs_context else df
@@ -61,7 +74,8 @@ def data_for(name):
 
 @pytest.mark.parametrize("name", list(STRATEGIES))
 def test_signals_are_well_formed(name):
-    strat = STRATEGIES[name]()
+    _needs_torch(name)
+    strat = STRATEGIES[name](**PARAMS.get(name, {}))
     tf = strat.spec.timeframes[0]
     sigs = strat.generate(data_for(name), "bybit", "BTC/USDT", tf)
     assert sigs, f"{name} produced no signals on synthetic data"
@@ -77,9 +91,11 @@ def test_signals_are_well_formed(name):
 @pytest.mark.parametrize("name", list(STRATEGIES))
 def test_no_lookahead(name):
     """Signals up to bar k must not change when later bars are added."""
+    _needs_torch(name)
     # the ML strategies' 70 % entry bar rarely trips this early on synthetic data; a lower one gives
     # this test signals to compare (the look-ahead question doesn't depend on the bar)
-    strat = STRATEGIES[name](threshold=0.55) if name.startswith("ml_") else STRATEGIES[name]()
+    strat = STRATEGIES[name](**{"threshold": 0.55, **PARAMS.get(name, {})}) if name.startswith("ml_") \
+        else STRATEGIES[name]()
     tf = strat.spec.timeframes[0]
     df = data_for(name)
     full = strat.generate(df, "bybit", "BTC/USDT", tf)
