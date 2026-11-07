@@ -202,3 +202,21 @@ def test_cleanup_frees_space_but_never_touches_the_data():
         assert keep not in text.split("set -uo pipefail")[1]
     install = open("deploy/install.sh", encoding="utf-8").read()
     assert "./deploy/cleanup.sh" in install and "0 5 * * 0" in install
+
+
+def test_install_retries_downloads_and_keeps_going_without_caddy(tmp_path):
+    """A Docker Hub timeout is retried; if the HTTPS server (caddy) still won't download, the rest of
+    the install (backups, cron, health check, the password) still runs and says how to start it."""
+    text = (ROOT / "deploy" / "install.sh").read_text()
+    retry = text[text.index("RETRY_WAIT="):text.index("\n}\n", text.index("retry() {")) + 3]
+    flaky = tmp_path / "flaky.sh"
+    flaky.write_text('n=$(cat "$1"); echo $((n - 1)) > "$1"; [ "$n" -le 0 ]\n')
+    count = tmp_path / "n"
+    for fails, ok in ((2, True), (4, False)):
+        count.write_text(str(fails))
+        r = subprocess.run(["bash", "-c", f"set -euo pipefail\n{retry}\nretry bash {flaky} {count} && echo OK"],
+                           env={**os.environ, "AITRADER_RETRY_WAIT": "0"}, capture_output=True, text=True)
+        assert ("OK" in r.stdout) is ok, r.stderr
+    assert "retry build_image" in text and "retry $DOCKER compose up -d collector" in text
+    assert "retry $DOCKER compose --profile https up -d --force-recreate caddy || {" in text
+    assert "NOT REACHABLE YET" in text and 'echo "Dashboard password: $NEW_PW' in text

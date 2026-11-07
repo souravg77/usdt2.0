@@ -39,6 +39,15 @@ while [ $# -gt 0 ]; do
 done
 
 say() { printf '\n==> %s\n' "$*"; }
+RETRY_WAIT="${AITRADER_RETRY_WAIT:-15}"
+retry() {  # retry CMD...: up to 4 tries, since Docker Hub downloads can time out ("TLS handshake timeout")
+  local n=1
+  until "$@"; do
+    [ "$n" -ge 4 ] && return 1
+    echo "That failed (try $n of 4), probably a slow download; trying again in $((n * RETRY_WAIT))s" >&2
+    sleep $((n * RETRY_WAIT)); n=$((n + 1))
+  done
+}
 [ "$(id -u)" -ne 0 ] || { echo "Run this as your normal user (it uses sudo when needed), not as root." >&2; exit 1; }
 . /etc/os-release
 [ "${ID:-}" = ubuntu ] || echo "warning: this script is written for Ubuntu; you have ${PRETTY_NAME:-unknown}" >&2
@@ -127,6 +136,7 @@ sed -i 's#^AITRADER_RISK_PER_TRADE=0.005$#AITRADER_RISK_PER_TRADE=0.0025#; s#^AI
 chmod 600 .env
 if ! grep -qE '^AITRADER_WEB_PASSWORD=.{12,}' .env; then
   NEW_PW="$(openssl rand -base64 18 | tr -d '/+=' | cut -c1-20)"
+  echo "Dashboard password: $NEW_PW    <- save it now; it is shown again at the end (and kept in .env)"
   setkey AITRADER_WEB_PASSWORD "$NEW_PW"
 fi
 setkey AITRADER_WEB_SECRET "$(openssl rand -hex 32)"
@@ -150,12 +160,14 @@ say "Building and starting (the first build takes a few minutes)"
 # (build.network: host, for VPSes whose Docker network stalls downloads) with "additional
 # privileges requested". COMPOSE_BAKE=false keeps the classic builder; if this Compose ignores it,
 # plain `docker build` makes the same image.
-if ! ${DOCKER%docker} env COMPOSE_BAKE=false docker compose build; then
+build_image() {
+  ${DOCKER%docker} env COMPOSE_BAKE=false docker compose build && return 0
   say "Compose couldn't build; building with docker build instead"
   $DOCKER build --network host --build-arg UID="$(id -u)" -t aitrader:latest .
-fi
+}
+retry build_image
 $DOCKER compose run --rm -T collector migrate
-$DOCKER compose up -d collector context news paper web
+retry $DOCKER compose up -d collector context news paper web  # also downloads ollama the first time
 # Bybit demo trading is gone (not offered everywhere): remove its old trader if it is still there.
 old=$($DOCKER ps -aq --filter label=com.docker.compose.service=executor-testnet 2>/dev/null || true)
 [ -n "$old" ] && $DOCKER rm -f $old >/dev/null || true
@@ -166,7 +178,11 @@ for svc in telegram users; do
     $DOCKER compose --profile "$svc" up -d "$svc"
   fi
 done
-$DOCKER compose --profile https up -d --force-recreate caddy  # picks up Caddyfile changes
+CADDY_OK=1  # the web server for HTTPS; picks up Caddyfile changes. A failed download doesn't stop the rest.
+retry $DOCKER compose --profile https up -d --force-recreate caddy || {
+  CADDY_OK=0
+  echo "warning: couldn't download or start the HTTPS web server (caddy); the dashboard isn't reachable until it runs" >&2
+}
 
 say "Daily backups"
 # Every day at 03:30 (server time): database, strategy registry, trade state, accounts. The newest
@@ -201,6 +217,7 @@ $DOCKER compose run --rm -T collector doctor || true
 cat <<EOF
 
 Done. Open the dashboard: ${SITE%/}
+$( [ "$CADDY_OK" = 1 ] || echo "  NOT REACHABLE YET: the HTTPS web server didn't download. Run: cd $DIR && docker compose --profile https up -d caddy" )
   user:     $(grep -E '^AITRADER_WEB_USER=' .env | cut -d= -f2- || echo admin)
 $( [ -n "$NEW_PW" ] && echo "  password: $NEW_PW    <- save it now in a password manager; it is shown only once" || echo "  password: the one already in .env (AITRADER_WEB_PASSWORD)" )
 $( [ "$TLS" = internal ] && echo "Your browser will warn about the certificate the first time: see 'Trust the certificate' in docs/install-ubuntu.md." )
