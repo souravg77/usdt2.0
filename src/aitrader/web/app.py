@@ -2416,15 +2416,16 @@ def _win_choice(registry_path: str, csrf: str, ws: str = "spot") -> str:
 def _live_card(settings, paths: Paths, events: list[dict]) -> str:
     """Live (real money) readiness. It is switched on only on the server, never from the website."""
     rep = _load_json(os.path.join(paths.golive_dir, "report.json"))
-    from ..trade.golive import approval_intact
+    from ..trade.golive import approval_intact, load_approvals
 
-    approval = _load_json(os.path.join(paths.golive_dir, "approval.json"))
+    approvals = load_approvals(paths.golive_dir)
     svc, svc_cls, _detail = _service_state(events, "executor-live", int(time.time() * 1000))
     checks = [
         ("Real Bybit keys saved (spot trade only, no withdrawals, IP-bound)",
          bool(os.environ.get("BYBIT_API_KEY") and os.environ.get("BYBIT_API_SECRET"))),
         ("Go/no-go gate passed", bool(rep.get("passed"))),
-        ("Strategies approved (aitrader golive approve)", approval_intact(approval)),
+        ("Strategies approved (aitrader golive approve)",
+         bool(approvals) and all(approval_intact(a) for a in approvals.values())),
         ("Pilot budget set (AITRADER_PILOT_MAX_USDT in .env)", bool(os.environ.get("AITRADER_PILOT_MAX_USDT"))),
         ("Live lock opened in .env on the server", not live_gate_problems(settings)),
         ("Live trader running", svc_cls == "good"),
@@ -2485,9 +2486,9 @@ def _equity_svg(paper: dict, execs: dict) -> str:
 
 def _gate_card(paths: Paths, csrf: str) -> str:
     rep = _load_json(os.path.join(paths.golive_dir, "report.json"))
-    from ..trade.golive import approval_intact
+    from ..trade.golive import approval_intact, load_approvals
 
-    approval = _load_json(os.path.join(paths.golive_dir, "approval.json"))
+    approvals = load_approvals(paths.golive_dir)
     if rep:
         rows = "".join(f'<li class="{"good" if c["passed"] else "bad"}">{"✓" if c["passed"] else "✗"} '
                        f'{_e(c["name"])}: {_e(c["value"])}</li>' for c in rep.get("criteria", []))
@@ -2495,10 +2496,17 @@ def _gate_card(paths: Paths, csrf: str) -> str:
                 f'{"passes" if rep.get("passed") else "does not pass yet"}</b> (checked {_when(rep.get("at"))})')
     else:
         rows, head = "", "not checked yet"
-    appr = (f'<br>Approved by {_e(approval["by"])} for {_e(", ".join(approval.get("strategies", {})))}'
-            if approval_intact(approval) else
-            ('<br><b class="bad">The approval file was edited or not made by <code>golive approve</code>: '
-             'it counts for nothing</b>' if approval else '') + "<br>No live approval (approve on the server: <code>aitrader golive approve</code>)")
+    appr = ""
+    for m, name in (("spot", "Spot AI"), ("futures", "Futures AI")):
+        a = approvals.get(m)
+        if a and approval_intact(a):
+            appr += f'<br>{name}: approved by {_e(a["by"])} for {_e(", ".join(a.get("strategies", {})))}'
+        elif a:
+            appr += (f'<br><b class="bad">{name}: the approval file was edited or not made by '
+                     '<code>golive approve</code>: it counts for nothing</b>')
+        else:
+            appr += (f'<br>{name}: no live approval (on the server: <code>golive approve'
+                     + (' --market futures' if m == "futures" else '') + '</code>)')
     return (f'<div class="card"><h3>Go/no-go gate (Phase 6)</h3><p>{head}{appr}</p><ul class="small gate">{rows}</ul>'
             f'<form method="post" action="/trading/gate">{csrf}<button class="ghost">Check the gate now</button></form></div>')
 

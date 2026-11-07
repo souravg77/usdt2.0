@@ -50,7 +50,9 @@ class Evidence:
         self.golive_dir, self.registry_path, self.models_dir = golive_dir, registry_path, models_dir
         report = _load(os.path.join(golive_dir, "report.json"))
         self.eligible = set(report.get("strategies", [])) if report.get("passed") else set()
-        self.approved = set((_load(os.path.join(golive_dir, "approval.json")).get("strategies") or {}))
+        from ..trade.golive import load_approvals
+
+        self.approved = {sid: m for m, a in load_approvals(golive_dir).items() for sid in (a.get("strategies") or {})}
         self.paper: dict[str, list[float]] = {}
         for t in _load(paper_state).get("trades", []):
             if t.get("r") is not None:
@@ -66,7 +68,7 @@ class Evidence:
             self._guard = GoLive(root=self.golive_dir, registry_path=self.registry_path,
                                  models_dir=self.models_dir).guard
         try:
-            return not self._guard(entry_id)
+            return not self._guard(entry_id, self.approved[entry_id])
         except Exception:  # an unreadable approval or registry never counts as approved
             return False
 

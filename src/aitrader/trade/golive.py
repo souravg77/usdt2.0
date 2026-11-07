@@ -60,6 +60,23 @@ class _R:
 
 
 MARKETS = ("spot", "futures")
+APPROVAL_FILES = {"spot": "approval.json", "futures": "approval-futures.json"}
+
+
+def load_approvals(root: str = DEFAULT_DIR) -> dict[str, dict]:
+    """Every engine's approval, keyed by the engine it covers. Spot AI and Futures AI each keep
+    their own file, so approving one never replaces the other. An approval made before the split
+    (one approval.json for either engine) still counts for the engine it names."""
+    out: dict[str, dict] = {}
+    for name in APPROVAL_FILES.values():
+        try:
+            with open(os.path.join(root, name), encoding="utf-8") as fh:
+                a = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if isinstance(a, dict) and a:
+            out.setdefault(approval_market(a), a)
+    return out
 
 
 def _bt(entry, market: str = "spot") -> dict:
@@ -128,7 +145,19 @@ class GoLive:
             entries = [e for e in reg.with_status("paper") if passed_backtest(e, market)]
         return reg, entries
 
-    def evaluate(self, strategy_ids: list[str] | None = None, market: str = "spot") -> dict:
+    def candidates(self, market: str = "spot") -> list[dict]:
+        """The strategies that could be approved for one engine (paper status, passed that engine's
+        backtest), each judged by the gate on its own: {id, name, passed, failed: [criteria]}."""
+        _reg, entries = self._strategies(None, market)
+        out = []
+        for e in entries:
+            rep = self.evaluate([e.id], market, save=False)
+            out.append({"id": e.id, "name": e.name, "passed": rep["passed"],
+                        "paper_trades": rep["paper"]["trades"], "expectancy_r": rep["paper"]["expectancy_r"],
+                        "failed": [c["name"] for c in rep["criteria"] if not c["passed"]]})
+        return sorted(out, key=lambda c: (not c["passed"], -c["expectancy_r"]))
+
+    def evaluate(self, strategy_ids: list[str] | None = None, market: str = "spot", save: bool = True) -> dict:
         """The gate for one engine: Spot AI (spot buys) or Futures AI (perpetual longs). A strategy
         is judged only on that engine's paper trades and backtest, and an approval covers only it."""
         if market not in MARKETS:
@@ -188,7 +217,8 @@ class GoLive:
                   "paper": {k: m[k] for k in ("trades", "expectancy_r", "max_drawdown_r", "win_rate")},
                   "backtest_expectancy_r": bt_exp}
         report["passed"] = all(c["passed"] for c in report["criteria"])
-        self._save("report.json", report)
+        if save:
+            self._save("report.json", report)
         return report
 
     def _stability(self, now: float) -> tuple[bool, str]:
@@ -244,29 +274,46 @@ class GoLive:
         approval = {"by": by, "at": self.clock(), "market": market, "report": report,
                     **self._fingerprint(strategy_ids), "confirmation": confirmation}
         approval["seal"] = _seal(approval)
-        self._save("approval.json", approval)
+        old = self._load("approval.json")
+        if old and approval_market(old) != "spot" and market == "spot":
+            # an approval from before the split: move it to its own engine's file, don't overwrite it
+            self._save(APPROVAL_FILES[approval_market(old)], old)
+        self._save(APPROVAL_FILES[market], approval)
+        if market != "spot" and approval_market(old) == market:
+            self._save("approval.json", {})  # the old copy of this engine's approval
         self.events.emit("gate", f"go-live approved by {by} for {', '.join(strategy_ids)} "
                          f"({'Futures AI' if market == 'futures' else 'Spot AI'} only)", level="warning")
         return approval
 
-    def revoke(self, by: str = "") -> None:
-        if self._load("approval.json"):
-            self._save("approval.json", {})
-            self.events.emit("gate", f"go-live approval revoked{' by ' + by if by else ''}", level="warning")
+    def approvals(self) -> dict[str, dict]:
+        """{engine: approval} for each engine that has one."""
+        return load_approvals(self.root)
+
+    def revoke(self, by: str = "", market: str | None = None) -> list[str]:
+        """Withdraw one engine's approval, or both when ``market`` is None. Returns the engines revoked."""
+        done = []
+        for m in ([market] if market else list(MARKETS)):
+            if m in self.approvals():
+                if self._load(APPROVAL_FILES[m]):
+                    self._save(APPROVAL_FILES[m], {})
+                old = self._load("approval.json")
+                if old and approval_market(old) == m:
+                    self._save("approval.json", {})
+                done.append(m)
+                self.events.emit("gate", f"go-live approval for {_engine(m)} revoked{' by ' + by if by else ''}",
+                                 level="warning")
+        return done
 
     def guard(self, entry_id: str, market: str = "spot") -> list[str]:
         """Problems that block a live entry for this strategy on this engine (empty = allowed)."""
-        a = self._load("approval.json")
+        a = self.approvals().get(market)
         if not a:
-            return ["no go-live approval (aitrader golive approve)"]
+            return [f"no go-live approval for {_engine(market)} (aitrader golive approve"
+                    + (" --market futures)" if market == "futures" else ")")]
         if not approval_intact(a):
             return ["the approval file was edited or not made by `golive approve`: back to paper"]
         if entry_id not in a["strategies"]:
-            return [f"{entry_id} is not one of the approved strategies"]
-        approved = approval_market(a)
-        if market != approved:
-            return [f"{entry_id} is approved for {'Futures AI' if approved == 'futures' else 'Spot AI'} only; "
-                    "its paper results on the other engine were not judged"]
+            return [f"{entry_id} is not one of the strategies approved for {_engine(market)}"]
         now = self._fingerprint(list(a["strategies"]))
         problems = []
         if now["strategies"].get(entry_id) != a["strategies"][entry_id]:
@@ -276,20 +323,30 @@ class GoLive:
         return problems
 
     def monitor(self, closed: list[dict]) -> str | None:
-        """A reason to return to paper, or None. ``closed`` are live trades with ``r``."""
-        live = [t for t in closed if t.get("mode") == "live"]
-        if not live:
-            return None
-        m = metrics([_R(t["r"]) for t in live])
-        if m["max_drawdown_r"] > self.cfg.max_paper_drawdown_r:
-            return f"live drawdown {m['max_drawdown_r']:.1f}R passed the {self.cfg.max_paper_drawdown_r:g}R limit"
-        a = self._load("approval.json")
-        expected = (a.get("report") or {}).get("paper", {}).get("expectancy_r")
-        if expected is not None and m["trades"] >= self.cfg.live_min_trades_to_judge and \
-                m["expectancy_r"] < expected - self.cfg.live_max_shortfall_r:
-            return (f"live expectancy {m['expectancy_r']:+.3f}R over {m['trades']} trades is below the "
-                    f"paper {expected:+.3f}R by more than {self.cfg.live_max_shortfall_r:g}R")
+        """A reason to return to paper, or None. ``closed`` are live trades with ``r``. Each engine's
+        live trades are judged against that engine's own approval."""
+        approvals = self.approvals()
+        for market in MARKETS:
+            live = [t for t in closed if t.get("mode") == "live" and _trade_engine(t) == market]
+            if not live:
+                continue
+            m = metrics([_R(t["r"]) for t in live])
+            where = f" on {_engine(market)}"
+            if m["max_drawdown_r"] > self.cfg.max_paper_drawdown_r:
+                return (f"live drawdown{where} {m['max_drawdown_r']:.1f}R passed the "
+                        f"{self.cfg.max_paper_drawdown_r:g}R limit")
+            a = approvals.get(market) or {}
+            expected = (a.get("report") or {}).get("paper", {}).get("expectancy_r")
+            if expected is not None and m["trades"] >= self.cfg.live_min_trades_to_judge and \
+                    m["expectancy_r"] < expected - self.cfg.live_max_shortfall_r:
+                return (f"live expectancy{where} {m['expectancy_r']:+.3f}R over {m['trades']} trades is below the "
+                        f"paper {expected:+.3f}R by more than {self.cfg.live_max_shortfall_r:g}R")
         return None
+
+
+def _trade_engine(t: dict) -> str:
+    """The engine of a live executor trade: the USDT perpetual (``BTC/USDT:USDT``) is Futures AI."""
+    return "futures" if t.get("side") == "short" or ":" in (t.get("market") or "") else "spot"
 
 
 def confirmation_phrase(strategy_ids: list[str], market: str = "spot") -> str:
@@ -297,6 +354,10 @@ def confirmation_phrase(strategy_ids: list[str], market: str = "spot") -> str:
     for one set (or one engine) doesn't approve another."""
     where = "Futures" if market == "futures" else "Spot"
     return f"I approve {', '.join(sorted(strategy_ids))} for real-money {where} trading"
+
+
+def _engine(market: str) -> str:
+    return "Futures AI" if market == "futures" else "Spot AI"
 
 
 def approval_market(a: dict) -> str:

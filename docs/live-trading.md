@@ -198,17 +198,29 @@ It can't approve anything.
 
 ## Step 5: approve the pilot
 
-When the gate passes, approve one or two strategies by id (`aitrader learn list` shows them):
+When the gate passes, approve one or two strategies. You don't need to know their ids: leave
+`--strategy` out and the command lists the engine's strategies, marks the ones that pass the gate
+on their own as READY, and asks for their numbers and your name:
 
 ```bash
-docker compose run --rm -it collector golive approve --strategy <id> --by Shawn                    # Spot AI
-docker compose run --rm -it collector golive approve --strategy <id> --by Shawn --market futures   # Futures AI
+docker compose run --rm -it collector golive approve
 ```
 
-An approval covers **one engine**. The gate judges a strategy only on that engine's paper trades
-and backtest (Spot AI's spot buys, or Futures AI's perpetual longs), and the live executor only
-lets it trade on that engine. `golive check --market futures` checks the Futures AI gate; the
-dashboard's "Check the gate now" button checks the engine whose view is open. Approvals made
+```bash
+docker compose run --rm -it collector golive approve --market futures
+```
+
+The first is Spot AI, the second Futures AI. Keep `-it` (not `-T`): approving needs a person at a
+terminal. `golive list` (add `--market futures`) shows the same list without approving, and
+`golive status` shows what each engine has approved. You can still name them yourself:
+`golive approve --strategy <id> --by Shawn`.
+
+An approval covers **one engine**, and each engine keeps its own: approving Futures AI leaves the
+Spot AI approval in place, and the other way round. The gate judges a strategy only on that
+engine's paper trades and backtest (Spot AI's spot buys, or Futures AI's perpetual longs), and the
+live executor only lets it trade on that engine. `golive check --market futures` checks the
+Futures AI gate; the dashboard's "Check the gate now" button checks the engine whose view is open.
+`golive revoke` withdraws both; add `--market spot` or `--market futures` for one. Approvals made
 before November 2026 judged both engines together and no longer count: approve again.
 
 Real money opens **longs only** (Shawn, November 2026). Short signals are traded in paper only;
