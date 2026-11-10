@@ -627,8 +627,9 @@ class MlCusumBarrier(MlBoosted):
         "whose 3-day outcome was already known; each model predicts only later events (walk-forward, no "
         "leakage). No prediction until 100 labelled events exist. " + NO_TRADE,
         size="0.5% of equity at risk.",
-        decisions=("The paper's best model was a ResNet-LSTM deep network; it needs PyTorch, which this "
-                   "platform doesn't install, so the trees plus a small scikit-learn network stand in. The "
+        decisions=("The paper's best model was a ResNet-LSTM deep network; it needs PyTorch, so "
+                   "this strategy uses trees plus a small scikit-learn network instead (the deep network "
+                   "itself is ml_cusum_resnet_lstm). The "
                    "paper's own tree model (XGBoost) did worse than its deep network, so judge this one on "
                    "its own strategy test.",
                    "The paper sampled from 1-minute data; here the filter runs on the 1h and 4h candles, so "

@@ -1376,6 +1376,10 @@ def test_approving_futures_keeps_the_spot_approval(tmp_path):
     assert set(load_approvals(str(tmp_path / "golive"))) == {"spot", "futures"}
     assert gl.monitor([{"mode": "live", "r": -1.0, "market": "BTC/USDT:USDT"}] * 11).endswith("10R limit")
     assert "Futures AI" in gl.monitor([{"mode": "live", "r": -1.0, "market": "BTC/USDT:USDT"}] * 11)
+    # the rows the executor really writes for a perpetual trade: side buy, market "futures"
+    real = {"mode": "live", "r": -1.0, "side": "buy", "market": "futures", "symbol": "BTC/USDT"}
+    assert "Futures AI" in gl.monitor([real] * 11)
+    assert "Spot AI" in gl.monitor([{"mode": "live", "r": -1.0, "side": "buy", "symbol": "BTC/USDT"}] * 11)
     assert gl.revoke(by="Shawn", market="futures") == ["futures"]
     assert gl.guard("s1", "spot") == [] and gl.guard("s1", "futures")
     assert gl.revoke(by="Shawn") == ["spot"] and gl.guard("s1", "spot")
@@ -1400,5 +1404,40 @@ def test_golive_approve_lists_the_strategies_and_takes_a_number(tmp_path, capsys
     out = capsys.readouterr().out
     assert "1. s1" in out and "READY" in out and "golive approve --market futures" in out
     assert cli.pick_strategies(gl, "futures", ask=lambda _: "7", isatty=lambda: True) == []
+    for wrong in ("0", "-1", "1,0"):  # never wraps round to a strategy from the end of the list
+        assert cli.pick_strategies(gl, "futures", ask=lambda _, w=wrong: w, isatty=lambda: True) == []
     assert cli.pick_strategies(gl, "futures", ask=lambda _: "1", isatty=lambda: False) == []
     assert "-it collector" in capsys.readouterr().err
+
+
+def test_control_writes_dont_lose_a_kill_or_halt_to_a_racing_writer(tmp_path):
+    import threading
+    import time
+
+    from aitrader.trade.control import Control
+
+    path = str(tmp_path / "control.json")
+    c = Control(path)
+    c.resume(by="t")
+    seen = []
+    real = Control.state
+
+    def slow_state(self):  # widen the read-to-write gap a racing writer would slip into
+        s = real(self)
+        seen.append(1)
+        time.sleep(0.05)
+        return s
+
+    Control.state = slow_state
+    try:
+        a = threading.Thread(target=lambda: Control(path).pause("risk engine: daily loss", by="risk engine", auto=True))
+        b = threading.Thread(target=lambda: Control(path).kill(by="Shawn"))
+        a.start()
+        time.sleep(0.01)
+        b.start()
+        a.join()
+        b.join()
+    finally:
+        Control.state = real
+    assert Control(path).killed  # the kill isn't overwritten by the pause that read before it
+    assert not [f for f in os.listdir(tmp_path) if f.endswith(".tmp")]

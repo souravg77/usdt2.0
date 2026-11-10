@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "aitrader"
 version = "0.1.0"
-description = "AI crypto trading agent for Binance and HTX (paper-first, live locked)"
+description = "AI crypto trading agent for Bybit spot and USDT perpetuals (paper-first, live locked)"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

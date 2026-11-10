@@ -2430,7 +2430,8 @@ def _live_card(settings, paths: Paths, events: list[dict]) -> str:
     checks = [
         ("Real Bybit keys saved (spot trade only, no withdrawals, IP-bound)",
          bool(os.environ.get("BYBIT_API_KEY") and os.environ.get("BYBIT_API_SECRET"))),
-        ("Go/no-go gate passed", bool(rep.get("passed"))),
+        (f"Go/no-go gate passed (last check: {'Futures AI' if rep.get('market') == 'futures' else 'Spot AI'})",
+         bool(rep.get("passed"))),
         ("Strategies approved (aitrader golive approve)",
          bool(approvals) and all(approval_intact(a) for a in approvals.values())),
         ("Pilot budget set (AITRADER_PILOT_MAX_USDT in .env)", bool(os.environ.get("AITRADER_PILOT_MAX_USDT"))),
@@ -2499,8 +2500,10 @@ def _gate_card(paths: Paths, csrf: str) -> str:
     if rep:
         rows = "".join(f'<li class="{"good" if c["passed"] else "bad"}">{"✓" if c["passed"] else "✗"} '
                        f'{_e(c["name"])}: {_e(c["value"])}</li>' for c in rep.get("criteria", []))
+        engine = "Futures AI" if rep.get("market") == "futures" else "Spot AI"
         head = (f'<b class="{"good" if rep.get("passed") else "bad"}">'
-                f'{"passes" if rep.get("passed") else "does not pass yet"}</b> (checked {_when(rep.get("at"))})')
+                f'{"passes" if rep.get("passed") else "does not pass yet"}</b> for {engine} '
+                f'(checked {_when(rep.get("at"))}; the list below is {engine}\'s)')
     else:
         rows, head = "", "not checked yet"
     appr = ""

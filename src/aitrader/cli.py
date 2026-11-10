@@ -1480,9 +1480,9 @@ def _approve_cmd(market: str) -> str:
             + (" --market futures" if market == "futures" else ""))
 
 
-def _golive_list(gl, market: str) -> int:
+def _golive_list(gl, market: str, cands: list[dict] | None = None) -> int:
     """The strategy ids that can be approved for one engine, each judged by the gate on its own."""
-    cands = gl.candidates(market)
+    cands = gl.candidates(market) if cands is None else cands
     print(f"{_engine_name(market)}: strategies in paper trading that passed the "
           f"{'perpetual' if market == 'futures' else 'spot'} backtest")
     if not cands:
@@ -1521,20 +1521,23 @@ def pick_strategies(gl, market: str, ask=input, isatty=None) -> list[str]:
         print("approving live trading needs a person: run it in a terminal:\n  " + _approve_cmd(market),
               file=sys.stderr)
         return []
-    _golive_list(gl, market)
-    ready = [c for c in gl.candidates(market) if c["passed"]]
+    every = gl.candidates(market)  # judged once: the numbers shown are the numbers read back
+    _golive_list(gl, market, every)
+    ready = [c for c in every if c["passed"]]
     if not ready:
         print("nothing to approve yet: no strategy passes the go/no-go gate for "
               f"{_engine_name(market)} (see `golive check" + (" --market futures" if market == "futures" else "")
               + "`)", file=sys.stderr)
         return []
-    every = gl.candidates(market)
     try:
         typed = ask("Number(s) of 1 or 2 READY strategies, like 1 or 1,2: ").replace(" ", "")
     except EOFError:
         typed = ""
     try:
-        picked = [every[int(x) - 1] for x in typed.split(",") if x]
+        nums = [int(x) for x in typed.split(",") if x]
+        picked = [every[n - 1] for n in nums if 1 <= n <= len(every)]
+        if len(picked) != len(nums):  # 0, a negative or too big a number: never a strategy from the end
+            picked = []
     except (ValueError, IndexError):
         picked = []
     if not picked or len(picked) > 2 or not all(c["passed"] for c in picked):
