@@ -345,8 +345,10 @@ class GoLive:
 
 
 def _trade_engine(t: dict) -> str:
-    """The engine of a live executor trade: the USDT perpetual (``BTC/USDT:USDT``) is Futures AI."""
-    return "futures" if t.get("side") == "short" or ":" in (t.get("market") or "") else "spot"
+    """The engine of a live executor trade: a perpetual one is Futures AI. The executor marks those
+    rows ``market="futures"`` (older rows: a short side, or the perpetual's name ``BTC/USDT:USDT``)."""
+    m = t.get("market") or ""
+    return "futures" if m == "futures" or ":" in m or t.get("side") in ("short", "sell") else "spot"
 
 
 def confirmation_phrase(strategy_ids: list[str], market: str = "spot") -> str:

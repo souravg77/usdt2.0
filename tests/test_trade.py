@@ -1376,6 +1376,10 @@ def test_approving_futures_keeps_the_spot_approval(tmp_path):
     assert set(load_approvals(str(tmp_path / "golive"))) == {"spot", "futures"}
     assert gl.monitor([{"mode": "live", "r": -1.0, "market": "BTC/USDT:USDT"}] * 11).endswith("10R limit")
     assert "Futures AI" in gl.monitor([{"mode": "live", "r": -1.0, "market": "BTC/USDT:USDT"}] * 11)
+    # the rows the executor really writes for a perpetual trade: side buy, market "futures"
+    real = {"mode": "live", "r": -1.0, "side": "buy", "market": "futures", "symbol": "BTC/USDT"}
+    assert "Futures AI" in gl.monitor([real] * 11)
+    assert "Spot AI" in gl.monitor([{"mode": "live", "r": -1.0, "side": "buy", "symbol": "BTC/USDT"}] * 11)
     assert gl.revoke(by="Shawn", market="futures") == ["futures"]
     assert gl.guard("s1", "spot") == [] and gl.guard("s1", "futures")
     assert gl.revoke(by="Shawn") == ["spot"] and gl.guard("s1", "spot")
@@ -1400,5 +1404,7 @@ def test_golive_approve_lists_the_strategies_and_takes_a_number(tmp_path, capsys
     out = capsys.readouterr().out
     assert "1. s1" in out and "READY" in out and "golive approve --market futures" in out
     assert cli.pick_strategies(gl, "futures", ask=lambda _: "7", isatty=lambda: True) == []
+    for wrong in ("0", "-1", "1,0"):  # never wraps round to a strategy from the end of the list
+        assert cli.pick_strategies(gl, "futures", ask=lambda _, w=wrong: w, isatty=lambda: True) == []
     assert cli.pick_strategies(gl, "futures", ask=lambda _: "1", isatty=lambda: False) == []
     assert "-it collector" in capsys.readouterr().err

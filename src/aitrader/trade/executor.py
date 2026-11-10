@@ -78,6 +78,10 @@ STOP_GRACE_S = 120  # an open position must have a confirmed resting stop by the
 RECHECK_S = 300  # how often the account is compared with the ledger
 HALT_AFTER_FAILURES = 5  # consecutive failed ticks that halt new entries
 LIQ_CHECK_S = 60  # how often open perpetual positions are compared with Bybit's liquidation price
+# the entry puts the stop at most halfway to liquidation (an estimate); after the fill a halt comes
+# only past 60% of the way to Bybit's real liquidation price, so a little slippage or Bybit's own
+# numbers differing from the estimate don't halt everything
+LIQ_STOP_HALT = 0.6
 LIQ_HALT_DISTANCE = 0.03  # a perpetual position this close (3% of the mark price) to liquidation halts
 FUTURES_SUFFIX = "|futures"  # learn.paper's key for a Futures AI long (same as learn.paper.FUTURES_SUFFIX)
 
@@ -717,8 +721,9 @@ class Executor:
         why = None
         if dist is not None and dist < LIQ_HALT_DISTANCE:
             why = (f"{key} is {dist:.1%} from liquidation (mark {mark:g}, Bybit liquidates at {liq:g})")
-        elif p.get("stop") and not derivs.stop_inside_liquidation(p["entry"], p["stop"], liq, short=_short(p)):
-            why = (f"{key}'s stop {p['stop']:g} is more than halfway from entry {p['entry']:g} to "
+        elif p.get("stop") and not derivs.stop_inside_liquidation(p["entry"], p["stop"], liq, short=_short(p),
+                                                                  max_fraction=LIQ_STOP_HALT):
+            why = (f"{key}'s stop {p['stop']:g} is more than {LIQ_STOP_HALT:.0%} of the way from entry {p['entry']:g} to "
                    f"Bybit's liquidation price {liq:g}")
         if why:
             p["halted_liq"] = True  # once per position
