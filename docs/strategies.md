@@ -287,6 +287,25 @@ Same events, barriers, 70 % threshold, stop, target and time stop as `ml_cusum_b
 strategy test shows whether the deep network adds anything. It needs PyTorch: the server image
 installs the CPU-only build (about 200 MB download); without it the strategy gives no signals.
 
+**ml_cusum_resnet_lstm_atr** (added 2026-11-10 at Shawn's request) is the same network with barriers
+that follow volatility: 3 x ATR(14) above and below the event close instead of a fixed 5 %, the stop at
+the lower barrier and the target at the upper one (1R). The paper found volatility-scaled barriers did
+worse than fixed ones, so it is a separate strategy next to the fixed one and the strategy test decides.
+3 x ATR is a starting value, not tuned. Add it with `learn add-builtin ml_cusum_resnet_lstm_atr`.
+
+## smc_meta_boosted (meta-labeling on the SMC setups)
+
+Added 2026-11-10 from Shawn's request. Meta-labeling (Lopez de Prado, *Advances in Financial Machine
+Learning*, ch. 3): the four price-structure setups (fair value gap retest, order block retest, liquidity
+sweep, sweep-then-gap) say where a trade could be, and a gradient-boosted tree model says whether to take
+it. For every past setup the label is its own trade: did 2R come before the setup's stop within 30 bars?
+The inputs are the 25 `ml_boosted` inputs, which setup fired and the stop's distance in ATR. A long opens
+at the next open when a setup's chance is 70 % or more, with the setup's own stop (the closest one when
+several fire), a 2R target and a 30-bar time stop. Retrained every 250 bars on the setups of the last
+3,000 bars, walk-forward; no prediction until 150 labelled setups exist. 1h and 4h; the short twin learns
+the upside-down chart. The setups' trend and RSI filters are left out: the model sees those numbers as
+inputs. Add it with `learn add-builtin smc_meta_boosted`, `learn add-shorts`, then `learn test` per engine.
+
 ## New indicators
 
 Added to `aitrader.indicators` with unit tests (warm-up, value checks, no look-ahead):

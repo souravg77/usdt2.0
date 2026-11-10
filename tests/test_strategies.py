@@ -17,6 +17,8 @@ DATA = {"buy_the_dip": dict(vol=0.03, drift=0.0015),
         "rsi_divergence": dict(seed=0),
         "ml_classifier": dict(seed=0),
         "ml_cusum_resnet_lstm": dict(seed=0, vol=0.015, n=2500, tf_ms=14_400_000),
+        "ml_cusum_resnet_lstm_atr": dict(seed=0, vol=0.015, n=2500, tf_ms=14_400_000),
+        "smc_meta_boosted": dict(seed=0, n=2500),
         "price_channel_two_bars_above": dict(seed=0, vol=0.012, tf_ms=300_000, split_wicks=True),
         "pin_bar_reentry_long": dict(seed=3, vol=0.012, tf_ms=900_000, split_wicks=True),
         "m2b_two_legged_pullback_ema20": dict(seed=0, vol=0.012, tf_ms=300_000, split_wicks=True),
@@ -56,15 +58,16 @@ def with_funding(df):
 
 
 # smaller settings so the network trains in seconds here (the strategy's own tests use the defaults' shape)
-PARAMS = {"ml_cusum_resnet_lstm": dict(min_train=150, retrain=100, seeds=1, epochs=10, patience=3,
-                                         threshold=0.5)}
+_DEEP_TEST = dict(min_train=150, retrain=100, seeds=1, epochs=10, patience=3, threshold=0.5)
+PARAMS = {"ml_cusum_resnet_lstm": _DEEP_TEST, "ml_cusum_resnet_lstm_atr": _DEEP_TEST,
+          "smc_meta_boosted": dict(min_train=60, retrain=100, threshold=0.5)}
 
 
 def _needs_torch(name):
     import importlib.util
 
-    if name == "ml_cusum_resnet_lstm" and importlib.util.find_spec("torch") is None:
-        pytest.skip("ml_cusum_resnet_lstm needs PyTorch (the server image installs it)")
+    if name.startswith("ml_cusum_resnet_lstm") and importlib.util.find_spec("torch") is None:
+        pytest.skip(f"{name} needs PyTorch (the server image installs it)")
 
 
 def data_for(name):

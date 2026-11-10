@@ -541,16 +541,21 @@ def cusum_events(close: pd.Series, threshold: float) -> pd.DataFrame:
     return pd.DataFrame({"event": ev, "up": up, "down": dn}, index=close.index)
 
 
-def triple_barrier_labels(df: pd.DataFrame, horizon: int, barrier: float, fee: float = 0.0015) -> np.ndarray:
+def triple_barrier_labels(df: pd.DataFrame, horizon: int, barrier, fee: float = 0.0015) -> np.ndarray:
     """The paper's triple barrier (Lopez de Prado): 1 when the price rises ``barrier`` (5 %) before it
     falls ``barrier`` within ``horizon`` bars, 0 when it falls first. When neither is touched by the
     time barrier, the sign of the move then decides (a rise has to beat the round-trip ``fee``).
-    A bar touching both counts as a fall. NaN for the last ``horizon`` bars (outcome not known)."""
+    A bar touching both counts as a fall. NaN for the last ``horizon`` bars (outcome not known).
+    ``barrier`` is one fraction for every bar, or an array with each bar's own (``atr_barrier``);
+    a bar without one (NaN) gets no label."""
     hi, lo, c = (df[k].to_numpy(float) for k in ("high", "low", "close"))
     n = len(df)
+    width = np.broadcast_to(np.asarray(barrier, float), (n,))
     out = np.full(n, np.nan)
     for t in range(n - horizon):
-        up, dn = c[t] * (1 + barrier), c[t] * (1 - barrier)
+        if not np.isfinite(width[t]):
+            continue
+        up, dn = c[t] * (1 + width[t]), c[t] * (1 - width[t])
         res = None
         for j in range(t + 1, t + horizon + 1):
             if lo[j] <= dn:
@@ -561,6 +566,13 @@ def triple_barrier_labels(df: pd.DataFrame, horizon: int, barrier: float, fee: f
                 break
         out[t] = res if res is not None else float(c[t + horizon] / c[t] - 1 > fee)
     return out
+
+
+def atr_barrier(df: pd.DataFrame, mult: float, period: int = 14) -> np.ndarray:
+    """Each bar's barrier as a fraction of its close: ``mult`` x ATR(``period``). It widens when the
+    market is wild and narrows when it is quiet, where a fixed 5 % is hit by noise in one and never
+    reached in the other."""
+    return (mult * atr(df, period) / df["close"]).to_numpy(float)
 
 
 def gradzki_features(df: pd.DataFrame, events: pd.DataFrame) -> pd.DataFrame:
@@ -696,6 +708,151 @@ class MlCusumBarrier(MlBoosted):
         return f"time_stop={self._horizon(tf)}"
 
 
-from .deep import MlCusumResnetLstm  # noqa: E402  (it builds on the classes above)
+# ---- meta-labeling (Lopez de Prado): the SMC setups propose, a model decides which to take -------
 
-ML_STRATEGIES = (MlBoosted, MlEnsemble, MlBoostedFund, MlEnsembleFund, MlCusumBarrier, MlCusumResnetLstm)
+SMC_SETUPS = ("fvg_retest", "order_block_retest", "liquidity_sweep", "sweep_then_gap")
+
+
+def smc_setups(df: pd.DataFrame) -> pd.DataFrame:
+    """The four price-structure setups of ``strategies.smc`` as raw structure (without their trend and
+    RSI filters: those are inputs the model weighs), one column per setup that fired on the bar, and
+    ``stop``: the setup's own stop, the closest one below the close when several fired."""
+    from ..indicators import fair_value_gaps, liquidity_sweeps, order_blocks, retest
+
+    a, c = atr(df), df["close"]
+    g, ob = fair_value_gaps(df, 50), order_blocks(df, 10, 50)
+    sw20, sw15 = liquidity_sweeps(df, 20), liquidity_sweeps(df, 15)
+    fired = {
+        "fvg_retest": (retest(df, g["bull_top"], g["bull_bottom"]) > 0,
+                       g["bull_bottom"].shift(1) - 0.5 * a),
+        "order_block_retest": (retest(df, ob["bull_top"], ob["bull_bottom"]) > 0,
+                               ob["bull_bottom"].shift(1) - 0.25 * a),
+        "liquidity_sweep": (sw20["low"] > 0, df["low"] - 0.25 * a),
+        "sweep_then_gap": ((sw15["low"].shift(2) > 0) & (df["low"] > df["high"].shift(2)),
+                           df["low"].shift(2) - 0.25 * a),
+    }
+    out = pd.DataFrame(index=df.index)
+    stop = pd.Series(np.nan, index=df.index)
+    for name, (cond, st) in fired.items():
+        # a usable stop: below the close by at least 0.2 % (the floor every signal has)
+        ok = cond.fillna(False) & (st > 0) & (st <= c * 0.998)
+        out[name] = ok
+        stop = stop.where(~ok | (stop >= st), st)  # the tightest valid stop
+    out["stop"] = stop
+    return out
+
+
+def meta_labels(df: pd.DataFrame, stop: pd.Series, target_r: float, horizon: int) -> np.ndarray:
+    """The meta-label: 1 when the setup's own trade (from this close, its stop, ``target_r`` x the
+    risk as the target) reaches the target before the stop within ``horizon`` bars, else 0; a bar
+    touching both counts as a loss, and running out of time is not a win. NaN where there is no stop
+    or the outcome isn't known yet."""
+    hi, lo, c = (df[k].to_numpy(float) for k in ("high", "low", "close"))
+    st = stop.to_numpy(float)
+    n = len(df)
+    out = np.full(n, np.nan)
+    for t in range(n - horizon):
+        if not np.isfinite(st[t]) or st[t] >= c[t]:
+            continue
+        up = c[t] + target_r * (c[t] - st[t])
+        res = 0.0
+        for j in range(t + 1, t + horizon + 1):
+            if lo[j] <= st[t]:
+                break
+            if hi[j] >= up:
+                res = 1.0
+                break
+        out[t] = res
+    return out
+
+
+class SmcMetaBoosted(MlBoosted):
+    spec = _spec(
+        name="smc_meta_boosted",
+        source=SOURCE + ": machine learning, meta-labeling (Lopez de Prado, 'Advances in Financial Machine "
+        "Learning', ch. 3) on the four price-structure setups of the ApexTrade prompt",
+        timeframes=("1h", "4h"),
+        regime="Any orderly market (not high-volatility); the model learns which conditions make the "
+        "setups pay.",
+        setup="The four price-structure setups (fair value gap retest, order block retest, liquidity sweep "
+        "and sweep-then-gap) propose trades; a gradient-boosted tree model decides which to take. It "
+        "learns from the past setups on this chart whether each one's own trade reached 2R before its "
+        "stop within 30 bars, from the 25 ml_boosted inputs, which setup fired and how far the stop is "
+        "in ATR. Setup: a structure setup whose chance of 2R first is 70 % or more (Shawn's ML threshold).",
+        entry="Market order at the next bar's open.",
+        stop="The setup's own structural stop (below the gap, the block or the swept low); the closest "
+        "one when several fire on the same bar.",
+        target="2R; time stop after 30 bars.",
+        filter="Retrained every 250 bars on the setups of up to the last 3,000 bars, only on setups whose "
+        "30-bar outcome was already known; each model predicts only later setups (walk-forward, no "
+        "leakage). No prediction until 150 labelled setups exist. " + NO_TRADE,
+        size="0.5% of equity at risk.",
+        decisions=("Meta-labeling: the hand-written setups decide where a trade could be and the model only "
+                   "decides whether to take it, so it learns from a few hundred setups instead of every bar.",
+                   "The setups' own trend and RSI filters are left out here: the model sees those numbers as "
+                   "inputs and learns where they matter.",
+                   "It sits next to fvg_retest, order_block_retest, liquidity_sweep_reversal and "
+                   "sweep_then_gap, so each engine's strategy test shows whether the model's filter beats "
+                   "the plain rules."),
+    )
+    reason = "SMC setup: ML chance of 2R before the stop at 70 % or more"
+    history_bars = 3000 + 30 + 2 * 250
+
+    @classmethod
+    def default_params(cls):
+        return {**BASE, "horizon": 30, "min_train": 150, "train_bars": 3000, "retrain": 250,
+                "threshold": 0.7, "target_r": 2.0}
+
+    def _setups(self, df):
+        key = _df_key(df)
+        if getattr(self, "_smc_memo", (None,))[0] != key:
+            self._smc_memo = (key, smc_setups(df))
+        return self._smc_memo[1]
+
+    def _features(self, df):
+        S = self._setups(df)
+        X = feature_frame(df)
+        a = atr(df)
+        extra = S[list(SMC_SETUPS)].astype(float)
+        extra["stop_atr"] = (df["close"] - S["stop"]) / a.replace(0, np.nan)
+        both = pd.concat([X, extra], axis=1).replace([np.inf, -np.inf], np.nan)
+        return both.to_numpy(float), both.notna().all(axis=1).to_numpy() & S["stop"].notna().to_numpy()
+
+    def _labels(self, df):
+        p = self.params
+        return meta_labels(df, self._setups(df)["stop"], p["target_r"], int(p["horizon"]))
+
+    def _model(self, X, y, key):
+        model = _MODELS.get(key)
+        if model is None:
+            from sklearn.ensemble import HistGradientBoostingClassifier
+
+            model = HistGradientBoostingClassifier(
+                max_iter=120, learning_rate=0.05, max_depth=3, min_samples_leaf=15,
+                l2_regularization=1.0, early_stopping=False, random_state=0)
+            model.fit(X, y)
+            _remember(_MODELS, key, model, MAX_MODELS)
+        else:
+            _MODELS.move_to_end(key)
+        return model
+
+    def setup(self, df, timeframe):
+        key = (_df_key(df), timeframe)
+        if getattr(self, "_memo", (None,))[0] != key:
+            self._memo = (key, self.probabilities(df, timeframe))
+        return self._setups(df)["stop"].notna() & (self._memo[1] >= self.params["threshold"])
+
+    def stop_series(self, df):
+        return self._setups(df)["stop"]
+
+    def features(self, df):
+        out = super().features(df)
+        S = self._setups(df)
+        out["smc_setups"] = S[list(SMC_SETUPS)].sum(axis=1).astype(float)
+        return out
+
+
+from .deep import MlCusumResnetLstm, MlCusumResnetLstmAtr  # noqa: E402  (they build on the classes above)
+
+ML_STRATEGIES = (MlBoosted, MlEnsemble, MlBoostedFund, MlEnsembleFund, MlCusumBarrier, MlCusumResnetLstm,
+                 MlCusumResnetLstmAtr, SmcMetaBoosted)

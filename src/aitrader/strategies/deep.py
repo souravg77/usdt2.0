@@ -29,7 +29,9 @@ import pandas as pd
 
 from .families import NO_TRADE
 from .master import _spec
-from .ml import (_MODELS, MAX_MODELS, SOURCE, MlCusumBarrier, _remember, cusum_events, gradzki_features)
+from ..indicators import atr
+from .ml import (_MODELS, MAX_MODELS, SOURCE, MlCusumBarrier, _remember, atr_barrier, cusum_events, gradzki_features,
+                 triple_barrier_labels)
 
 log = logging.getLogger(__name__)
 _WARNED = []
@@ -243,4 +245,43 @@ class MlCusumResnetLstm(MlCusumBarrier):
         return {"ml_chance": self._memo[1]} if getattr(self, "_memo", None) else {}
 
 
-__all__ = ["MlCusumResnetLstm", "cusum_bars", "torch_available", "SOURCE"]
+class MlCusumResnetLstmAtr(MlCusumResnetLstm):
+    """The same network, with barriers that follow volatility instead of a fixed 5 %."""
+
+    spec = _spec(
+        name="ml_cusum_resnet_lstm_atr",
+        source=MlCusumResnetLstm.spec.source + "; barriers scaled by ATR",
+        timeframes=("4h",),
+        regime=MlCusumResnetLstm.spec.regime,
+        setup=MlCusumResnetLstm.spec.setup.replace(
+            "chance of +5 % before -5 % is 70 % or more",
+            "chance of +3 x ATR(14) before -3 x ATR(14) is 70 % or more")
+        + " The triple barrier is 3 x ATR(14) above and below the event close instead of 5 %, so it widens "
+        "in wild markets and narrows in quiet ones.",
+        entry="Market order at the next bar's open.",
+        stop="Entry - 3 x ATR(14) (the lower barrier the network was trained on).",
+        target="+3 x ATR(14) (the upper barrier, 1R); time stop after 3 days (the time barrier).",
+        filter=MlCusumResnetLstm.spec.filter,
+        size="0.5% of equity at risk.",
+        decisions=("A separate strategy next to ml_cusum_resnet_lstm (fixed 5 %), so each engine's strategy "
+                   "test shows which barrier works on candles the network never saw.",
+                   "The paper reports that volatility-scaled barriers did worse than fixed ones in its tests; "
+                   "this variant is here because Shawn asked for it, and it has to earn its place the same way.",
+                   "3 x ATR(14) is a starting value chosen before any test, not tuned.") + MlCusumResnetLstm.spec.decisions[1:],
+    )
+    reason = "CUSUM event: ResNet-LSTM chance of +3 ATR before -3 ATR at 70 % or more"
+
+    @classmethod
+    def default_params(cls):
+        return {**super().default_params(), "barrier_atr": 3.0}
+
+    def _labels(self, df):
+        p = self.params
+        return triple_barrier_labels(df, self._horizon(getattr(self, "_tf", None) or self.spec.timeframes[0]),
+                                     atr_barrier(df, p["barrier_atr"]), p["fee"])
+
+    def stop_series(self, df):
+        return df["close"] - self.params["barrier_atr"] * atr(df)
+
+
+__all__ = ["MlCusumResnetLstm", "MlCusumResnetLstmAtr", "cusum_bars", "torch_available", "SOURCE"]
