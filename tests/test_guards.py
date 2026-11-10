@@ -424,7 +424,8 @@ def test_breakeven_after_the_first_half_means_the_rest_cannot_lose():
     t = simulate_signal(_sig(), df, 1, costs, {})
     half = simulate_signal(_sig(), df, 1, BacktestConfig(split_tp=True, max_cost_r=0), {})
     assert t.r > half.r and t.r > 0.4
-    assert guards.DEFAULTS["breakeven"] is False  # off until a person turns it on
+    # paper starts with the split take-profit, breakeven and limit entries on (a person can untick them)
+    assert guards.DEFAULTS["split_tp"] and guards.DEFAULTS["breakeven"] and guards.DEFAULTS["maker_entry"]
 
 
 def test_each_engine_trades_only_the_timeframes_chosen(tmp_path):
@@ -828,3 +829,53 @@ def test_signal_score_parts_and_minimum(tmp_path):
     opened = [s for s in ok.state["signals"] if not s["skipped"]]
     assert opened and "score " in opened[0]["detail"]
     assert all("score" in o for o in ok.state["open"].values())
+
+
+def test_the_paper_trader_skips_a_long_while_bitcoin_falls(tmp_path, monkeypatch):
+    from test_learn import EVERY_UP_BAR, fill_store, synthetic
+
+    from aitrader.data.store import CandleStore
+    from aitrader.learn import Entry, PaperTrader, Registry
+    from aitrader.learn.rules import validate_spec
+
+    assert guards.DEFAULTS["btc_trend"] and guards.BTC == "BTC/USDT" and guards.BTC_TF == "4h"
+    store = CandleStore(str(tmp_path / "c.db"))
+    df = synthetic(n=700)
+    fill_store(store, df, sym="ETH/USDT")
+    reg = Registry(str(tmp_path / "reg.json"))
+    reg.add(Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR), status="paper"))
+    reg.save()
+    state = str(tmp_path / "paper_state.json")
+    wallet.set_engine(wallet.engines_path(state), "futures", False)
+    read = []
+    monkeypatch.setattr(guards, "trend_of", lambda d: read.append(d) or "down")
+    trader = PaperTrader(store, str(tmp_path / "reg.json"), ["bybit"], ["ETH/USDT"], state_path=state)
+    for i in range(600, 640):
+        trader.tick(now_ms=int(df.ts.iloc[i]) + H)
+    assert not trader.state["open"] and not trader.state["trades"] and read
+    why = [s for s in trader.state["signals"] if s["skipped"] == "against Bitcoin's trend"]
+    assert why and "Bitcoin's 4h trend points down" in why[0]["detail"]
+    store.close()
+
+
+def test_follow_bitcoin_lets_trades_through_when_bitcoin_rises_or_is_missing(tmp_path, monkeypatch):
+    from test_learn import EVERY_UP_BAR, fill_store, synthetic
+
+    from aitrader.data.store import CandleStore
+    from aitrader.learn import Entry, PaperTrader, Registry
+    from aitrader.learn.rules import validate_spec
+
+    store = CandleStore(str(tmp_path / "c.db"))
+    df = synthetic(n=700)
+    fill_store(store, df, sym="ETH/USDT")  # no Bitcoin candles at all: the rule can't block
+    reg = Registry(str(tmp_path / "reg.json"))
+    reg.add(Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR), status="paper"))
+    reg.save()
+    state = str(tmp_path / "paper_state.json")
+    wallet.set_engine(wallet.engines_path(state), "futures", False)
+    trader = PaperTrader(store, str(tmp_path / "reg.json"), ["bybit"], ["ETH/USDT"], state_path=state)
+    for i in range(600, 640):
+        trader.tick(now_ms=int(df.ts.iloc[i]) + H)
+    assert trader.state["open"] or trader.state["trades"]
+    assert not [s for s in trader.state["signals"] if s["skipped"] == "against Bitcoin's trend"]
+    store.close()

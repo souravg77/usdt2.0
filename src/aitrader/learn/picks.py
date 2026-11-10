@@ -8,6 +8,11 @@ candles (after fees, slippage and the fee filter), splits each one's trades into
 lost in. One good quarter is often luck: a strategy that tops one window is often near the bottom
 of the next, so the quarter rule asks for steadiness, not a single lucky run.
 
+The test period is also cut in two: the first two thirds and the last third (``HOLDOUT``). A
+strategy must make money in both, so a run that only worked in one stretch of the history (the
+usual sign of luck or a fit to that stretch) is not kept. 30 trades is the fewest: under that a
+win rate says little.
+
 What a pick changes, in paper trading and on the Replay page:
 
 * each kept strategy gets a copy that trades that timeframe only, named "WIN 4h: <name>" (id
@@ -41,7 +46,8 @@ from ..indicators import candles_to_frame
 from .lab import MIN_BARS, with_context
 from .registry import Entry, Registry, make_strategy
 
-MIN_TRADES = 10
+MIN_TRADES = 30
+HOLDOUT = 1 / 3  # the last third of the test period: a winner must make money there too
 PICKED = "kept for its timeframe pick"
 
 
@@ -187,6 +193,10 @@ def evaluate(entries: list[Entry], store: CandleStore, exchange: str, symbols: l
                            if since_ms is None or t.entry_ts >= since_ms]
             except Exception:
                 continue
+        entered = [t.entry_ts for t in trades]
+        lo = since_ms if since_ms is not None else (min(entered) if entered else 0)
+        hi = until_ms if until_ms is not None else (max(entered) if entered else 0)
+        cut = hi - HOLDOUT * (hi - lo)
         quarters: dict[str, float] = {}
         for t in trades:
             q = _quarter(t.exit_ts)
@@ -195,6 +205,8 @@ def evaluate(entries: list[Entry], store: CandleStore, exchange: str, symbols: l
         out.append({"id": entry.id, "name": entry.name, "trades": len(trades),
                     "win_rate": round(100 * wins / len(trades), 1) if trades else 0.0,
                     "total_r": round(sum(t.r for t in trades), 2),
+                    "early_r": round(sum(t.r for t in trades if t.entry_ts < cut), 2),
+                    "late_r": round(sum(t.r for t in trades if t.entry_ts >= cut), 2),
                     "quarters_up": sum(1 for r in quarters.values() if r > 0),
                     "quarters_down": sum(1 for r in quarters.values() if r <= 0),
                     "quarters": {q: round(r, 2) for q, r in sorted(quarters.items())}})
@@ -210,12 +222,17 @@ def why_not(r: dict, min_trades: int = MIN_TRADES) -> str:
         return f"lost money overall ({r['total_r']:+.2f}R after fees)"
     if r["quarters_up"] < r["quarters_down"]:
         return f"down in more quarters than up ({r['quarters_up']} of {r['quarters_up'] + r['quarters_down']} up)"
+    if r.get("early_r", 1) <= 0:
+        return f"lost money in the first two thirds of the period ({r['early_r']:+.2f}R)"
+    if r.get("late_r", 1) <= 0:
+        return f"lost money in the last third of the period ({r['late_r']:+.2f}R): its gains didn't hold up"
     return ""
 
 
 def winners(results: list[dict], min_trades: int = MIN_TRADES) -> list[dict]:
-    return [r for r in results if r["trades"] >= min_trades and r["total_r"] > 0
-            and r["quarters_up"] >= r["quarters_down"]]
+    """Strategies with no reason not to keep them (``why_not``). Results saved before the two-part
+    check have no ``early_r``/``late_r`` and are judged without it."""
+    return [r for r in results if not why_not(r, min_trades)]
 
 
 def pick_copy(entry: Entry, timeframe: str, market: str = "spot") -> Entry:

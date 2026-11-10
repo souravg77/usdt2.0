@@ -583,12 +583,13 @@ def add_replay_routes(app, *, settings, auth, jobs, page, guard, registry_path: 
                '<p class="small muted">Tests the strategies loaded above (the Strategy choice) on the chosen '
                'timeframe over the period loaded above (From month and Length), for this workspace\'s pairs only (in '
                'the Futures view the Futures AI pairs, in the Spot view the Spot AI pairs), after fees. A strategy is '
-               'kept when its total is above 0R over at least the "Fewest trades" (10 unless you change it) and '
+               'kept when its total is above 0R over at least the "Fewest trades" (30 unless you change it), '
                'it made money in at least as many 3-month quarters as it lost in, so one lucky quarter is not '
-               'enough. Kept strategies become this engine\'s WIN strategies on that timeframe; the others stop '
+               'enough, and it made money both in the first two thirds of the period and again in the last third, '
+               'so a run that only worked in one stretch is not kept. Kept strategies become this engine\'s WIN strategies on that timeframe; the others stop '
                'trading it on this engine (their other timeframes carry on). Each engine has its own picks. '
                'On slow charts a pick tests at least ' + ", ".join(f"{n} months on {t}" for t, n in MIN_PICK_MONTHS.items())
-               + ' (starting earlier when less is loaded), because one month has too few candles for 10 trades. '
+               + ' (starting earlier when less is loaded), because one month has too few candles for 30 trades. '
                'After a pick, "Choose which to keep" shows every tested strategy\'s full results so you can tick '
                'your own, including ones with fewer trades.</p>'
                f'<form method="post" action="/replay/pick" class="row pick-form">{_csrf(auth, token)}' + period +
