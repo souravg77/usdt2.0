@@ -1,5 +1,6 @@
 """Timeframe picks: keep only the steady winners on one timeframe; the rest stop trading it."""
 
+import pytest
 import json
 import time
 
@@ -22,7 +23,7 @@ PW_ADMIN = "correct horse battery"
 UP = Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR))
 
 
-def result(i, trades=20, total=5.0, up=3, down=1):
+def result(i, trades=40, total=5.0, up=3, down=1):
     return {"id": i, "name": i, "trades": trades, "win_rate": 50.0, "total_r": total,
             "quarters_up": up, "quarters_down": down, "quarters": {}}
 
@@ -110,7 +111,7 @@ def test_replay_page_starts_and_undoes_a_pick(tmp_path, monkeypatch):
                                                                                          "--symbol", "BTC/USDT"]
     # Shawn: the period loaded on Replay, not 2 years (the download starts earlier to warm the indicators up)
     assert job["steps"][1] == ["learn", "--symbol", "BTC/USDT", "pick-timeframe", "4h", "--since", "2025-04-01",
-                               "--until", "2025-10-01", "--min-trades", "10", "--market", "spot"]
+                               "--until", "2025-10-01", "--min-trades", "30", "--market", "spot"]
     assert job["steps"][0][2] < "2025-04-01" and job["steps"][0][3:5] == ["--until", "2025-10-01"]
     assert job["title"] == "Keep only the 4h winners on Spot AI pairs (Apr 2025 to Oct 2025)"
     assert "over the period loaded above" in c.get("/replay").text
@@ -127,7 +128,7 @@ def test_replay_page_starts_and_undoes_a_pick(tmp_path, monkeypatch):
                                    result("shaky", up=1, down=3)]}})
     page = c.get("/replay?tf=5m").text
     assert "No strategy passed on 5m" in page and "Choose which to keep (3 tested)" in page
-    assert "only 4 trades (needs 10)" in page and "lost money overall (-3.50R after fees)" in page
+    assert "only 4 trades (needs 30)" in page and "lost money overall (-3.50R after fees)" in page
     assert "down in more quarters than up (1 of 4 up)" in page and "BTC/USDT 105,120 candles (50%)" in page
     c.post("/replay/pick", data={"csrf": csrf, "tf": "4h", "undo": "1"})
     runner.wait_idle()
@@ -153,7 +154,7 @@ def test_the_admin_chooses_which_tested_strategies_to_keep(tmp_path, monkeypatch
                                                    "results": [result("good"), few]}})
     page = c.get("/replay?tf=4h").text
     assert 'name="keep" value="good" data-r="5.0" checked' in page and 'name="keep" value="few" data-r="2.4">' in page
-    assert "only 3 trades (needs 10) · few trades, could be luck" in page and "+0.80R" in page  # per trade
+    assert "only 3 trades (needs 30) · few trades, could be luck" in page and "+0.80R" in page  # per trade
     assert "2025-Q2" in page and "Keep the ticked strategies" in page and 'name="min_trades"' in page
     r = c.post("/replay/pick/choose", data={"csrf": csrf, "tf": "4h", "keep": ["few", "good", "nope"],
                                             "month": "2025-04", "months": "6"}, follow_redirects=False)
@@ -361,7 +362,7 @@ def test_trading_page_lists_every_win_choice_with_tick_boxes(tmp_path, monkeypat
     assert "Futures AI WIN strategies: choose which work" in page
     assert "<b>1h</b>: 1 of 2 selected" in page and "<b>4h</b>: 1 of 2 selected" in page
     assert 'name="keep_1h" value="a" checked' in page and 'name="keep_1h" value="b">' in page
-    assert "only 4 trades (needs 10)" in page
+    assert "only 4 trades (needs 30)" in page
     # nothing changed: no job
     r = c.post("/trading/paper/win-choose", data={"csrf": csrf, "market": "futures", "tfs": "1h,4h",
                                                   "keep_1h": "a", "keep_4h": "c"}, follow_redirects=False)
@@ -667,3 +668,19 @@ def test_a_pick_judges_only_the_period_and_strategies_asked_for(tmp_path, monkey
     part = picks.load("data/learn/timeframe_picks.json")["1h"]
     assert 0 < part["results"][0]["trades"] < whole["results"][0]["trades"]  # only trades in that period
     assert part["until"] <= last + 86_400_000
+
+
+def test_a_winner_must_also_make_money_in_the_last_third():
+    late_loss = dict(result("faded"), early_r=8.0, late_r=-3.0)
+    early_loss = dict(result("late_luck"), early_r=-2.0, late_r=7.0)
+    both = dict(result("steady"), early_r=2.5, late_r=2.5)
+    assert [r["id"] for r in picks.winners([late_loss, early_loss, both])] == ["steady"]
+    assert "last third" in picks.why_not(late_loss) and "first two thirds" in picks.why_not(early_loss)
+    assert picks.MIN_TRADES == 30 and "needs 30" in picks.why_not(result("few", trades=29))
+
+
+def test_evaluate_splits_the_period_into_two_thirds_and_a_last_third(tmp_path):
+    store = make_store(tmp_path / "c.db")
+    res = picks.evaluate([UP], store, "bybit", ["BTC/USDT", "ETH/USDT"], "1h")
+    r = res[0]
+    assert r["trades"] and r["early_r"] + r["late_r"] == pytest.approx(r["total_r"], abs=0.02)

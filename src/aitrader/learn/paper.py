@@ -595,6 +595,14 @@ class PaperTrader:
                                      f"the {bad} trend points {'up' if sig.side is Side.SELL else 'down'}")
                     events["filtered"].append(k)
                     continue
+            if g["btc_trend"]:
+                ex = key.split("|")[1]
+                btc = self._btc_trend(ex, mkt)
+                if btc == ("up" if sig.side is Side.SELL else "down"):
+                    self._log_signal(k, sig, "against Bitcoin's trend",
+                                     f"Bitcoin's {guards.BTC_TF} trend points {btc}")
+                    events["filtered"].append(k)
+                    continue
             legs.append((k, perp))
         return legs
 
@@ -649,6 +657,15 @@ class PaperTrader:
                 self._trends[(market, ex, sym, htf)] = guards.trend_of(df)
             out[htf] = self._trends[(market, ex, sym, htf)]
         return out
+
+    def _btc_trend(self, ex: str, market: str = "spot") -> str:
+        """Bitcoin's trend on ``guards.BTC_TF`` from this engine's own candles (read once per pass)."""
+        tf = guards.BTC_TF
+        if (market, ex, guards.BTC, tf) not in self._trends:
+            now = self._now or int(time.time() * 1000)
+            df = self._frame(ex, guards.BTC, tf, now - guards.TREND_BARS * TIMEFRAME_MS[tf], now, market)
+            self._trends[(market, ex, guards.BTC, tf)] = guards.trend_of(df)
+        return self._trends[(market, ex, guards.BTC, tf)]
 
     def _lev(self, symbol: str = "") -> float:
         """The Trading page's paper leverage when chosen (up to Bybit's maximum for ``symbol``),

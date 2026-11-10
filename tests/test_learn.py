@@ -195,6 +195,16 @@ def spot_only(state_path):
     wallet.set_engine(wallet.engines_path(state_path), "futures", False)
 
 
+def plain_rules(state_path):
+    """Both engines without the extra paper rules (split take-profit, breakeven, limit entries,
+    Follow Bitcoin), for tests that compare paper trades with a plain backtest."""
+    from aitrader.learn import guards
+
+    for m in ("spot", "futures"):
+        guards.save(guards.path_for(state_path), m, {"split_tp": False, "breakeven": False,
+                                                     "maker_entry": False, "btc_trend": False})
+
+
 def fill_store(store, df, ex="bybit", sym="BTC/USDT", tf="1h"):
     store.upsert(Candle(ex, sym, tf, int(r.ts), r.open, r.high, r.low, r.close, r.volume)
                  for r in df.itertuples())
@@ -292,6 +302,7 @@ def test_paper_trading_matches_backtest(tmp_path):
     cfg = PaperConfig(retire=__import__("aitrader.learn", fromlist=["RetireRule"]).RetireRule(
         min_trades=10_000, max_drawdown=1e9))
     spot_only(str(tmp_path / "state.json"))
+    plain_rules(str(tmp_path / "state.json"))
     trader = PaperTrader(store, reg_path, ["bybit"], ["BTC/USDT"], cfg,
                          state_path=str(tmp_path / "state.json"))
     start = 600
@@ -330,6 +341,7 @@ def test_short_twin_paper_trades_like_its_backtest(tmp_path, monkeypatch):
     monkeypatch.setenv("AITRADER_LEVERAGE", "2")
     cfg = PaperConfig(retire=__import__("aitrader.learn", fromlist=["RetireRule"]).RetireRule(
         min_trades=10_000, max_drawdown=1e9))
+    plain_rules(str(tmp_path / "state.json"))
     trader = PaperTrader(store, reg_path, ["bybit"], ["BTC/USDT"], cfg, state_path=str(tmp_path / "state.json"))
     start = 600
     for i in range(start, len(df)):

@@ -99,7 +99,7 @@ async def cmd_collect(s: Settings, args) -> int:
 
     log = logging.getLogger("aitrader.collect")
     from .data.perp import PerpCandles, futures_db_path
-    from .learn import wallet
+    from .learn import guards, wallet
     from .learn.paper import history_start
 
     store = CandleStore(s.db_path)
@@ -165,10 +165,12 @@ async def cmd_collect(s: Settings, args) -> int:
                 finally:
                     await client.close()
             # each engine its own market: Spot AI's pairs from spot, Futures AI's from the perpetuals
+            # (plus Bitcoin, whose trend the "Follow Bitcoin" rule reads on each engine's own candles)
             jobs = [("spot", store, configured_symbols(s.symbols, market="spot",
-                                                       keep=open_paper_symbols(PAPER_STATE, "spot"))),
+                                                       keep=[*open_paper_symbols(PAPER_STATE, "spot"), guards.BTC])),
                     ("futures", fstore, configured_symbols(s.symbols, market="futures",
-                                                           keep=open_paper_symbols(PAPER_STATE, "futures")))]
+                                                           keep=[*open_paper_symbols(PAPER_STATE, "futures"),
+                                                                 guards.BTC]))]
             fast_new: list[tuple] = []
             for ex, adapter in adapters.items():
                 began = time.monotonic()
@@ -806,7 +808,8 @@ def cmd_learn(s: Settings, args) -> int:
                                 **({} if args.since else {"years": args.years}),
                                 **({"only": len(entries)} if args.only else {})})
         print(f"{tf}: tested {out['tested']} strategies on {len(symbols)} pairs; kept {len(out['picked'])} "
-              f"(total above 0R, at least {args.min_trades} trades, up in at least half their quarters)")
+              f"(total above 0R, at least {args.min_trades} trades, up in at least half their quarters, "
+              "and up in both the first two thirds and the last third of the period)")
         for r in picks.winners(results, args.min_trades):
             print(f"  {r['name']:<45} {r['trades']:>4} trades {r['win_rate']:>5.1f}% win {r['total_r']:+8.2f}R "
                   f"up {r['quarters_up']}/{r['quarters_up'] + r['quarters_down']} quarters")
@@ -1981,7 +1984,7 @@ def build_parser() -> argparse.ArgumentParser:
     lpt.add_argument("--since", help="test from this UTC date (YYYY-MM-DD), e.g. the period loaded on Replay")
     lpt.add_argument("--until", help="test up to this UTC date (default: now)")
     lpt.add_argument("--only", help="judge only these strategy ids (comma separated); the rest stop trading it")
-    lpt.add_argument("--min-trades", type=int, default=10, help="fewest trades to judge a strategy (default 10)")
+    lpt.add_argument("--min-trades", type=int, default=30, help="fewest trades to judge a strategy (default 30)")
     lpt.add_argument("--clear", action="store_true", help="undo the pick: every strategy trades it again")
     lpt.add_argument("--choose", help="keep exactly these tested strategy ids (comma separated) from the saved "
                                       "pick, whatever the rules say; no new backtest")

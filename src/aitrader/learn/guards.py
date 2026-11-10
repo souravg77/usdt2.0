@@ -12,6 +12,10 @@
 - **Higher-timeframe trend** (``trend``): a long is skipped while the 4h or daily trend points down,
   a short while it points up (5m to 1h signals check 4h and 1d, 4h signals check 1d). A trend is up
   when the close is above EMA 50 and EMA 20 is above EMA 50, down when both are below.
+- **Follow Bitcoin** (``btc_trend``, on unless a person turns it off): altcoins mostly move with
+  Bitcoin, so a long is skipped while Bitcoin's 4h trend points down and a short while it points up
+  (same trend rule as above, on the engine's own BTC/USDT candles: spot for Spot AI, the perpetual
+  for Futures AI). Missing Bitcoin candles never block a trade.
 - **Split take-profit** (``split_tp``): half the position is closed halfway to the target, the
   rest at the target (``backtest.engine``).
 - **Breakeven after the first half** (``breakeven``, with the split take-profit): once the first half
@@ -52,7 +56,7 @@ from . import wallet
 
 TIMEFRAMES = ("5m", "15m", "30m", "1h", "4h", "1d")  # the ones paper trading can use
 DEFAULTS = {"breaker": True, "day_pause_pct": 3.0, "pause_hours": 24.0, "week_close_pct": 6.0,
-            "min_rr": 0.0, "max_rr": 0.0, "trend": False, "split_tp": False, "breakeven": False, "maker_entry": False,
+            "min_rr": 0.0, "max_rr": 0.0, "trend": False, "btc_trend": True, "split_tp": True, "breakeven": True, "maker_entry": True,
             "max_long": 8.0, "max_short": 8.0, "max_correlated": 3.0, "corr_min": 0.8, "trade_usdt": 0.0,
             "agree": 1.0, "risk_pct": 0.0, "open_risk_pct": 0.0, "loss_streak": 0.0, "streak_ok_at": 0.0,
             "min_score": 0.0,
@@ -70,9 +74,11 @@ WHOLE = ("max_long", "max_short", "max_correlated", "agree", "loss_streak")
 # an engine's own starting values (Shawn: Futures AI takes profit at 2R at most)
 MARKET_DEFAULTS = {"futures": {"max_rr": 2.0}}
 CORR_BARS = 168  # hourly returns of the last week
-SWITCHES = ("breaker", "trend", "split_tp", "breakeven", "maker_entry")
+SWITCHES = ("breaker", "trend", "btc_trend", "split_tp", "breakeven", "maker_entry")
 
 HIGHER = {"5m": ("4h", "1d"), "15m": ("4h", "1d"), "30m": ("4h", "1d"), "1h": ("4h", "1d"), "4h": ("1d",)}
+BTC = "BTC/USDT"  # the market leader the Follow Bitcoin rule reads
+BTC_TF = "4h"
 TREND_BARS = 120  # candles of a higher timeframe read for its trend (EMA 50 needs ~60 to settle)
 
 
