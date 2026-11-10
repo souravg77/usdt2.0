@@ -1408,3 +1408,36 @@ def test_golive_approve_lists_the_strategies_and_takes_a_number(tmp_path, capsys
         assert cli.pick_strategies(gl, "futures", ask=lambda _, w=wrong: w, isatty=lambda: True) == []
     assert cli.pick_strategies(gl, "futures", ask=lambda _: "1", isatty=lambda: False) == []
     assert "-it collector" in capsys.readouterr().err
+
+
+def test_control_writes_dont_lose_a_kill_or_halt_to_a_racing_writer(tmp_path):
+    import threading
+    import time
+
+    from aitrader.trade.control import Control
+
+    path = str(tmp_path / "control.json")
+    c = Control(path)
+    c.resume(by="t")
+    seen = []
+    real = Control.state
+
+    def slow_state(self):  # widen the read-to-write gap a racing writer would slip into
+        s = real(self)
+        seen.append(1)
+        time.sleep(0.05)
+        return s
+
+    Control.state = slow_state
+    try:
+        a = threading.Thread(target=lambda: Control(path).pause("risk engine: daily loss", by="risk engine", auto=True))
+        b = threading.Thread(target=lambda: Control(path).kill(by="Shawn"))
+        a.start()
+        time.sleep(0.01)
+        b.start()
+        a.join()
+        b.join()
+    finally:
+        Control.state = real
+    assert Control(path).killed  # the kill isn't overwritten by the pause that read before it
+    assert not [f for f in os.listdir(tmp_path) if f.endswith(".tmp")]

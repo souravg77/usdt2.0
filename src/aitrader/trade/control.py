@@ -17,11 +17,37 @@ the risk engine's loss-cap pause is about the live account, so paper keeps colle
 
 from __future__ import annotations
 
+import contextlib
+import functools
 import json
 import os
 import time
 
+try:
+    import fcntl
+except ImportError:  # not on Windows: no lock, as before
+    fcntl = None
+
 DEFAULT_PATH = "data/trade/control.json"
+
+
+def _locked(method):
+    """Read, change and write the control file as one step: the dashboard, Telegram, the risk
+    engine and the executor's safety halt may write at once, and without the lock one could read
+    before another's write and then overwrite it (a kill or a halt lost)."""
+    @functools.wraps(method)
+    def run(self, *a, **kw):
+        os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
+        with open(self.path + ".lock", "a") as fh:
+            if fcntl is not None:
+                fcntl.flock(fh, fcntl.LOCK_EX)
+            try:
+                return method(self, *a, **kw)
+            finally:
+                if fcntl is not None:
+                    with contextlib.suppress(OSError):
+                        fcntl.flock(fh, fcntl.LOCK_UN)
+    return run
 
 
 class Control:
@@ -44,6 +70,7 @@ class Control:
     def killed(self) -> bool:
         return bool(self.state()["killed"])
 
+    @_locked
     def pause(self, reason: str, by: str = "", auto: bool = False) -> dict:
         """``auto``: set by the risk engine, not a person (paper trading keeps going)."""
         s = self.state()
@@ -72,6 +99,7 @@ class Control:
     def halted(self) -> bool:
         return bool(self.state().get("halted"))
 
+    @_locked
     def halt(self, reason: str, by: str = "") -> dict:
         """Hard pause: no new entries until a person resumes. A kill already set stays a kill."""
         s = self.state()
@@ -82,9 +110,11 @@ class Control:
         return self._write({"paused": True, "killed": False, "halted": True, "reason": reason, "by": by,
                             "manual": bool(s["paused"] and self._manual(s))})
 
+    @_locked
     def kill(self, reason: str = "kill switch", by: str = "") -> dict:
         return self._write({"paused": True, "killed": True, "reason": reason, "by": by, "manual": True})
 
+    @_locked
     def resume(self, by: str = "") -> dict:
         return self._write({"paused": False, "killed": False, "halted": False, "reason": "", "by": by})
 
@@ -156,6 +186,7 @@ class Control:
         if any(k in data for k in keys):
             self._save_one({k: v for k, v in data.items() if k not in set(keys)})
 
+    @_locked
     def mark_flattened(self) -> None:
         s = self.state()
         s["flattened_at"] = time.time()
@@ -165,7 +196,7 @@ class Control:
         if not keep_since:
             s["since"] = time.time()
         os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
-        tmp = self.path + ".tmp"
+        tmp = f"{self.path}.{os.getpid()}.tmp"  # each process its own: two writers never share one
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(s, fh, indent=1)
         os.replace(tmp, self.path)
