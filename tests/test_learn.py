@@ -638,6 +638,69 @@ def test_kill_and_close_all_close_paper_positions(tmp_path):
     store.close()
 
 
+def test_a_close_request_that_cant_be_carried_out_does_not_spin_the_loop(tmp_path, monkeypatch):
+    from aitrader.learn import paper as paper_mod
+    from aitrader.trade import Control
+
+    df = synthetic(n=900)
+    store = CandleStore(str(tmp_path / "c.db"))
+    fill_store(store, df)
+    reg_path = str(tmp_path / "reg.json")
+    reg = Registry(reg_path)
+    reg.add(Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR), status="paper"))
+    reg.save()
+    control = Control(str(tmp_path / "control.json"))
+    spot_only(str(tmp_path / "s.json"))
+    plain_rules(str(tmp_path / "s.json"))
+    trader = PaperTrader(store, reg_path, ["bybit"], ["BTC/USDT"], state_path=str(tmp_path / "s.json"),
+                         control=control)
+    ticks = iter(int(df.ts.iloc[i]) + H for i in range(600, 900))
+    for t in ticks:
+        trader.tick(now_ms=t)
+        if any(p["filled"] for p in trader.state["open"].values()):
+            break
+    old = len(trader.state["trades"])
+
+    def broken(_entry):
+        raise RuntimeError("strategy can't be built")
+
+    monkeypatch.setattr(paper_mod, "make_strategy", broken)
+    control.request_close_all(by="admin")
+    assert trader._close_waiting()
+    trader.tick(now_ms=next(ticks))
+    assert control.close_all_requested() is not None  # still asked: tried again later
+    assert not trader._close_waiting()  # ...but it doesn't wake the loop straight away again
+    assert len(trader.state["trades"]) == old
+    store.close()
+
+
+def test_an_unfilled_entry_cancelled_reports_no_close(tmp_path):
+    from aitrader.trade import Control
+
+    df = synthetic(n=900)
+    store = CandleStore(str(tmp_path / "c.db"))
+    fill_store(store, df)
+    reg_path = str(tmp_path / "reg.json")
+    reg = Registry(reg_path)
+    reg.add(Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR), status="paper"))
+    reg.save()
+    control = Control(str(tmp_path / "control.json"))
+    spot_only(str(tmp_path / "s.json"))
+    trader = PaperTrader(store, reg_path, ["bybit"], ["BTC/USDT"], state_path=str(tmp_path / "s.json"),
+                         control=control)
+    for i in range(600, 900):
+        ev = trader.tick(now_ms=int(df.ts.iloc[i]) + H)
+        if any(not p.get("filled") for p in trader.state["open"].values()):
+            break
+    pending = [k for k, p in trader.state["open"].items() if not p.get("filled")]
+    assert pending
+    control.kill("test")
+    ev = trader.tick(now_ms=int(df.ts.iloc[i]) + H + 1)
+    assert not set(pending) & set(ev["closed"])  # cancelled before its entry: nothing closed
+    assert not set(pending) & set(trader.state["open"])
+    store.close()
+
+
 def test_paper_tick_keeps_registry_changes_made_meanwhile(tmp_path):
     """A `learn` command (or the dashboard) may change the registry while a paper tick runs."""
     df = synthetic(n=700)

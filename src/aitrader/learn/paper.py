@@ -109,6 +109,7 @@ class PaperConfig:
     retire: RetireRule = field(default_factory=RetireRule)
 
 
+CLOSE_RETRY_S = 30.0  # a close request that could not be carried out is tried again after this
 HAND_PRICE_MS = 120_000  # a live price sent with a Close press is used for this long
 
 
@@ -148,6 +149,9 @@ class PaperTrader:
         self._trends: dict = {}  # (exchange, symbol, timeframe) -> trend of a higher timeframe, this pass
         self._returns: dict = {}  # (exchange, symbol) -> hourly returns of the last week, this pass
         self._now = 0
+        # a close request this pass couldn't finish (a position with no prices yet): don't let it
+        # wake the loop again before this, or the service spins a full pass many times a second
+        self._close_retry_at = 0.0
         self.perp_limits_path = perp_limits.DEFAULT_PATH  # each coin's maximum leverage on Bybit
         # each engine's own trade filter (aitrader.ai.LiveFilter) or None: {"spot": ..., "futures": ...};
         # one filter given on its own serves both
@@ -472,7 +476,7 @@ class PaperTrader:
 
     def _close_waiting(self) -> bool:
         """A person pressed Close or Close all: the paper trader acts on it straight away."""
-        if self.control is None:
+        if self.control is None or time.monotonic() < self._close_retry_at:
             return False
         try:
             asked = getattr(self.control, "close_all_requested", None)
@@ -856,8 +860,7 @@ class PaperTrader:
             if _asked_to_close(close_one.get(key), pos):
                 closing, reason, hand_req = True, "closed by hand", close_one.get(key)
             if closing and not pos.get("filled"):
-                del self.state["open"][key]
-                events["closed"].append(key)
+                del self.state["open"][key]  # never filled: no trade, so no close to report
                 log.info("paper %s cancelled (%s) before its entry", key, reason)
                 continue
             if ex not in self.exchanges:  # an exchange no longer used: its prices stopped updating
@@ -1026,6 +1029,8 @@ class PaperTrader:
                 if not _asked_to_close(req, self.state["open"].get(k, {}))]
         if done:
             self.control.clear_close(done)
+        waiting = (close_req is not None and left) or len(done) < len(close_one)
+        self._close_retry_at = time.monotonic() + CLOSE_RETRY_S if waiting else 0.0
 
     def _score(self, reg: Registry, events: dict) -> None:
         rule = self.cfg.retire
