@@ -179,7 +179,19 @@ def test_stop_beyond_half_the_real_liquidation_room_halts(px):
     adapter.perp_position_info = perp_position_info
     e = make()
     run(e.tick())
-    assert e.control.halted and "halfway" in e.control.state()["reason"]
+    assert e.control.halted and "60% of the way" in e.control.state()["reason"]
+
+
+def test_a_stop_just_past_halfway_after_the_fill_does_not_halt(px):
+    make, adapter, *_ = px
+
+    async def perp_position_info(symbol, side="short"):
+        return {"mark": 100.0, "liq_price": 109.5}  # slippage: the stop now sits ~53% of the way
+
+    adapter.perp_position_info = perp_position_info
+    e = make()
+    run(e.tick())
+    assert not e.control.halted
 
 
 def test_cli_prints_live_perpetual_readings(monkeypatch, capsys):
