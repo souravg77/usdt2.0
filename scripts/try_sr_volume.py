@@ -520,14 +520,121 @@ class MlSmcPdf(SmcMetaBoosted):
         return {"ml_chance": self._memo[1]} if getattr(self, "_memo", None) else {}
 
 
+# ---- "before" baselines: every setup, no filter, same trade as its ML filter ------------------------
+
+
+def sr_touches(df: pd.DataFrame) -> pd.DataFrame:
+    """Every bar that dips to a support zone and closes above it, with its stop and the numbers."""
+    z, d = zones(df), demand(df)
+    a = atr(df)
+    touch = (df["low"] <= z["support"] + 0.25 * a) & (df["close"] > z["support"])
+    stop = np.minimum(z["support"] - 0.5 * a, df["low"] - 0.25 * a)
+    out = sr_features(df, z, d)
+    out["stop"] = stop.where(touch.fillna(False))
+    return out
+
+
+class SrTouchAll(_Master):
+    spec = _spec(
+        name="sr_touch_all", timeframes=("1h", "4h"),
+        regime="Any (no filter: the 'before' line).",
+        setup="Every bar whose low reaches a support zone (within 0.25 ATR) and closes above it. No volume, "
+        "demand or trend filter.",
+        entry="Market order at the next bar's open.",
+        stop="Support minus 0.5 x ATR(14) (or the bar's low minus 0.25 ATR if lower).",
+        target="2R; time stop 30 bars (the same trade the ML filter judges).")
+    eligible_regimes = ("trend-up", "trend-down", "range", "uncertain")
+    reason = "touched support (unfiltered baseline)"
+
+    @classmethod
+    def default_params(cls):
+        return {**BASE, "target_r": 2.0, "time_stop": 30, "atr_pct_max": 1.0}
+
+    def _t(self, df):
+        key = _df_key(df)
+        if getattr(self, "_tkey", None) != key:
+            self._tkey, self._tv = key, sr_touches(df)
+        return self._tv
+
+    def setup(self, df, timeframe):
+        return self._t(df)["stop"].notna()
+
+    def stop_series(self, df):
+        return self._t(df)["stop"]
+
+    def exit_key(self):
+        return f"time_stop={self.params['time_stop']}"
+
+
+class MlSrTouch(SmcMetaBoosted):
+    spec = _spec(
+        name="ml_sr_touch", timeframes=("1h", "4h"),
+        regime="Any orderly market; the model learns which support touches pay.",
+        setup="The same support touches as sr_touch_all; gradient-boosted trees (walk-forward, "
+        "meta-labeling) learn from the zone and demand numbers plus the 25 standard inputs whether each "
+        "touch's trade reached 2R before its stop within 30 bars. Takes a touch when that chance is 70%+.",
+        entry="Market order at the next bar's open.",
+        stop="Support minus 0.5 x ATR(14) (or the bar's low minus 0.25 ATR if lower).",
+        target="2R; time stop after 30 bars.")
+    reason = "support touch: ML chance of 2R first >= 70%"
+    needs_context = True
+
+    @classmethod
+    def default_params(cls):
+        return {**super().default_params(), "train_bars": 6000, "min_train": 100}
+
+    def _setups(self, df):
+        key = _df_key(df)
+        if getattr(self, "_smc_memo", (None,))[0] != key:
+            self._smc_memo = (key, sr_touches(df))
+        return self._smc_memo[1]
+
+    def _features(self, df):
+        S = self._setups(df)
+        extra = S.drop(columns=["stop"]).astype(float)
+        extra["stop_atr"] = (df["close"] - S["stop"]) / atr(df).replace(0, np.nan)
+        X = pd.concat([feature_frame(df), extra], axis=1).replace([np.inf, -np.inf], np.nan)
+        must = X.drop(columns=[c for c in ("oi_chg_6", "oi_chg_24", "funding") if c in X.columns])
+        return X.to_numpy(float), must.notna().all(axis=1).to_numpy() & S["stop"].notna().to_numpy()
+
+    def _model(self, X, y, key):
+        return super()._model(np.where(np.isfinite(X), X, np.nan), y, key)
+
+    def features(self, df):
+        return {"ml_chance": self._memo[1]} if getattr(self, "_memo", None) else {}
+
+
+class SmcAllTaps(SmcPdfRisk):
+    spec = replace(SmcPdfRisk.spec, name="smc_all_taps",
+                   regime="Any (no filter: the 'before' line).",
+                   setup="Every return to a bullish order block that caused a break of structure, with no "
+                   "imbalance, discount or liquidity filter.",
+                   target="2R; time stop 30 bars (the same trade the ML filter judges).")
+    eligible_regimes = ("trend-up", "trend-down", "range", "uncertain")
+    reason = "tapped an order block (unfiltered baseline)"
+    need = ()
+
+    @classmethod
+    def default_params(cls):
+        return {**super().default_params(), "target_r": 2.0, "time_stop": 30, "atr_pct_max": 1.0}
+
+    def targets(self, df):
+        return self._fixed_r()
+
+
+# before -> after: (baseline, [its filtered versions])
+COMPARE = (("sr_touch_all", ("sr_bounce", "ml_sr_touch")),
+           ("smc_all_taps", ("smc_pdf_risk", "smc_pdf_full", "smc_pdf_confirm", "ml_smc_pdf")))
+
+
 # ---- run -------------------------------------------------------------------------------------------
 
 
-SETS = {"sr": {"sr_bounce": SrBounce, "sr_breakout_retest": SrBreakoutRetest, "ml_sr_volume": MlSrVolume},
-        "smc": {"smc_pdf_risk": SmcPdfRisk, "smc_pdf_full": SmcPdfFull, "smc_pdf_confirm": SmcPdfConfirm,
+SETS = {"sr": {"sr_touch_all": SrTouchAll, "sr_bounce": SrBounce, "ml_sr_touch": MlSrTouch, "sr_breakout_retest": SrBreakoutRetest, "ml_sr_volume": MlSrVolume},
+        "smc": {"smc_all_taps": SmcAllTaps, "smc_pdf_risk": SmcPdfRisk, "smc_pdf_full": SmcPdfFull, "smc_pdf_confirm": SmcPdfConfirm,
                 "ml_smc_pdf": MlSmcPdf}}
 NEW = {**SETS["sr"], **SETS["smc"]}
-ML = {"ml_sr_volume", "ml_smc_pdf"}
+ML = {"ml_sr_volume", "ml_smc_pdf", "ml_sr_touch"}
 
 
 def entries(use_ml: bool, market: str, names) -> list[Entry]:
@@ -558,6 +665,38 @@ def best_existing(reg: Registry, market: str, n: int = 10) -> list[tuple]:
         rows.append((m.get("expectancy_r", 0.0), m.get("trades", 0), m.get("win_rate", 0.0),
                      m.get("profit_factor", 0.0), e.id, e.status, not bt.get("failed")))
     return sorted(rows, reverse=True)[:n]
+
+
+def before_after(results: list[dict], market: str) -> None:
+    """Each unfiltered baseline next to its rule and ML filtered versions, out of sample."""
+    by = {r["id"]: r["out_of_sample"] for r in results}
+    sides = ("", "short-") if market == "futures" else ("",)
+    lines = []
+    for base, filtered in COMPARE:
+        for side in sides:
+            b = by.get(f"try-{side}{base}")
+            if not b:
+                continue
+            lines.append(f"  {'SHORT ' if side else 'LONG  '}BEFORE {base:20} " + _fmt(b))
+            for f in filtered:
+                m = by.get(f"try-{side}{f}")
+                if m:
+                    lines.append(f"         AFTER  {f:20} " + _fmt(m) + _delta(b, m))
+    if lines:
+        print("\n  Before (every setup) and after (rule filters / ML filter), out of sample, after fees:")
+        print("\n".join(lines))
+
+
+def _fmt(m: dict) -> str:
+    return (f"trades={m['trades']:5d} win={m['win_rate']:.0%} avg={m['expectancy_r']:+.3f}R "
+            f"total={m.get('total_r', 0):+.1f}R maxDD={m['max_drawdown_r']:.1f}R")
+
+
+def _delta(b: dict, m: dict) -> str:
+    if not b["trades"] or not m["trades"]:
+        return ""
+    return (f"   | kept {m['trades'] / b['trades']:.0%} of trades, win {m['win_rate'] - b['win_rate']:+.0%}, "
+            f"avg {m['expectancy_r'] - b['expectancy_r']:+.3f}R")
 
 
 def main() -> int:
@@ -605,6 +744,7 @@ def main() -> int:
                             "by_pair": [{k: mk[k] for k in ("symbol", "timeframe", "trades_oos", "exp_oos")}
                                         for mk in res["markets"]]})
         store.close()
+        before_after(results, market)
         best = best_existing(reg, market) if reg else []
         if best:
             print(f"\n  Your best existing {market} strategies (their last test, out of sample, 30+ trades):")
