@@ -18,6 +18,11 @@ The strategies (thresholds chosen before any test, not tuned):
   (at least 1.5R away, else no trade); time stop 30 bars.
 * sr_breakout_retest: a close through resistance on at least 2x normal volume, then within 6 bars
   price comes back to the broken level and closes above it again. Stop 1 ATR under the level, 2R.
+* (SMC, from the Sonarlab "Introduction to trading SMC" PDF) smc_pdf_risk: price comes back to a
+  bullish order block that caused a break of structure, left an imbalance and sits in discount;
+  smc_pdf_full: the same plus liquidity taken on the way back; smc_pdf_confirm: the same block, but
+  entry only after a small break of structure up; ml_smc_pdf: learns from every block tap which
+  SMC numbers paid. Use --set smc (or sr) to run only one group.
 * ml_sr_volume: gradient-boosted trees (walk-forward, like ml_boosted) that learn from the zone
   and demand numbers (distance to support/resistance in ATR, zone strength, volume, close
   location, CMF, OBV slope, distance to the busiest price, open-interest change on futures);
@@ -48,7 +53,7 @@ from aitrader.strategies import STRATEGIES
 from aitrader.strategies.base import StrategySpec
 from aitrader.strategies.families import BASE, NO_TRADE, _strong_downtrend
 from aitrader.strategies.master import TREND_RANGE, _df_key, _Master
-from aitrader.strategies.ml import MlBoosted, feature_frame
+from aitrader.strategies.ml import MlBoosted, SmcMetaBoosted, feature_frame
 
 SOURCE = "Shawn's ask 2026-11-11: volume, demand, support and resistance (test only)"
 PIVOT = 5          # a swing high/low: the highest/lowest bar of 5 bars each side (known 5 bars later)
@@ -297,16 +302,238 @@ class MlSrVolume(MlBoosted):
         return super().setup(df, timeframe) & near
 
 
+# ---- Smart Money Concepts (Sonarlab "Introduction to trading SMC" PDF, Shawn 2026-11-11) ------------
+#
+# What the PDF says, written as rules (it gives no stop/target rules or numbers except the 50% level):
+# * an order block is only valid after a break of structure (BOS: a close above the last swing high)
+# * the bullish order block = the last down candle before the move that broke structure
+# * confluences: the block left an imbalance (fair value gap); the block sits in discount (below
+#   50% of the dealing range from the leg's low to its high); liquidity (a swing low above the block,
+#   "inducement") was taken on the way back to it
+# * risk entry at the block, or confirmation entry: a small break of structure after the tap
+# * a bearish break of structure (CHoCH / BOS down) cancels the bullish block
+
+SMC_K = 5           # swing points: 5 bars each side
+SMC_MAX_AGE = 100   # a block stops counting 100 bars after its break of structure
+CONFIRM_BARS = 10   # confirmation must come within 10 bars of the tap
+
+
+def smc_state(df: pd.DataFrame) -> pd.DataFrame:
+    o, h, lo, c, v = (df[k].to_numpy(float) for k in ("open", "high", "low", "close", "volume"))
+    a = atr(df).to_numpy(float)
+    vavg = df["volume"].rolling(20, min_periods=20).mean().shift(1).to_numpy(float)
+    n = len(df)
+    cols = ("tap", "confirm", "ob_top", "ob_bottom", "range_hi", "range_lo", "has_fvg", "discount",
+            "inducement", "range_pos", "ob_size_atr", "fvg_size_atr", "bars_since_bos", "bos_push_atr",
+            "bos_rvol", "trend_run", "after_choch", "conf_stop")
+    out = {k: np.full(n, np.nan) for k in cols}
+    out["tap"][:] = 0
+    out["confirm"][:] = 0
+    sh = sl = None          # (price, index) of the last confirmed swing high / low
+    sh_broken = sl_broken = True
+    trend, run = 0, 0
+    ob = None               # the active bullish order block
+    for t in range(n):
+        p = t - SMC_K
+        if p >= SMC_K:
+            w = slice(p - SMC_K, p + SMC_K + 1)
+            if h[p] >= h[w].max():
+                sh, sh_broken = (h[p], p), False
+            if lo[p] <= lo[w].min():
+                sl, sl_broken = (lo[p], p), False
+                if ob and not ob["tapped"] and ob["ind"] is None and p > ob["bos"] and lo[p] > ob["top"]:
+                    ob["ind"] = lo[p]  # liquidity resting above the block
+        if not np.isfinite(a[t]) or a[t] <= 0:
+            continue
+        if sl is not None and not sl_broken and c[t] < sl[0]:  # bearish break: bullish structure gone
+            sl_broken, trend, run, ob = True, -1, 0, None
+        if sh is not None and not sh_broken and c[t] > sh[0]:  # bullish break of structure
+            sh_broken = True
+            choch = trend == -1
+            run = 1 if trend != 1 else run + 1
+            trend = 1
+            start = sh[1] + 1
+            m = start + int(np.argmin(lo[start:t + 1])) if start <= t else t  # the leg's low
+            j = next((k for k in range(m, max(m - 6, -1), -1) if c[k] < o[k]), m)  # last down candle
+            if j < t:
+                gaps = [lo[k] - h[k - 2] for k in range(j + 2, t + 1) if lo[k] > h[k - 2]]
+                ob = {"top": h[j], "bottom": min(lo[j], lo[m]), "lo": lo[m], "hi": h[m:t + 1].max(), "bos": t,
+                      "fvg": bool(gaps), "fvg_size": max(gaps) / a[t] if gaps else 0.0,
+                      "push": (c[t] - sh[0]) / a[t], "rvol": v[t] / vavg[t] if vavg[t] > 0 else np.nan,
+                      "run": run, "choch": float(choch), "ind": None, "ind_taken": False,
+                      "tapped": False, "tap_t": None, "tap_low": None}
+            continue
+        if ob is None:
+            continue
+        if c[t] < ob["bottom"] or t - ob["bos"] > SMC_MAX_AGE:
+            ob = None
+            continue
+        if ob["ind"] is not None and lo[t] < ob["ind"]:
+            ob["ind_taken"] = True
+        if not ob["tapped"]:
+            ob["hi"] = max(ob["hi"], h[t])
+            if lo[t] <= ob["top"]:  # price is back at the block and closed above its bottom
+                ob["tapped"], ob["tap_t"], ob["tap_low"] = True, t, lo[t]
+                eq = (ob["lo"] + ob["hi"]) / 2
+                rng = ob["hi"] - ob["lo"]
+                vals = {"tap": 1, "ob_top": ob["top"], "ob_bottom": ob["bottom"], "range_hi": ob["hi"],
+                        "range_lo": ob["lo"], "has_fvg": float(ob["fvg"]), "discount": float(ob["top"] <= eq),
+                        "inducement": float(ob["ind_taken"]),
+                        "range_pos": (c[t] - ob["lo"]) / rng if rng > 0 else np.nan,
+                        "ob_size_atr": (ob["top"] - ob["bottom"]) / a[t], "fvg_size_atr": ob["fvg_size"],
+                        "bars_since_bos": t - ob["bos"], "bos_push_atr": ob["push"], "bos_rvol": ob["rvol"],
+                        "trend_run": ob["run"], "after_choch": ob["choch"]}
+                for k, val in vals.items():
+                    out[k][t] = val
+                ob["snap"] = vals
+            continue
+        ob["tap_low"] = min(ob["tap_low"], lo[t])
+        if t - ob["tap_t"] > CONFIRM_BARS:
+            ob = None
+            continue
+        if t - ob["tap_t"] >= 2 and c[t] > h[ob["tap_t"]:t].max():  # a small break of structure up
+            for k, val in ob["snap"].items():
+                out[k][t] = val
+            out["tap"][t] = 0
+            out["confirm"][t] = 1
+            out["conf_stop"][t] = ob["tap_low"]
+            ob = None
+    return pd.DataFrame(out, index=df.index)
+
+
+def _smc(self, df):
+    key = _df_key(df)
+    if getattr(self, "_skey", None) != key:
+        self._skey, self._s = key, smc_state(df)
+    return self._s
+
+
+def _to_range_high(self, df):
+    S = _smc(self, df)
+    hi = S["range_hi"].to_numpy(float)
+    rr = self.params["min_rr"]
+
+    def target(i, entry, stop):
+        t = hi[i]
+        if not np.isfinite(t) or t - entry < rr * (entry - stop):
+            return None
+        return t
+    return target
+
+
+class SmcPdfRisk(_Master):
+    spec = _spec(
+        name="smc_pdf_risk", timeframes=("1h", "4h"),
+        regime="Bullish structure: the last break of structure was up.",
+        setup="Risk entry (PDF): price returns to a bullish order block that caused a break of "
+        "structure, left a fair value gap and sits in discount (below 50% of the leg), and closes above "
+        "the block's bottom.",
+        entry="Market order at the next bar's open.",
+        stop="The block's bottom minus 0.25 x ATR(14).",
+        target="The leg's high (the 'next high'), only if at least 1.5R away; time stop 50 bars.")
+    eligible_regimes = ("trend-up", "range", "uncertain")
+    reason = "SMC risk entry: tapped a valid order block (BOS, imbalance, discount)"
+    need = ("has_fvg", "discount")
+    entry_col = "tap"
+
+    @classmethod
+    def default_params(cls):
+        return {**BASE, "stop_atr": 0.25, "min_rr": 1.5, "time_stop": 50}
+
+    def setup(self, df, timeframe):
+        S = _smc(self, df)
+        cond = S[self.entry_col] == 1
+        for k in self.need:
+            cond &= S[k] == 1
+        return cond.fillna(False)
+
+    def stop_series(self, df):
+        S = _smc(self, df)
+        base = S["conf_stop"] if self.entry_col == "confirm" else S["ob_bottom"]
+        return base - self.params["stop_atr"] * atr(df)
+
+    def targets(self, df):
+        return _to_range_high(self, df)
+
+    def exit_key(self):
+        return f"time_stop={self.params['time_stop']}"
+
+
+class SmcPdfFull(SmcPdfRisk):
+    spec = replace(SmcPdfRisk.spec, name="smc_pdf_full",
+                   setup=SmcPdfRisk.spec.setup + " Also: liquidity above the block (a newer swing low) "
+                   "was taken on the way back (inducement).")
+    reason = "SMC risk entry with all confluences (BOS, imbalance, discount, liquidity taken)"
+    need = ("has_fvg", "discount", "inducement")
+
+
+class SmcPdfConfirm(SmcPdfRisk):
+    spec = replace(SmcPdfRisk.spec, name="smc_pdf_confirm",
+                   setup="Confirmation entry (PDF): after price taps a valid order block (BOS, imbalance, "
+                   "discount), a close above the highs since the tap within 10 bars (a small break of structure).",
+                   stop="The lowest low since the tap minus 0.25 x ATR(14).")
+    reason = "SMC confirmation entry: small break of structure after tapping a valid order block"
+    need = ("has_fvg", "discount")
+    entry_col = "confirm"
+
+
+SMC_NUMS = ("has_fvg", "discount", "inducement", "range_pos", "ob_size_atr", "fvg_size_atr", "bars_since_bos",
+            "bos_push_atr", "bos_rvol", "trend_run", "after_choch")
+
+
+class MlSmcPdf(SmcMetaBoosted):
+    spec = _spec(
+        name="ml_smc_pdf", timeframes=("1h", "4h"),
+        regime="Any orderly market; the model learns which SMC numbers pay.",
+        setup="Every tap of a bullish order block that caused a break of structure is a candidate (no "
+        "confluence required). Gradient-boosted trees (walk-forward, meta-labeling like smc_meta_boosted) "
+        "learn from the SMC numbers (imbalance and its size, premium/discount position, liquidity taken, "
+        "block size, bars since the break, how hard and on what volume it broke, trend run, after a "
+        "change of character) plus the 25 standard inputs whether the trade reached 2R before its stop "
+        "within 30 bars. Trades when that chance is 70% or more.",
+        entry="Market order at the next bar's open.",
+        stop="The block's bottom minus 0.25 x ATR(14).",
+        target="2R; time stop after 30 bars.")
+    reason = "SMC order block tap: ML chance of 2R first >= 70%"
+
+    @classmethod
+    def default_params(cls):
+        # block taps are rarer than smc_meta_boosted's four setups: learn from a longer stretch
+        return {**super().default_params(), "train_bars": 10000, "min_train": 60}
+
+    def _setups(self, df):
+        key = _df_key(df)
+        if getattr(self, "_smc_memo", (None,))[0] != key:
+            S = smc_state(df)
+            S["stop"] = (S["ob_bottom"] - 0.25 * atr(df)).where(S["tap"] == 1)
+            self._smc_memo = (key, S)
+        return self._smc_memo[1]
+
+    def _features(self, df):
+        S = self._setups(df)
+        extra = S[list(SMC_NUMS)].astype(float)
+        extra["stop_atr"] = (df["close"] - S["stop"]) / atr(df).replace(0, np.nan)
+        X = pd.concat([feature_frame(df), extra], axis=1).replace([np.inf, -np.inf], np.nan)
+        return X.to_numpy(float), X.notna().all(axis=1).to_numpy() & S["stop"].notna().to_numpy()
+
+    def features(self, df):
+        return {"ml_chance": self._memo[1]} if getattr(self, "_memo", None) else {}
+
+
 # ---- run -------------------------------------------------------------------------------------------
 
 
-NEW = {"sr_bounce": SrBounce, "sr_breakout_retest": SrBreakoutRetest, "ml_sr_volume": MlSrVolume}
+SETS = {"sr": {"sr_bounce": SrBounce, "sr_breakout_retest": SrBreakoutRetest, "ml_sr_volume": MlSrVolume},
+        "smc": {"smc_pdf_risk": SmcPdfRisk, "smc_pdf_full": SmcPdfFull, "smc_pdf_confirm": SmcPdfConfirm,
+                "ml_smc_pdf": MlSmcPdf}}
+NEW = {**SETS["sr"], **SETS["smc"]}
+ML = {"ml_sr_volume", "ml_smc_pdf"}
 
 
-def entries(use_ml: bool, market: str) -> list[Entry]:
+def entries(use_ml: bool, market: str, names) -> list[Entry]:
     out = []
-    for name in NEW:
-        if name == "ml_sr_volume" and not use_ml:
+    for name in names:
+        if name in ML and not use_ml:
             continue
         long = Entry(id=f"try-{name}", kind="builtin", name=name, spec={}, source=SOURCE)
         if market == "spot":
@@ -339,6 +566,8 @@ def main() -> int:
     ap.add_argument("--tf", default="1h,4h")
     ap.add_argument("--max-pairs", type=int, default=20)
     ap.add_argument("--no-ml", action="store_true")
+    ap.add_argument("--set", choices=["sr", "smc", "all"], default="all",
+                    help="sr: support/resistance + volume; smc: Smart Money Concepts (PDF); all: both")
     ap.add_argument("--registry", default="data/learn/registry.json")
     ap.add_argument("--out", default="data/reports/sr_volume_test.json")
     args = ap.parse_args()
@@ -358,7 +587,8 @@ def main() -> int:
         print(f"\n=== {'Spot AI (spot candles)' if market == 'spot' else 'Futures AI (perpetual candles)'}: "
               f"{len(pairs)} pairs, {', '.join(tfs)} ===", flush=True)
         results = []
-        for e in entries(not args.no_ml, market):
+        names = list(NEW) if args.set == "all" else list(SETS[args.set])
+        for e in entries(not args.no_ml, market, names):
             t0 = time.time()
             print(f"  testing {e.id} ...", flush=True)
             res = evaluate(e, store, EXCHANGES, pairs, costs, move=False, market=market)
