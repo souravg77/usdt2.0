@@ -663,8 +663,8 @@ class PaperTrader:
         return out
 
     def _with_forming(self, df, ex: str, sym: str, tf: str, now_ms: int, market: str):
-        """``df`` plus the candle forming now, built from its closed 1-minute candles, and that
-        candle's timestamp (None when there is none yet). With it an open position's entry fills,
+        """``df`` plus the candle forming now, built from its closed 1-minute candles, that
+        candle's timestamp and the time its newest minute closed (both None when there is none yet). With it an open position's entry fills,
         and its stop or take-profit is hit, within about a minute of the price getting there,
         instead of when the chart's candle closes (Live fills, ``guards.live_fills``)."""
         import pandas as pd
@@ -672,18 +672,18 @@ class PaperTrader:
         step = TIMEFRAME_MS[tf]
         start = int(df["ts"].iloc[-1]) + step
         if tf == "1m" or start >= now_ms:
-            return df, None
+            return df, None, None
         mins = self._frame(ex, sym, "1m", start, now_ms, market)
         if mins is None:
-            return df, None
+            return df, None, None
         mins = mins[(mins["ts"] >= start) & (mins["ts"] < start + step)]
         if not len(mins):
-            return df, None
+            return df, None, None
         bar = pd.DataFrame([{"ts": start, "open": float(mins["open"].iloc[0]), "high": float(mins["high"].max()),
                              "low": float(mins["low"].min()), "close": float(mins["close"].iloc[-1]),
                              "volume": float(mins["volume"].sum())}])
         bar.index = pd.to_datetime(bar["ts"], unit="ms", utc=True)
-        return pd.concat([df, bar]), start
+        return pd.concat([df, bar]), start, int(mins["ts"].iloc[-1]) + TIMEFRAME_MS["1m"]
 
     def _btc_trend(self, ex: str, market: str = "spot") -> str:
         """Bitcoin's trend on ``guards.BTC_TF`` from this engine's own candles (read once per pass)."""
@@ -908,9 +908,9 @@ class PaperTrader:
             if df is None:
                 left += closing
                 continue
-            forming = None  # the timestamp of a candle still forming, built from 1-minute candles
+            forming = forming_end = None  # a candle still forming, built from 1-minute candles
             if self._guards[pos_mkt]["live_fills"]:
-                df, forming = self._with_forming(df, ex, sym, tf, now_ms, pos_mkt)
+                df, forming, forming_end = self._with_forming(df, ex, sym, tf, now_ms, pos_mkt)
             if strat is not None:  # funding / open interest / premium for a strategy that reads them
                 df = with_context(strat, df, self.store, ex, sym, tf)
             ts = df["ts"].to_numpy()
@@ -1026,7 +1026,9 @@ class PaperTrader:
                 # trade's own candle (on 4h charts that could be hours old)
                 now_px = self._price_now(ex, sym, pos_mkt, now_ms, hand_req)
                 risk = abs(sig.entry - sig.stop)
-                if now_px and risk > 0 and now_px[1] > t.exit_ts + step:
+                if forming is not None and t.exit_ts == forming:  # already at the newest minute's close
+                    t.exit_ts = forming_end
+                if now_px and risk > 0 and now_px[1] > (t.exit_ts if t.exit_ts == forming_end else t.exit_ts + step):
                     move = (t.exit - now_px[0]) if short else (now_px[0] - t.exit)
                     t.r += move / risk
                     t.exit, t.exit_ts = now_px[0], now_px[1]

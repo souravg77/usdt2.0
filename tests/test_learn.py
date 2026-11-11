@@ -746,7 +746,7 @@ def test_paper_skips_markets_without_a_new_candle(tmp_path):
     real = trader._frame
     trader._frame = lambda *a: calls.append(a) or real(*a)
     trader.tick(now_ms=now + 1000)  # same closed candle: loaded once, nothing evaluated again
-    assert len(calls) == 1
+    assert len([c for c in calls if c[2] != "1m"]) == 1  # (1-minute reads are Live fills' forming candle)
 
 
 def test_learn_paper_all_moves_untested_and_rejected(tmp_path, monkeypatch):
@@ -1227,7 +1227,8 @@ def test_closing_by_hand_uses_the_price_now_and_wakes_the_trader(tmp_path):
             break
     key, pos = next((k, p) for k, p in trader.state["open"].items() if p["filled"])
     one_min = t + 5 * 60_000
-    store.upsert([Candle("bybit", "BTC/USDT", "1m", one_min, 1, 1, 1, pos["entry"] * 1.01, 1)])
+    px = pos["entry"] * 1.01
+    store.upsert([Candle("bybit", "BTC/USDT", "1m", one_min, px, px, px, px, 1)])
     control.request_close(key, pos["signal"]["ts"], by="admin")
     trader.tick(now_ms=one_min + 2 * 60_000)
     row = trader.state["trades"][-1]
