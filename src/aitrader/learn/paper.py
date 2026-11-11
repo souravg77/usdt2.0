@@ -662,6 +662,29 @@ class PaperTrader:
             out[htf] = self._trends[(market, ex, sym, htf)]
         return out
 
+    def _with_forming(self, df, ex: str, sym: str, tf: str, now_ms: int, market: str):
+        """``df`` plus the candle forming now, built from its closed 1-minute candles, and that
+        candle's timestamp (None when there is none yet). With it an open position's entry fills,
+        and its stop or take-profit is hit, within about a minute of the price getting there,
+        instead of when the chart's candle closes (Live fills, ``guards.live_fills``)."""
+        import pandas as pd
+
+        step = TIMEFRAME_MS[tf]
+        start = int(df["ts"].iloc[-1]) + step
+        if tf == "1m" or start >= now_ms:
+            return df, None
+        mins = self._frame(ex, sym, "1m", start, now_ms, market)
+        if mins is None:
+            return df, None
+        mins = mins[(mins["ts"] >= start) & (mins["ts"] < start + step)]
+        if not len(mins):
+            return df, None
+        bar = pd.DataFrame([{"ts": start, "open": float(mins["open"].iloc[0]), "high": float(mins["high"].max()),
+                             "low": float(mins["low"].min()), "close": float(mins["close"].iloc[-1]),
+                             "volume": float(mins["volume"].sum())}])
+        bar.index = pd.to_datetime(bar["ts"], unit="ms", utc=True)
+        return pd.concat([df, bar]), start
+
     def _btc_trend(self, ex: str, market: str = "spot") -> str:
         """Bitcoin's trend on ``guards.BTC_TF`` from this engine's own candles (read once per pass)."""
         tf = guards.BTC_TF
@@ -885,6 +908,9 @@ class PaperTrader:
             if df is None:
                 left += closing
                 continue
+            forming = None  # the timestamp of a candle still forming, built from 1-minute candles
+            if self._guards[pos_mkt]["live_fills"]:
+                df, forming = self._with_forming(df, ex, sym, tf, now_ms, pos_mkt)
             if strat is not None:  # funding / open interest / premium for a strategy that reads them
                 df = with_context(strat, df, self.store, ex, sym, tf)
             ts = df["ts"].to_numpy()
@@ -906,6 +932,8 @@ class PaperTrader:
                 log.exception("paper %s: can't evaluate its exits; kept open", key)
                 left += closing
                 continue
+            if t is None and forming is not None and int(ts[entry_i]) == forming and pos.get("maker_entry"):
+                continue  # the limit order rests until its entry candle closes: it may still fill
             if t is None:
                 del self.state["open"][key]
                 if pos.get("maker_entry") and not pos.get("filled"):
