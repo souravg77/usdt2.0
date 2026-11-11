@@ -730,7 +730,8 @@ def main() -> int:
         for e in entries(not args.no_ml, market, names):
             t0 = time.time()
             print(f"  testing {e.id} ...", flush=True)
-            res = evaluate(e, store, EXCHANGES, pairs, costs, move=False, market=market)
+            res = evaluate(e, store, EXCHANGES, pairs, costs, move=False, market=market,
+                           progress=lambda text: print(f"    {text}", flush=True))
             m, wf, h = res["out_of_sample"], res["walk_forward"], res["holdout"]
             verdict = "no data" if not res["markets"] else "FAILED" if res["failed"] else "PASSED"
             print(f"  {e.id:32} {verdict:8} oos trades={m['trades']:4d} win={m['win_rate']:.0%} "
