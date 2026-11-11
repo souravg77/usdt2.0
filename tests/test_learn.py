@@ -202,7 +202,8 @@ def plain_rules(state_path):
 
     for m in ("spot", "futures"):
         guards.save(guards.path_for(state_path), m, {"split_tp": False, "breakeven": False,
-                                                     "maker_entry": False, "btc_trend": False})
+                                                     "maker_entry": False, "btc_trend": False,
+                                                     "live_fills": False})
 
 
 def fill_store(store, df, ex="bybit", sym="BTC/USDT", tf="1h"):
@@ -638,6 +639,69 @@ def test_kill_and_close_all_close_paper_positions(tmp_path):
     store.close()
 
 
+def test_a_close_request_that_cant_be_carried_out_does_not_spin_the_loop(tmp_path, monkeypatch):
+    from aitrader.learn import paper as paper_mod
+    from aitrader.trade import Control
+
+    df = synthetic(n=900)
+    store = CandleStore(str(tmp_path / "c.db"))
+    fill_store(store, df)
+    reg_path = str(tmp_path / "reg.json")
+    reg = Registry(reg_path)
+    reg.add(Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR), status="paper"))
+    reg.save()
+    control = Control(str(tmp_path / "control.json"))
+    spot_only(str(tmp_path / "s.json"))
+    plain_rules(str(tmp_path / "s.json"))
+    trader = PaperTrader(store, reg_path, ["bybit"], ["BTC/USDT"], state_path=str(tmp_path / "s.json"),
+                         control=control)
+    ticks = iter(int(df.ts.iloc[i]) + H for i in range(600, 900))
+    for t in ticks:
+        trader.tick(now_ms=t)
+        if any(p["filled"] for p in trader.state["open"].values()):
+            break
+    old = len(trader.state["trades"])
+
+    def broken(_entry):
+        raise RuntimeError("strategy can't be built")
+
+    monkeypatch.setattr(paper_mod, "make_strategy", broken)
+    control.request_close_all(by="admin")
+    assert trader._close_waiting()
+    trader.tick(now_ms=next(ticks))
+    assert control.close_all_requested() is not None  # still asked: tried again later
+    assert not trader._close_waiting()  # ...but it doesn't wake the loop straight away again
+    assert len(trader.state["trades"]) == old
+    store.close()
+
+
+def test_an_unfilled_entry_cancelled_reports_no_close(tmp_path):
+    from aitrader.trade import Control
+
+    df = synthetic(n=900)
+    store = CandleStore(str(tmp_path / "c.db"))
+    fill_store(store, df)
+    reg_path = str(tmp_path / "reg.json")
+    reg = Registry(reg_path)
+    reg.add(Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR), status="paper"))
+    reg.save()
+    control = Control(str(tmp_path / "control.json"))
+    spot_only(str(tmp_path / "s.json"))
+    trader = PaperTrader(store, reg_path, ["bybit"], ["BTC/USDT"], state_path=str(tmp_path / "s.json"),
+                         control=control)
+    for i in range(600, 900):
+        ev = trader.tick(now_ms=int(df.ts.iloc[i]) + H)
+        if any(not p.get("filled") for p in trader.state["open"].values()):
+            break
+    pending = [k for k, p in trader.state["open"].items() if not p.get("filled")]
+    assert pending
+    control.kill("test")
+    ev = trader.tick(now_ms=int(df.ts.iloc[i]) + H + 1)
+    assert not set(pending) & set(ev["closed"])  # cancelled before its entry: nothing closed
+    assert not set(pending) & set(trader.state["open"])
+    store.close()
+
+
 def test_paper_tick_keeps_registry_changes_made_meanwhile(tmp_path):
     """A `learn` command (or the dashboard) may change the registry while a paper tick runs."""
     df = synthetic(n=700)
@@ -682,7 +746,7 @@ def test_paper_skips_markets_without_a_new_candle(tmp_path):
     real = trader._frame
     trader._frame = lambda *a: calls.append(a) or real(*a)
     trader.tick(now_ms=now + 1000)  # same closed candle: loaded once, nothing evaluated again
-    assert len(calls) == 1
+    assert len([c for c in calls if c[2] != "1m"]) == 1  # (1-minute reads are Live fills' forming candle)
 
 
 def test_learn_paper_all_moves_untested_and_rejected(tmp_path, monkeypatch):
@@ -1163,9 +1227,73 @@ def test_closing_by_hand_uses_the_price_now_and_wakes_the_trader(tmp_path):
             break
     key, pos = next((k, p) for k, p in trader.state["open"].items() if p["filled"])
     one_min = t + 5 * 60_000
-    store.upsert([Candle("bybit", "BTC/USDT", "1m", one_min, 1, 1, 1, pos["entry"] * 1.01, 1)])
+    px = pos["entry"] * 1.01
+    store.upsert([Candle("bybit", "BTC/USDT", "1m", one_min, px, px, px, px, 1)])
     control.request_close(key, pos["signal"]["ts"], by="admin")
     trader.tick(now_ms=one_min + 2 * 60_000)
     row = trader.state["trades"][-1]
     assert row["exit"] == pytest.approx(pos["entry"] * 1.01) and row["exit_ts"] == one_min + 60_000
+    store.close()
+
+
+def test_live_fills_enter_and_stop_out_before_the_chart_candle_closes(tmp_path):
+    from aitrader.learn import guards
+
+    df = synthetic(n=700)
+    store = CandleStore(str(tmp_path / "c.db"))
+    reg_path = str(tmp_path / "reg.json")
+    reg = Registry(reg_path)
+    reg.add(Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR), status="paper"))
+    reg.save()
+    state = str(tmp_path / "s.json")
+    spot_only(state)
+    plain_rules(state)
+    guards.save(guards.path_for(state), "spot", {"live_fills": True})
+    trader = PaperTrader(store, reg_path, ["bybit"], ["BTC/USDT"], state_path=state)
+    M = 60_000
+    fill_store(store, df.iloc[:600])
+    for i in range(600, 690):  # closed 1h candles, one at a time, until a signal waits for its entry
+        fill_store(store, df.iloc[i:i + 1])
+        trader.tick(now_ms=int(df.ts.iloc[i]) + H)
+        if trader.state["open"]:
+            break
+    key, pos = next(iter(trader.state["open"].items()))
+    assert not pos["filled"]
+    start = pos["signal"]["ts"]  # the entry candle opens here and is still forming
+    o = float(df.close.iloc[i])
+    store.upsert([Candle("bybit", "BTC/USDT", "1m", start + k * M, o, o * 1.001, o * 0.999, o, 1.0) for k in range(3)])
+    trader.tick(now_ms=start + 3 * M + 1)
+    pos = trader.state["open"][key]
+    assert pos["filled"] and pos["entry"] == pytest.approx(o, rel=0.01)  # filled 3 minutes into the hour
+    stop = pos["signal"]["stop"]
+    store.upsert([Candle("bybit", "BTC/USDT", "1m", start + 3 * M, o, o, stop * 0.99, stop * 0.995, 1.0)])
+    trader.tick(now_ms=start + 4 * M + 1)
+    assert key not in trader.state["open"]
+    assert trader.state["trades"][-1]["exit_reason"] == "stop"  # stopped 4 minutes in, not at 1h close
+    store.close()
+
+
+def test_without_live_fills_the_entry_waits_for_the_candle_to_close(tmp_path):
+    df = synthetic(n=700)
+    store = CandleStore(str(tmp_path / "c.db"))
+    reg_path = str(tmp_path / "reg.json")
+    reg = Registry(reg_path)
+    reg.add(Entry(id="up", kind="rule", name="up_bar", spec=validate_spec(EVERY_UP_BAR), status="paper"))
+    reg.save()
+    state = str(tmp_path / "s.json")
+    spot_only(state)
+    plain_rules(state)
+    trader = PaperTrader(store, reg_path, ["bybit"], ["BTC/USDT"], state_path=state)
+    fill_store(store, df.iloc[:600])
+    for i in range(600, 690):
+        fill_store(store, df.iloc[i:i + 1])
+        trader.tick(now_ms=int(df.ts.iloc[i]) + H)
+        if trader.state["open"]:
+            break
+    key, pos = next(iter(trader.state["open"].items()))
+    start = pos["signal"]["ts"]
+    o = float(df.close.iloc[i])
+    store.upsert([Candle("bybit", "BTC/USDT", "1m", start + k * 60_000, o, o, o, o, 1.0) for k in range(3)])
+    trader.tick(now_ms=start + 3 * 60_000 + 1)
+    assert not trader.state["open"][key]["filled"]
     store.close()

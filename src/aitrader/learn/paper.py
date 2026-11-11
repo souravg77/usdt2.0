@@ -109,6 +109,7 @@ class PaperConfig:
     retire: RetireRule = field(default_factory=RetireRule)
 
 
+CLOSE_RETRY_S = 30.0  # a close request that could not be carried out is tried again after this
 HAND_PRICE_MS = 120_000  # a live price sent with a Close press is used for this long
 
 
@@ -148,6 +149,9 @@ class PaperTrader:
         self._trends: dict = {}  # (exchange, symbol, timeframe) -> trend of a higher timeframe, this pass
         self._returns: dict = {}  # (exchange, symbol) -> hourly returns of the last week, this pass
         self._now = 0
+        # a close request this pass couldn't finish (a position with no prices yet): don't let it
+        # wake the loop again before this, or the service spins a full pass many times a second
+        self._close_retry_at = 0.0
         self.perp_limits_path = perp_limits.DEFAULT_PATH  # each coin's maximum leverage on Bybit
         # each engine's own trade filter (aitrader.ai.LiveFilter) or None: {"spot": ..., "futures": ...};
         # one filter given on its own serves both
@@ -472,7 +476,7 @@ class PaperTrader:
 
     def _close_waiting(self) -> bool:
         """A person pressed Close or Close all: the paper trader acts on it straight away."""
-        if self.control is None:
+        if self.control is None or time.monotonic() < self._close_retry_at:
             return False
         try:
             asked = getattr(self.control, "close_all_requested", None)
@@ -657,6 +661,29 @@ class PaperTrader:
                 self._trends[(market, ex, sym, htf)] = guards.trend_of(df)
             out[htf] = self._trends[(market, ex, sym, htf)]
         return out
+
+    def _with_forming(self, df, ex: str, sym: str, tf: str, now_ms: int, market: str):
+        """``df`` plus the candle forming now, built from its closed 1-minute candles, that
+        candle's timestamp and the time its newest minute closed (both None when there is none yet). With it an open position's entry fills,
+        and its stop or take-profit is hit, within about a minute of the price getting there,
+        instead of when the chart's candle closes (Live fills, ``guards.live_fills``)."""
+        import pandas as pd
+
+        step = TIMEFRAME_MS[tf]
+        start = int(df["ts"].iloc[-1]) + step
+        if tf == "1m" or start >= now_ms:
+            return df, None, None
+        mins = self._frame(ex, sym, "1m", start, now_ms, market)
+        if mins is None:
+            return df, None, None
+        mins = mins[(mins["ts"] >= start) & (mins["ts"] < start + step)]
+        if not len(mins):
+            return df, None, None
+        bar = pd.DataFrame([{"ts": start, "open": float(mins["open"].iloc[0]), "high": float(mins["high"].max()),
+                             "low": float(mins["low"].min()), "close": float(mins["close"].iloc[-1]),
+                             "volume": float(mins["volume"].sum())}])
+        bar.index = pd.to_datetime(bar["ts"], unit="ms", utc=True)
+        return pd.concat([df, bar]), start, int(mins["ts"].iloc[-1]) + TIMEFRAME_MS["1m"]
 
     def _btc_trend(self, ex: str, market: str = "spot") -> str:
         """Bitcoin's trend on ``guards.BTC_TF`` from this engine's own candles (read once per pass)."""
@@ -856,8 +883,7 @@ class PaperTrader:
             if _asked_to_close(close_one.get(key), pos):
                 closing, reason, hand_req = True, "closed by hand", close_one.get(key)
             if closing and not pos.get("filled"):
-                del self.state["open"][key]
-                events["closed"].append(key)
+                del self.state["open"][key]  # never filled: no trade, so no close to report
                 log.info("paper %s cancelled (%s) before its entry", key, reason)
                 continue
             if ex not in self.exchanges:  # an exchange no longer used: its prices stopped updating
@@ -882,6 +908,9 @@ class PaperTrader:
             if df is None:
                 left += closing
                 continue
+            forming = forming_end = None  # a candle still forming, built from 1-minute candles
+            if self._guards[pos_mkt]["live_fills"]:
+                df, forming, forming_end = self._with_forming(df, ex, sym, tf, now_ms, pos_mkt)
             if strat is not None:  # funding / open interest / premium for a strategy that reads them
                 df = with_context(strat, df, self.store, ex, sym, tf)
             ts = df["ts"].to_numpy()
@@ -903,6 +932,8 @@ class PaperTrader:
                 log.exception("paper %s: can't evaluate its exits; kept open", key)
                 left += closing
                 continue
+            if t is None and forming is not None and int(ts[entry_i]) == forming and pos.get("maker_entry"):
+                continue  # the limit order rests until its entry candle closes: it may still fill
             if t is None:
                 del self.state["open"][key]
                 if pos.get("maker_entry") and not pos.get("filled"):
@@ -995,7 +1026,9 @@ class PaperTrader:
                 # trade's own candle (on 4h charts that could be hours old)
                 now_px = self._price_now(ex, sym, pos_mkt, now_ms, hand_req)
                 risk = abs(sig.entry - sig.stop)
-                if now_px and risk > 0 and now_px[1] > t.exit_ts + step:
+                if forming is not None and t.exit_ts == forming:  # already at the newest minute's close
+                    t.exit_ts = forming_end
+                if now_px and risk > 0 and now_px[1] > (t.exit_ts if t.exit_ts == forming_end else t.exit_ts + step):
                     move = (t.exit - now_px[0]) if short else (now_px[0] - t.exit)
                     t.r += move / risk
                     t.exit, t.exit_ts = now_px[0], now_px[1]
@@ -1026,6 +1059,8 @@ class PaperTrader:
                 if not _asked_to_close(req, self.state["open"].get(k, {}))]
         if done:
             self.control.clear_close(done)
+        waiting = (close_req is not None and left) or len(done) < len(close_one)
+        self._close_retry_at = time.monotonic() + CLOSE_RETRY_S if waiting else 0.0
 
     def _score(self, reg: Registry, events: dict) -> None:
         rule = self.cfg.retire

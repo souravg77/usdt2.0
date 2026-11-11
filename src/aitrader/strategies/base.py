@@ -73,7 +73,8 @@ class Signal:
     def r_multiple_target(self) -> float | None:
         if self.target is None:
             return None
-        return abs(self.target - self.entry) / abs(self.entry - self.stop)
+        risk = abs(self.entry - self.stop)
+        return abs(self.target - self.entry) / risk if risk > 0 else 0.0  # no risk: no reward to measure
 
     def as_row(self) -> dict:
         row = asdict(self)
