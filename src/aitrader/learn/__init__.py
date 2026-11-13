@@ -12,6 +12,7 @@ testing the survivors on paper while the market runs.
 Nothing here can place a real order or unlock live trading.
 """
 
+from . import luck
 from .extract import Extraction, extract_strategies
 from .lab import Gate, evaluate
 from .paper import PaperConfig, PaperTrader, RetireRule

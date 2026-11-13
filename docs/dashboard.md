@@ -47,6 +47,26 @@ order it can cause is the kill switch selling what the executors bought.
 
 Uploaded books are saved in `data/books/` under a generated name and are never committed.
 
+## Strategy Factory, Evolution Lab and Strategy Arena
+
+Three pages for the strategies the agent makes itself ([factory.md](factory.md)). Every number
+comes from the registry the backtests wrote; nothing is simulated for display, and none of these
+pages can move a strategy to paper or live by hand.
+
+- **Strategy Factory** (`/factory`): how many machine-made strategies and families exist, their
+  statuses, and the out-of-sample t bar that sets. **Generate** (how many, which timeframes,
+  short twins, backtest straight away) and **Evolve** (children, crossover share) each run as a
+  background job: `learn factory` or `learn evolve`, then `learn test` and, with short twins,
+  `learn test --market futures`. The newest 25 are listed with why each was rejected.
+- **Evolution Lab** (`/evolution`): each generation's count, tested, paper, under review,
+  rejected and best in-sample result; the survivors with how each was made (mutation or
+  crossover, with links to the parents), its luck bar and stress test; a count of rejection
+  reasons; and any strategy's family tree (`/evolution?id=<id>`).
+- **Strategy Arena** (`/arena`): up to four strategies side by side (`/arena?ids=a,b,c`; by
+  default the four best by out-of-sample result): status, out-of-sample trades, R per trade, t,
+  win rate, profit factor, drawdown, walk-forward, Monte Carlo, holdout, luck bar, stress test,
+  paper results and why rejected.
+
 ## Monitor page
 
 **Monitor** (`/monitor`, refreshes every 30 s) has four panels, each also served as JSON for other

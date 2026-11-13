@@ -79,6 +79,11 @@ The report also gives the 95th-percentile longest losing streak, for information
 
 Fail on any of these: REJECTED.
 
+**Machine-made strategies** (from `learn factory` or `learn evolve`) face two more tests at this
+rung: the out-of-sample t bar rises with the number of strategy families the agent has tried, and a
+stress test (harsh costs, stop gaps, best trades or best market removed, losing streaks) runs after
+Monte Carlo. Either can reject; neither can pass a strategy. See [factory.md](factory.md).
+
 ### PAPER (final holdout, then paper trading)
 
 The final 20% of history is run only after everything above has passed, and only to confirm:

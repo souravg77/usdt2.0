@@ -651,6 +651,10 @@ def cmd_learn(s: Settings, args) -> int:
         # each engine tests on its own candles: Spot AI on spot, Futures AI on the perpetuals
         store, pairs, costs = _engine_market(s, market, symbols, cfg)
         regimes: dict = {}  # each market's regime labels, worked out once for all entries
+        from .learn import Gate, luck
+
+        # machine-made strategies face a bar that rises with every family the agent has tried
+        gate = Gate(machine_trials=luck.families(reg.entries.values()))
         skipped = [e.id for e in entries if not learns_for(e, market)]
         if skipped:
             print(f"  {len(skipped)} left out: {'Spot AI never trades them' if market == 'spot' else 'Futures AI never trades them'}")
@@ -658,8 +662,8 @@ def cmd_learn(s: Settings, args) -> int:
             if not learns_for(e, market):
                 continue
             print(f"  testing {e.id} ...", flush=True)
-            res = evaluate(e, store, exchanges, pairs, costs, move=move, regimes=regimes, market=market,
-                           progress=lambda text: print(f"    {text}", flush=True))
+            res = evaluate(e, store, exchanges, pairs, costs, gate=gate, move=move, regimes=regimes,
+                           market=market, progress=lambda text: print(f"    {text}", flush=True))
             m = res["out_of_sample"]
             # Futures AI's test moves only the strategies Spot AI never trades (short twins,
             # Futures picks); a shared one keeps the status its spot test gave it
@@ -813,6 +817,61 @@ def cmd_learn(s: Settings, args) -> int:
         for r in picks.winners(results, args.min_trades):
             print(f"  {r['name']:<45} {r['trades']:>4} trades {r['win_rate']:>5.1f}% win {r['total_r']:+8.2f}R "
                   f"up {r['quarters_up']}/{r['quarters_up'] + r['quarters_down']} quarters")
+        return 0
+    if cmd in ("factory", "evolve"):
+        from .learn import evolve, factory, luck
+
+        tfs = [t.strip() for t in args.timeframes.split(",") if t.strip()] if args.timeframes else list(factory.TIMEFRAMES)
+        bad = [t for t in tfs if t not in factory.TIMEFRAMES]
+        if bad:
+            print(f"timeframes {bad} not allowed; use {', '.join(factory.TIMEFRAMES)}", file=sys.stderr)
+            return 2
+        if cmd == "factory":
+            added = factory.generate(reg, args.n, seed=args.seed, timeframes=tfs, shorts=args.shorts)
+        else:
+            pool = evolve.parents(reg, args.top)
+            if len(pool) < 2:
+                print(f"evolution needs at least 2 factory strategies with {evolve.MIN_TRADES}+ in-sample trades "
+                      f"and a positive in-sample result; {len(pool)} qualify. Run `learn factory` and `learn test` first.")
+                return 0
+            print(f"{len(pool)} parents, best in-sample {pool[0][1]:+.3f}R per trade ({pool[0][0].id})")
+            added = evolve.breed(reg, args.n, seed=args.seed, crossover_share=args.crossover, shorts=args.shorts,
+                                 top=args.top, timeframes=tfs)
+        reg.save()
+        n_fam = luck.families(reg.entries.values())
+        for e in added:
+            lin = luck.lineage_of(e.spec)
+            how = lin.get("op", "")
+            if lin.get("parents") and e.kind == "rule":
+                how += " of " + " x ".join(lin["parents"])
+            print(f"  + {e.id:44} {'short twin' if e.kind == 'short' else how}")
+        print(f"{len(added)} new strategies at RESEARCH -> {args.registry}")
+        print(f"{n_fam} strategy families tried so far: a machine-made strategy now needs an out-of-sample "
+              f"t of at least {luck.required_t(n_fam):.2f} (book strategies: 2.00)")
+        print("test them with `aitrader learn test` (add `--market futures` for the short twins)")
+        return 0
+    if cmd == "lineage":
+        from .learn import evolve
+
+        try:
+            e = reg.get(args.id)
+        except KeyError as exc:
+            print(exc, file=sys.stderr)
+            return 1
+        print("\n".join(evolve.family_tree(reg, e.id)))
+        return 0
+    if cmd == "luck":
+        from .learn import luck
+
+        n_fam = luck.families(reg.entries.values())
+        made = [e for e in reg.entries.values() if luck.is_machine_made(e.spec)]
+        by_status: dict = {}
+        for e in made:
+            by_status[e.status] = by_status.get(e.status, 0) + 1
+        print(f"{len(made)} machine-made strategies in {n_fam} families; "
+              f"out-of-sample t needed: {luck.required_t(n_fam):.2f} (book strategies: 2.00)")
+        for st, k in sorted(by_status.items()):
+            print(f"  {st:14} {k}")
         return 0
     if cmd == "add-shorts":
         from .learn.picks import picked_for
@@ -1996,6 +2055,23 @@ def build_parser() -> argparse.ArgumentParser:
                      help="no trades on this timeframe: leave it as it is and exit 0 (for a run over every timeframe)")
     lpt.add_argument("--market", choices=["spot", "futures"], default="spot",
                      help="whose pick: Spot AI's (default) or Futures AI's; each engine trades only its own")
+    lfa = le_sub.add_parser("factory", help="strategy factory: write N new rule strategies from indicator "
+                                            "building blocks (they start at RESEARCH and must pass the gate)")
+    lfa.add_argument("--n", type=int, default=20, help="how many to make (default 20)")
+    lfa.add_argument("--seed", type=int, help="random seed, to repeat a run")
+    lfa.add_argument("--timeframes", help="comma separated, from 15m,30m,1h,4h (default all four)")
+    lfa.add_argument("--shorts", action="store_true", help="also add each one's short twin for Futures AI")
+    lev = le_sub.add_parser("evolve", help="breed N children (mutation and crossover) from the factory strategies "
+                                           "with the best in-sample results")
+    lev.add_argument("--n", type=int, default=20, help="how many children (default 20)")
+    lev.add_argument("--seed", type=int)
+    lev.add_argument("--top", type=int, default=20, help="how many of the best to breed from (default 20)")
+    lev.add_argument("--crossover", type=float, default=0.5, help="share made by crossover, the rest by mutation")
+    lev.add_argument("--timeframes", help="timeframes a mutation may move to (default 15m,30m,1h,4h)")
+    lev.add_argument("--shorts", action="store_true", help="also add each child's short twin")
+    lli = le_sub.add_parser("lineage", help="a machine-made strategy's family tree (parents, generations)")
+    lli.add_argument("id")
+    le_sub.add_parser("luck", help="how many strategy families the agent has tried and the t-bar that sets")
     le_sub.add_parser("add-shorts", help="add a short twin (Bybit perpetual futures) of every long strategy")
     le_sub.add_parser("paper-all", help="paper-trade every strategy, including untested and rejected "
                                         "ones (fake money; poor ones retire on their paper results)")
