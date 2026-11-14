@@ -66,17 +66,37 @@ class JobRunner:
         jobs = []
         for name in os.listdir(self.root):
             if name.endswith(".json"):
-                try:
-                    jobs.append(self.get(name[:-5]))
-                except (OSError, ValueError, KeyError):
-                    continue
+                job = self._read_settled(name[:-5])
+                if job is not None:
+                    jobs.append(job)
         return sorted(jobs, key=lambda j: j["created"], reverse=True)[:limit]
+
+    def _read_settled(self, job_id: str, tries: int = 5) -> dict | None:
+        """A job record, retried briefly: on Windows a read can fail while ``_write`` swaps the file in
+        (``os.replace`` is not atomic for readers there), and the job would vanish from the list for a
+        moment. None only for a record that stays unreadable."""
+        for i in range(tries):
+            try:
+                return self.get(job_id)
+            except KeyError:
+                return None
+            except (OSError, ValueError):
+                if i + 1 < tries:
+                    time.sleep(0.02)
+        return None
 
     def _write(self, job: dict) -> None:
         tmp = self._path(job["id"]) + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(job, fh, indent=1)
-        os.replace(tmp, self._path(job["id"]))
+        for i in range(10):  # Windows refuses the swap while a reader has the file open
+            try:
+                os.replace(tmp, self._path(job["id"]))
+                return
+            except PermissionError:
+                if i == 9:
+                    raise
+                time.sleep(0.02)
 
     def _update(self, job_id: str, **changes) -> dict:
         with self._lock:
