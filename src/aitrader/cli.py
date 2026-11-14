@@ -850,6 +850,20 @@ def cmd_learn(s: Settings, args) -> int:
               f"t of at least {luck.required_t(n_fam):.2f} (book strategies: 2.00)")
         print("test them with `aitrader learn test` (add `--market futures` for the short twins)")
         return 0
+    if cmd == "auto":
+        from .ops import controls
+
+        path = args.file or controls.path_from_env()
+        if args.run:
+            print(f"automatic strategy runs: checking {path} every {args.check_every:g} s "
+                  "(switch them on on the Controls page)", flush=True)
+            controls.run_forever(path, args.env_file or ".env", args.check_every)
+            return 0
+        text = controls.run_auto(path, args.env_file or ".env")
+        auto = controls.load(path)["auto"]
+        print(text or ("automatic generation and evolution are off" if not (auto["generate"] or auto["evolve"])
+                       else f"not due yet: runs every {auto['every_hours']:g} h"))
+        return 0
     if cmd == "lineage":
         from .learn import evolve
 
@@ -2069,6 +2083,11 @@ def build_parser() -> argparse.ArgumentParser:
     lev.add_argument("--crossover", type=float, default=0.5, help="share made by crossover, the rest by mutation")
     lev.add_argument("--timeframes", help="timeframes a mutation may move to (default 15m,30m,1h,4h)")
     lev.add_argument("--shorts", action="store_true", help="also add each child's short twin")
+    lau = le_sub.add_parser("auto", help="automatic strategy generation and evolution as set on the Controls page; "
+                                         "with --run, keep checking and run when due")
+    lau.add_argument("--run", action="store_true")
+    lau.add_argument("--file", help="controls file (default AITRADER_CONTROLS_FILE or data/settings/controls.json)")
+    lau.add_argument("--check-every", type=float, default=300.0, help="seconds between checks with --run")
     lli = le_sub.add_parser("lineage", help="a machine-made strategy's family tree (parents, generations)")
     lli.add_argument("id")
     le_sub.add_parser("luck", help="how many strategy families the agent has tried and the t-bar that sets")
