@@ -60,6 +60,7 @@ class Paths:
     feed: str = "data/ops/feed.json"
     teacher: str = "data/learn/teacher"
     improve: str = "data/learn/improve.json"
+    controls: str = ""  # "" = AITRADER_CONTROLS_FILE or data/settings/controls.json (ops.controls)
 
 
 def create_app(settings: Settings, auth: Auth, jobs: JobRunner, paths: Paths | None = None,
@@ -393,6 +394,11 @@ after {_e(window.split(" to ")[1])}; the next one waits for the next night.</p>
 
     add_factory_routes(app, page=page, guard=guard, auth=auth, paths=paths,
                        csrf=lambda token: _csrf(auth, token), jobs=jobs)
+
+    from .controls_pages import add_controls_routes
+
+    add_controls_routes(app, settings=settings, page=page, guard=guard, auth=auth, paths=paths,
+                        csrf=lambda token: _csrf(auth, token))
 
     from .learning_pages import add_learning_routes
 
@@ -1087,7 +1093,7 @@ def _tabbar(title: str) -> str:
 
 
 LEARNING_PAGES = ("/learning/spot", "/learning/futures")
-NAV = [("/", "Overview"), ("/markets", "Markets"), ("/pairs", "Pairs"), ("/trading", "Trading"), ("/scan-log", "Scan log"),
+NAV = [("/", "Overview"), ("/markets", "Markets"), ("/pairs", "Pairs"), ("/trading", "Trading"), ("/controls", "Controls"), ("/scan-log", "Scan log"),
        ("/monitor", "Monitor"),
        ("/replay", "Replay"), ("/learning/spot", "Spot AI learning"), ("/learning/futures", "Futures AI learning"),
        ("/teacher", "Teacher"),

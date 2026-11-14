@@ -311,7 +311,8 @@ def configured_symbols(fallback: list[str], env=None, path: str | None = None,
     ``market="futures"`` is the Futures gainers and squeeze pairs alone, without the usual list: with
     both scanners off
     or its list stale, Futures AI opens nothing new.
-    ``keep`` (e.g. pairs with open paper positions) is always added."""
+    ``keep`` (e.g. pairs with open paper positions) is always added. Pairs blocked on the Controls
+    page (``ops.controls``) are left out, except those in ``keep``."""
     env = os.environ if env is None else env
     symbols = list(fallback)
     if (env.get("AITRADER_PAIRS") or "fixed").strip().lower() == "ranked":
@@ -334,9 +335,11 @@ def configured_symbols(fallback: list[str], env=None, path: str | None = None,
         from . import squeeze
 
         hot += squeeze.symbols(squeeze.path_from_env(env), now_ms=now_ms)
+    from ..ops.controls import without_blocked  # the Controls page's blocked pairs, never opened
+
     if market == "futures":  # Futures AI trades only the Futures top gainers, never the usual list
-        return list(dict.fromkeys([*hot, *(keep or [])]))
-    return list(dict.fromkeys([*symbols, *hot, *(keep or [])]))
+        return without_blocked(list(dict.fromkeys([*hot, *(keep or [])])), env, keep)
+    return without_blocked(list(dict.fromkeys([*symbols, *hot, *(keep or [])])), env, keep)
 
 
 def open_paper_symbols(state_path: str, market: str | None = None) -> list[str]:

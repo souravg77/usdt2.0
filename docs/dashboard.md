@@ -47,6 +47,25 @@ order it can cause is the kill switch selling what the executors bought.
 
 Uploaded books are saved in `data/books/` under a generated name and are never committed.
 
+## Controls page
+
+**Controls** (`/controls`, next to Trading) puts the user controls in one place. Each one writes
+a setting the engines already read, so the page and the Trading page always agree:
+
+| Control | Where it is kept | What it does |
+|---|---|---|
+| Pause, resume, kill switch | the trading control file | same buttons as the Trading page |
+| Risk level: Conservative, Balanced, Aggressive | paper guards and paper leverage | Conservative: 0.25% per trade, 2% day pause, 5% week close, 2% open risk, 1x. Balanced: 0.5%, 3%, 6%, 4%, 2x. Aggressive: 1%, 5%, 10%, 8%, 3x. The level reads "Custom" after any single change |
+| Maximum leverage | paper leverage | paper perpetuals, 1x to 100x (live stays capped at 3x in code) |
+| Maximum daily loss | each engine's day pause | opens nothing new for the pause hours once reached |
+| Trading timeframes | each engine's timeframes | which candles new trades open on |
+| Allowed trading pairs | `data/settings/controls.json` | unticked or listed pairs are never opened, from any list (fixed, ranked, top gainers, squeeze); open positions run to their exits; takes effect within a minute |
+| AI automation | `data/settings/controls.json` | automatic strategy generation and/or evolution, candidates per run, how often, which timeframes, short twins; the `factory` service runs it and backtests what it made |
+
+The page shows the mode and whether live orders are locked, but **cannot unlock live trading**.
+That still needs `.env` and `golive approve` at a terminal. Automation never trades and never
+changes risk settings. Set `AITRADER_CONTROLS_FILE` to keep the controls file elsewhere.
+
 ## Strategy Factory, Evolution Lab and Strategy Arena
 
 Three pages for the strategies the agent makes itself ([factory.md](factory.md)). Every number

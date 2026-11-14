@@ -94,6 +94,14 @@ services:
     depends_on: [ollama]
     mem_limit: 1536m  # the backtests after a book (the model's memory is in the ollama service)
 
+  # Automatic strategy generation and evolution (Controls page). Idle until switched on there;
+  # then runs the Strategy Factory and/or Evolution on its schedule and backtests what it made.
+  # Never trades.
+  factory:
+    <<: *app
+    command: ["learn", "auto", "--run"]
+    mem_limit: 1536m  # the backtests
+
   # Paper-trades every strategy that passed `aitrader learn test`, with the calendar, market
   # context and AI filters. Never sends exchange orders.
   paper:
