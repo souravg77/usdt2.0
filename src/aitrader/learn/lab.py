@@ -19,8 +19,10 @@ the gate does not use that split.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 
+from . import luck
+from .stress import stress_test
 from ..backtest import BacktestConfig, metrics, monte_carlo, run_backtest, split_periods, walk_forward
 from ..data.context import ContextStore, attach_context, has_context
 from ..data.store import CandleStore
@@ -68,6 +70,20 @@ class Gate:
     # The untouched final holdout: a confirmation, so it asks less than out of sample.
     min_trades_holdout: int = 20
     min_expectancy_holdout: float = 0.0  # R per trade after costs, must be above this
+    # Machine-made strategies (``learn.factory``, ``learn.evolve``) only. Luck correction: the
+    # out-of-sample t bar rises with the number of strategy families tried (``learn.luck``);
+    # ``machine_trials`` is that number, filled in by whoever runs the test from the registry.
+    machine_trials: int = 0
+    luck_alpha: float = 0.05
+    # Stress test (``learn.stress``), after Monte Carlo and before the holdout
+    stress: bool = True
+    stress_cost_mult: float = 2.0
+    stress_slip_mult: float = 3.0
+    stress_funding_mult: float = 3.0
+    stress_gap_every: int = 4
+    stress_gap_extra_r: float = 0.5
+    stress_top_share: float = 0.05
+    stress_max_losing_streak: int = 12
 
     def check(self, m_in: dict, m_oos: dict) -> list[str]:
         return self.check_in_sample(m_in) + self.check_out_of_sample(m_oos)
@@ -142,9 +158,17 @@ def evaluate(entry: Entry, store: CandleStore, exchanges: list[str], symbols: li
     if market == "futures" and not futures_only:
         move = False  # a strategy both engines trade keeps the status its spot test gave it
     cfg, gate = cfg or BacktestConfig(), gate or Gate()
+    machine = luck.is_machine_made(entry.spec)
+    luck_info = None
+    if machine:  # a strategy the agent made itself: the bar rises with the ideas it has tried
+        trials = max(gate.machine_trials, int(luck.lineage_of(entry.spec).get("trials", 0)), 1)
+        need = luck.required_t(trials, gate.luck_alpha, gate.min_t_oos)
+        luck_info = {"families_tried": trials, "min_t_oos": round(need, 3)}
+        gate = replace(gate, min_t_oos=need)
     regimes = {} if regimes is None else regimes
     strat = make_strategy(entry)
     trades_in, trades_oos, markets, finals, windows, tagged = [], [], [], [], {}, []
+    oos_parts = []  # what the stress test re-runs
     most = 0  # the longest stored history among its markets, to say why nothing was tested
     for ex in exchanges:
         for sym in symbols:
@@ -169,6 +193,7 @@ def evaluate(entry: Entry, store: CandleStore, exchanges: list[str], symbols: li
                 trades_oos += t_oos
                 _add_windows(windows, strat, df.iloc[:len(ins) + len(oos)], ex, sym, tf, cfg, gate)
                 finals.append((ex, sym, tf, final))
+                oos_parts.append((strat, oos, ex, sym, tf))
                 markets.append({"exchange": ex, "symbol": sym, "timeframe": tf,
                                 "bars": len(candles), "trades_in": len(t_in),
                                 "trades_oos": len(t_oos),
@@ -186,6 +211,12 @@ def evaluate(entry: Entry, store: CandleStore, exchanges: list[str], symbols: li
         why_oos = gate.check_out_of_sample(m_oos) + gate.check_walk_forward(wf)
         if trades_oos:
             why_oos += gate.check_monte_carlo(mc)
+    stress = None
+    if machine and gate.stress and markets and not why_in and not why_oos:
+        # only a strategy that passed everything so far is attacked, so the scenarios cost nothing
+        # for the many that fail earlier
+        stress = stress_test(oos_parts, trades_oos, cfg, gate, mc)
+        why_oos += stress["failed"]
     why = why_in + why_oos
     own = entry.backtest_futures if market == "futures" else entry.backtest
     looks = ((own or {}).get("holdout") or {}).get("looks", 0)
@@ -208,6 +239,10 @@ def evaluate(entry: Entry, store: CandleStore, exchanges: list[str], symbols: li
                "gate": asdict(gate), "failed": why + why_h,
                "costs": {"taker_fee": cfg.taker_fee, "maker_fee": cfg.maker_fee,
                          "slippage_bps": cfg.slippage_bps}}
+    if luck_info:
+        summary["luck"] = luck_info
+    if stress:
+        summary["stress"] = stress
     if market == "futures":
         summary["market"] = "futures"
         entry.backtest_futures = summary

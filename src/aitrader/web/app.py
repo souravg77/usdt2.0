@@ -389,6 +389,11 @@ after {_e(window.split(" to ")[1])}; the next one waits for the next night.</p>
     add_teacher_routes(app, settings=settings, page=page, guard=guard, auth=auth, paths=paths,
                        csrf=lambda token: _csrf(auth, token), jobs=jobs, exchange=EXCHANGE)
 
+    from .factory_pages import add_factory_routes
+
+    add_factory_routes(app, page=page, guard=guard, auth=auth, paths=paths,
+                       csrf=lambda token: _csrf(auth, token), jobs=jobs)
+
     from .learning_pages import add_learning_routes
 
     add_learning_routes(app, page=page, guard=guard, auth=auth, paths=paths,
@@ -1086,6 +1091,7 @@ NAV = [("/", "Overview"), ("/markets", "Markets"), ("/pairs", "Pairs"), ("/tradi
        ("/monitor", "Monitor"),
        ("/replay", "Replay"), ("/learning/spot", "Spot AI learning"), ("/learning/futures", "Futures AI learning"),
        ("/teacher", "Teacher"),
+       ("/factory", "Strategy Factory"), ("/evolution", "Evolution Lab"), ("/arena", "Strategy Arena"),
        ("/news", "News"), ("/research", "Research"), ("/reports", "Reports"), ("/books", "Submit a book"), ("/changes", "Change requests"), ("/admin/users", "Users"),
        ("/settings", "Settings")]
 
