@@ -3,13 +3,28 @@ on:
   push:
     branches: [main]
   pull_request:
+permissions:
+  contents: read
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    # No marketplace actions: this repository allows only its own actions (Settings > Actions >
+    # "local_only"), and a workflow that uses actions/checkout or actions/setup-python is refused
+    # before it starts ("startup failure"). The runner's own git and Python 3.12 do the same job.
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: pip install -e '.[dev]'
-      - run: pytest -q
+      - name: Check out
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          git init -q .
+          git remote add origin "https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git fetch -q --depth 1 origin "${GITHUB_SHA}"
+          git checkout -q FETCH_HEAD
+          git remote set-url origin "https://github.com/${GITHUB_REPOSITORY}.git"
+      - name: Install
+        run: |
+          python3 --version
+          python3 -m venv .venv
+          .venv/bin/pip install -q -e '.[dev]'
+      - name: Test
+        run: .venv/bin/pytest -q
