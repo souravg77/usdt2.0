@@ -242,6 +242,11 @@ class Executor:
                 continue
             if self.strategies and entry_id not in self.strategies:
                 continue
+            if pos.get("maker_entry") and pos.get("filled") is False:
+                # paper is waiting for its limit price: most of those never fill and paper drops them.
+                # Buying now would pay two market fees and the spread on a trade paper never took.
+                # Not a skip: once paper's limit fills, this enters (the signal-age check still applies).
+                continue
             short = sig.get("side", "buy") == Side.SELL.value
             if perp_long and short:
                 continue  # not a key the paper trader writes

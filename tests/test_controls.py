@@ -126,3 +126,22 @@ def test_controls_page_saves_every_control(tmp_path, monkeypatch):
     a = controls.load(paths.controls)["auto"]
     assert a["generate"] and not a["evolve"] and not a["shorts"] and a["n"] == 15 and a["timeframes"] == ["1h"]
     assert "Automatic generation on: 15 candidates every 24 h" in r.text
+
+
+def test_nan_and_inf_are_refused_not_stored(tmp_path):
+    import json
+
+    import pytest
+
+    from aitrader.trade import futures
+
+    for bad in ("nan", "inf", "-inf"):
+        with pytest.raises(ValueError):
+            futures.clamp_paper_leverage(float(bad))
+    assert futures.clamp_paper_leverage(500) == futures.PAPER_MAX_LEVERAGE
+    mpath = str(tmp_path / "market.json")
+    with open(mpath, "w") as fh:
+        json.dump({"leverage": float("nan")}, fh)  # written by an older version
+    assert wallet.paper_leverage(mpath) is None  # falls back to the default, never sizes with NaN
+    c = controls.save(str(tmp_path / "c.json"), {"auto": {"every_hours": "nan", "generate": True}})
+    assert c["auto"]["every_hours"] == controls.AUTO_DEFAULTS["every_hours"]

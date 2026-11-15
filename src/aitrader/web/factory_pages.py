@@ -346,7 +346,7 @@ def add_factory_routes(app, *, page, guard, auth, paths, csrf, jobs, clock=time.
                                        "passed" if bt(e)["stress"]["passed"] else "failed")),
             ("Paper trades", lambda e: str((e.paper or {}).get("trades", 0))),
             ("Paper per trade", lambda e: _r((e.paper or {}).get("expectancy_r"))),
-            ("Why rejected", lambda e: f'<span class="small">{_e(_why(e))[:300]}</span>' or "–"),
+            ("Why rejected", lambda e: f'<span class="small">{_e(_why(e)[:300])}</span>' if _why(e) else "–"),
         ]
         head = "".join(f"<th>{_link(e.id)}</th>" for e in chosen)
         body = "".join(f"<tr><td>{_e(name)}</td>" + "".join(f"<td>{cell(e, f)}</td>" for e in chosen) + "</tr>"

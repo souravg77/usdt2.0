@@ -18,6 +18,7 @@ log (Telegram sends it).
 
 from __future__ import annotations
 
+import math
 import os
 
 from ..config import LIVE_CONFIRM_PHRASE
@@ -61,7 +62,8 @@ def turn_on(store: UserStore, settings, golive, root: str, user_id: int, passwor
         raise AccountError("the password is wrong")
     if (phrase or "").strip() != LIVE_CONFIRM_PHRASE:
         raise AccountError(f"type the phrase exactly: {LIVE_CONFIRM_PHRASE}")
-    if not budget_usdt or budget_usdt <= 0 or budget_usdt > MAX_BUDGET_USDT:
+    # "nan" passes every comparison below and is stored as no cap at all (SQLite NULL): refuse it
+    if not budget_usdt or not math.isfinite(budget_usdt) or budget_usdt <= 0 or budget_usdt > MAX_BUDGET_USDT:
         raise AccountError("set a budget cap: the most USDT the agent may use")
     if live_gate_problems(settings):
         raise AccountError("the platform's live lock is closed (the server owner opens it in .env)")

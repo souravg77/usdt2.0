@@ -22,6 +22,7 @@ paper trader on every pass. Fake money only: nothing here touches an exchange.
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 
@@ -229,8 +230,8 @@ def futures_on(path: str) -> bool:
 def paper_leverage(path: str) -> float | None:
     """The leverage chosen on the Trading page for paper perpetuals, or None (use AITRADER_LEVERAGE)."""
     try:
-        lev = _market(path).get("leverage")
-        return float(lev) if lev else None
+        lev = float(_market(path).get("leverage") or 0)
+        return lev if math.isfinite(lev) and lev > 0 else None
     except (TypeError, ValueError):
         return None
 

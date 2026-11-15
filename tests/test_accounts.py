@@ -71,6 +71,8 @@ def test_keys_are_encrypted_and_live_needs_everything(tmp_path):
     st.save_keys(v, u.id, "bybit", False, API_KEY, API_SECRET, {})
     with pytest.raises(AccountError, match="budget"):
         st.set_mode(u.id, "live", 0)
+    with pytest.raises(AccountError, match="budget"):
+        st.set_mode(u.id, "live", float("nan"))  # SQLite would store NaN as "no cap"
     st.set_mode(u.id, "live", 250)
     assert st.get(u.id).mode == "live" and st.get(u.id).pilot_max_usdt == 250
     st.allow_live(u.id, False)
@@ -268,6 +270,8 @@ def test_live_switch(site, monkeypatch):
     assert "password is wrong" in on(password="wrong password!!")
     assert "phrase" in on(confirm="yes")
     assert "budget" in on(budget="0")
+    for bad in ("nan", "inf"):  # NaN slips past < and >, and would be stored as no cap at all
+        assert "budget" in on(budget=bad)
     assert users.get(u.id).mode == "testnet"
     assert "ON" in on()
     assert users.get(u.id).mode == "live" and users.get(u.id).pilot_max_usdt == 150
