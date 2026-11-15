@@ -152,8 +152,20 @@ def family(g: dict) -> str:
     return "|".join(parts)
 
 
-def to_spec(g: dict, lineage: dict) -> dict:
-    """The genome as a validated rule spec, with its lineage attached."""
+ENGINES = ("spot", "futures")
+PREFIX = {"spot": "spot-", "futures": "fut-"}
+
+
+def family_key(g: dict, engine: str = "") -> str:
+    """The family, per engine: the same blocks tested on spot and on the perpetuals are separate tries."""
+    return f"{engine}:{family(g)}" if engine else family(g)
+
+
+def to_spec(g: dict, lineage: dict, engine: str = "") -> dict:
+    """The genome as a validated rule spec, with its lineage attached. ``engine`` ("spot" or
+    "futures") makes it that engine's alone: the other engine never backtests or trades it."""
+    if engine and engine not in ENGINES:
+        raise ValueError(f"engine must be one of {ENGINES}")
     entry = []
     for role in ROLES:
         part = g.get(role)
@@ -178,13 +190,15 @@ def to_spec(g: dict, lineage: dict) -> dict:
     if g.get("avoid_downtrend"):
         spec["avoid_regimes"] = ["trend-down"]
     clean = validate_spec(spec)
-    clean["lineage"] = {**lineage, "genome": copy.deepcopy(g), "family": family(g)}
+    clean["lineage"] = {**lineage, "genome": copy.deepcopy(g), "family": family_key(g, engine)}
+    if engine:
+        clean["engine"] = engine
     return clean
 
 
-def make_entry(g: dict, lineage: dict) -> Entry:
-    spec = to_spec(g, lineage)
-    return Entry(id=spec_id(spec), kind="rule", name=spec["name"], spec=spec,
+def make_entry(g: dict, lineage: dict, engine: str = "") -> Entry:
+    spec = to_spec(g, lineage, engine)
+    return Entry(id=PREFIX.get(engine, "") + spec_id(spec), kind="rule", name=spec["name"], spec=spec,
                  source=f"factory ({lineage.get('op', 'random')}, generation {lineage.get('generation', 0)})")
 
 
@@ -210,10 +224,13 @@ def add_entries(reg: Registry, made: list[Entry], shorts: bool) -> list[Entry]:
 
 
 def generate(reg: Registry, n: int, seed: int | None = None, timeframes=TIMEFRAMES,
-             shorts: bool = False, max_per_family: int = 2, max_tries: int | None = None) -> list[Entry]:
+             shorts: bool = False, max_per_family: int = 2, max_tries: int | None = None,
+             engine: str = "") -> list[Entry]:
     """Make ``n`` new strategies (plus short twins with ``shorts``) and add them to ``reg`` as
     RESEARCH. A family already in the registry ``max_per_family`` times is skipped, so one lucky
-    idea can't fill the list with copies of itself."""
+    idea can't fill the list with copies of itself. ``engine`` makes them Spot AI's or Futures AI's
+    alone; Spot AI never shorts, so a Spot run makes no short twins."""
+    shorts = shorts and engine != "spot"
     rng = random.Random(seed)
     per_family: dict[str, int] = {}
     for e in reg.entries.values():
@@ -225,11 +242,11 @@ def generate(reg: Registry, n: int, seed: int | None = None, timeframes=TIMEFRAM
     while len(made) < n and tries < (max_tries or n * 50):
         tries += 1
         g = random_genome(rng, timeframes)
-        f = family(g)
+        f = family_key(g, engine)
         if per_family.get(f, 0) >= max_per_family:
             continue
         try:
-            e = make_entry(g, {"generation": 0, "parents": [], "op": "random", "seed": seed})
+            e = make_entry(g, {"generation": 0, "parents": [], "op": "random", "seed": seed}, engine)
         except RuleError:
             continue
         if e.id in reg.entries or any(m.id == e.id for m in made):

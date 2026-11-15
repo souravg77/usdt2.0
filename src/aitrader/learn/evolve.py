@@ -46,11 +46,15 @@ def fitness(entry: Entry) -> float | None:
     return float(m.get("expectancy_r", 0.0)) * n / (n + PRIOR)
 
 
-def parents(reg: Registry, top: int = 20) -> list[tuple[Entry, float]]:
-    """The best ``top`` long machine-made strategies with a positive in-sample fitness."""
+def parents(reg: Registry, top: int = 20, engine: str = "") -> list[tuple[Entry, float]]:
+    """The best ``top`` long machine-made strategies with a positive in-sample fitness. With
+    ``engine``, only that engine's own (tested on its own candles): Futures AI never breeds from
+    strategies tested on spot, nor Spot AI from ones tested on the perpetuals."""
     pool = []
     for e in reg.entries.values():
         g = ((e.spec or {}).get("lineage") or {}).get("genome")
+        if engine and (e.spec or {}).get("engine") != engine:
+            continue
         f = fitness(e)
         if g and e.kind == "rule" and f is not None and f > 0:
             pool.append((e, f))
@@ -131,12 +135,13 @@ def _pick(rng: random.Random, pool: list[tuple[Entry, float]]) -> Entry:
 
 
 def breed(reg: Registry, n: int, seed: int | None = None, crossover_share: float = 0.5,
-          shorts: bool = False, top: int = 20, timeframes=TIMEFRAMES) -> list[Entry]:
+          shorts: bool = False, top: int = 20, timeframes=TIMEFRAMES, engine: str = "") -> list[Entry]:
     """Make ``n`` children of the fittest machine-made strategies and add them to ``reg`` as
     RESEARCH. Returns the new entries (none when fewer than two parents qualify)."""
-    pool = parents(reg, top)
+    pool = parents(reg, top, engine)
     if len(pool) < 2:
         return []
+    shorts = shorts and engine != "spot"
     rng = random.Random(seed)
     made: list[Entry] = []
     tries = 0
@@ -155,7 +160,7 @@ def breed(reg: Registry, n: int, seed: int | None = None, crossover_share: float
             continue  # an unchanged copy of a parent
         gen = 1 + max(int(p.spec["lineage"].get("generation", 0)) for p in ps)
         try:
-            e = make_entry(g, {"generation": gen, "parents": [p.id for p in ps], "op": op, "seed": seed})
+            e = make_entry(g, {"generation": gen, "parents": [p.id for p in ps], "op": op, "seed": seed}, engine)
         except RuleError:
             continue
         if e.id in reg.entries or any(m.id == e.id for m in made):

@@ -22,7 +22,8 @@ import urllib.parse
 from fastapi import Form, Request
 from fastapi.responses import PlainTextResponse, RedirectResponse
 
-from ..learn import evolve, factory, luck
+from ..learn import evolve, factory, luck, wallet
+from ..learn.picks import owner
 from ..learn.registry import Registry
 
 MAX_N = 200
@@ -102,7 +103,16 @@ def arena_pick(reg: Registry, ids: list[str]) -> list:
     return tested[:ARENA_MAX]
 
 
+ENGINE_NAMES = {"spot": "Spot AI", "futures": "Futures AI"}
+
+
 def add_factory_routes(app, *, page, guard, auth, paths, csrf, jobs, clock=time.time):
+    def _engine(asked: str = "") -> str:
+        """The engine a form names, else the one the dashboard is showing (Spot AI / Futures AI)."""
+        if asked in ENGINE_NAMES:
+            return asked
+        return "futures" if wallet.futures_on(wallet.market_path(paths.paper_state)) else "spot"
+
     def _busy():
         return next((j for j in jobs.list() if j["status"] in ("queued", "running")
                      and j.get("meta", {}).get("kind") == "factory"), None)
@@ -118,25 +128,31 @@ def add_factory_routes(app, *, page, guard, auth, paths, csrf, jobs, clock=time.
         if redirect:
             return redirect
         reg = Registry(paths.registry)
-        made = machine_entries(reg)
+        eng = _engine()
+        name = ENGINE_NAMES[eng]
+        made = [e for e in machine_entries(reg) if owner(e) == eng]  # this engine's own only
         n_fam = luck.families(reg.entries.values())
         by_status: dict[str, int] = {}
         for e in made:
             by_status[e.status] = by_status.get(e.status, 0) + 1
-        parents = evolve.parents(reg)
+        parents = evolve.parents(reg, engine=eng)
         busy = _busy()
-        form = csrf(token)
+        form = csrf(token) + f'<input type="hidden" name="engine" value="{eng}">'
+        data = ("the perpetual futures' own pairs and candles (never spot), with long and short strategies"
+                if eng == "futures" else "spot pairs and candles (never the perpetuals), long strategies only")
         tf_boxes = "".join(f'<label class="small"><input type="checkbox" name="timeframes" value="{t}" checked> {t}</label> '
                            for t in factory.TIMEFRAMES)
         counts = " · ".join(f"{_status(s)} {k}" for s, k in sorted(by_status.items())) or '<span class="muted">none yet</span>'
         parts = [f'<p class="good">{_e(msg)}</p>' if msg else "",
-                 '<div class="card"><h3>Strategy Factory</h3>'
+                 f'<div class="card"><h3>Strategy Factory: {name}</h3><p>Builds and backtests on {data}. '
+                 'Switch engine at the top of the page for the other engine\'s own factory.</p>'
                  '<p class="small muted">The agent writes new strategies from 30 indicator building blocks (trend, '
                  'trigger, confirmation, volatility filter, stop, exit, timeframe), checked by the same safe rule '
                  'language as book strategies. Each one starts at RESEARCH and has to pass the full backtest gate, '
                  'a stress test, and a luck bar that rises with every idea tried. Most will fail: that is the gate '
                  'working. Nothing here can trade real money.</p></div>',
-                 f'<div class="card"><p>{len(made)} machine-made strategies in <b>{n_fam}</b> families: {counts}</p>',
+                 f'<div class="card"><p>{len(made)} {name} machine-made strategies; <b>{n_fam}</b> families tried on both '
+                 f'engines: {counts}</p>',
                  f'<p>A new machine-made strategy needs an out-of-sample t of at least '
                  f'<b>{luck.required_t(n_fam):.2f}</b> (book strategies: 2.00). '
                  f'<span class="small muted">Wide random search raises this quickly; evolution that only changes '
@@ -150,8 +166,8 @@ def add_factory_routes(app, *, page, guard, auth, paths, csrf, jobs, clock=time.
                 f'<form method="post" action="/factory/generate" class="card">{form}<h3>Generate</h3>'
                 f'<p><label>How many <input type="number" name="n" value="20" min="1" max="{MAX_N}"></label></p>'
                 f'<p>{tf_boxes}</p>'
-                '<p><label class="small"><input type="checkbox" name="shorts" value="1" checked> '
-                'also make short twins for Futures AI</label></p>'
+                + ('<p><label class="small"><input type="checkbox" name="shorts" value="1" checked> '
+                   'also make short twins</label></p>' if eng == "futures" else "") +
                 '<p><label class="small"><input type="checkbox" name="test" value="1" checked> '
                 'backtest them straight away</label></p>'
                 '<button>Generate strategies</button></form>'
@@ -162,7 +178,8 @@ def add_factory_routes(app, *, page, guard, auth, paths, csrf, jobs, clock=time.
                 f'<p><label>Children <input type="number" name="n" value="20" min="1" max="{MAX_N}"></label></p>'
                 '<p><label>Crossover share <input type="number" name="crossover" value="0.5" min="0" max="1" '
                 'step="0.1"></label></p>'
-                '<p><label class="small"><input type="checkbox" name="shorts" value="1" checked> short twins too</label></p>'
+                + ('<p><label class="small"><input type="checkbox" name="shorts" value="1" checked> short twins too'
+                   '</label></p>' if eng == "futures" else "") +
                 '<p><label class="small"><input type="checkbox" name="test" value="1" checked> '
                 'backtest them straight away</label></p>'
                 + ('<button>Breed the next generation</button>' if len(parents) >= 2 else
@@ -187,13 +204,16 @@ def add_factory_routes(app, *, page, guard, auth, paths, csrf, jobs, clock=time.
             return PlainTextResponse("bad form token; reload the page", status_code=403)
         return RedirectResponse(f"/factory?msg={urllib.parse.quote(action(user))}", status_code=303)
 
-    def _test_steps(test: bool, shorts: bool) -> list[list[str]]:
-        if not test:
-            return []
-        steps = [["learn", "test"]]
-        if shorts:
-            steps.append(["learn", "test", "--market", "futures"])
-        return steps
+    def _flags(form) -> list[str]:
+        """The engine the form came from, and its options: each run is one engine's alone and is
+        backtested only on that engine's own pairs and candles (``learn factory --engine --test``)."""
+        eng = _engine(str(form.get("engine", "")))
+        flags = ["--engine", eng]
+        if eng == "futures" and form.get("shorts"):
+            flags.append("--shorts")
+        if form.get("test"):
+            flags.append("--test")
+        return flags
 
     @app.post("/factory/generate")
     async def factory_generate(request: Request):
@@ -209,11 +229,12 @@ def add_factory_routes(app, *, page, guard, auth, paths, csrf, jobs, clock=time.
             tfs = [t for t in form.getlist("timeframes") if t in factory.TIMEFRAMES]
             if not tfs:
                 return "Pick at least one timeframe."
-            shorts, test = bool(form.get("shorts")), bool(form.get("test"))
-            step = ["learn", "factory", "--n", str(n), "--timeframes", ",".join(tfs)] + (["--shorts"] if shorts else [])
-            jobs.submit(f"Strategy Factory: make {n} strategies" + (" and backtest them" if test else ""),
-                        [step, *_test_steps(test, shorts)], meta={"kind": "factory"})
-            _event(f"strategy factory started from the dashboard by {user}: {n} strategies on {', '.join(tfs)}")
+            test, flags = bool(form.get("test")), _flags(form)
+            eng = ENGINE_NAMES[flags[1]]
+            step = ["learn", "factory", "--n", str(n), "--timeframes", ",".join(tfs), *flags]
+            jobs.submit(f"Strategy Factory ({eng}): make {n} strategies" + (" and backtest them" if test else ""),
+                        [step], meta={"kind": "factory"})
+            _event(f"strategy factory started from the dashboard by {user}: {n} {eng} strategies on {', '.join(tfs)}")
             return f"Making {n} strategies" + (" and backtesting them" if test else "") + ". Results appear below."
         return _post(request, form.get("csrf", ""), act)
 
@@ -229,11 +250,12 @@ def add_factory_routes(app, *, page, guard, auth, paths, csrf, jobs, clock=time.
                 share = min(1.0, max(0.0, float(form.get("crossover", 0.5))))
             except ValueError:
                 return "Children and crossover share must be numbers."
-            shorts, test = bool(form.get("shorts")), bool(form.get("test"))
-            step = ["learn", "evolve", "--n", str(n), "--crossover", f"{share:g}"] + (["--shorts"] if shorts else [])
-            jobs.submit(f"Evolution: breed {n} children" + (" and backtest them" if test else ""),
-                        [step, *_test_steps(test, shorts)], meta={"kind": "factory"})
-            _event(f"strategy evolution started from the dashboard by {user}: {n} children")
+            test, flags = bool(form.get("test")), _flags(form)
+            eng = ENGINE_NAMES[flags[1]]
+            step = ["learn", "evolve", "--n", str(n), "--crossover", f"{share:g}", *flags]
+            jobs.submit(f"Evolution ({eng}): breed {n} children" + (" and backtest them" if test else ""),
+                        [step], meta={"kind": "factory"})
+            _event(f"strategy evolution started from the dashboard by {user}: {n} {eng} children")
             return f"Breeding {n} children" + (" and backtesting them" if test else "") + "."
         return _post(request, form.get("csrf", ""), act)
 
@@ -243,8 +265,9 @@ def add_factory_routes(app, *, page, guard, auth, paths, csrf, jobs, clock=time.
         if redirect:
             return redirect
         reg = Registry(paths.registry)
-        made = machine_entries(reg)
-        parts = ['<div class="card"><h3>Evolution Lab</h3><p class="small muted">Every strategy the agent made '
+        eng = _engine()
+        made = [e for e in machine_entries(reg) if owner(e) == eng]  # this engine's own only
+        parts = [f'<div class="card"><h3>Evolution Lab: {ENGINE_NAMES[eng]}</h3><p class="small muted">Every strategy the agent made '
                  'itself, by generation. Generation 0 comes from the factory; each later one is bred from the best '
                  'of the earlier ones on their in-sample results. A child passes only on data its parents were '
                  'never chosen on.</p></div>']

@@ -216,23 +216,28 @@ def test_factory_page_queues_generate_and_evolve_jobs(tmp_path, monkeypatch):
     assert "Strategy Factory" in page and "Generate strategies" in page and "Needs 2 tested parents" in page
     assert 'href="/evolution"' in page and 'href="/arena"' in page  # in the menu
     assert client.post("/factory/generate", data={"csrf": "x", "n": "5"}).status_code == 403
+    assert "Strategy Factory: Spot AI" in page and "short twins" not in page  # Spot AI never shorts
+    # each run is one engine's alone and is backtested only on that engine's own candles
     client.post("/factory/generate", data={"csrf": csrf, "n": "5", "timeframes": ["1h", "4h"],
-                                           "shorts": "1", "test": "1"})
-    assert submitted[-1] == ([["learn", "factory", "--n", "5", "--timeframes", "1h,4h", "--shorts"],
-                              ["learn", "test"], ["learn", "test", "--market", "futures"]], {"kind": "factory"})
-    client.post("/factory/generate", data={"csrf": csrf, "n": "9999", "timeframes": ["1m", "1h"]})
-    assert submitted[-1][0] == [["learn", "factory", "--n", "200", "--timeframes", "1h"]]
+                                           "engine": "futures", "shorts": "1", "test": "1"})
+    assert submitted[-1] == ([["learn", "factory", "--n", "5", "--timeframes", "1h,4h", "--engine", "futures",
+                               "--shorts", "--test"]], {"kind": "factory"})
+    client.post("/factory/generate", data={"csrf": csrf, "n": "9999", "timeframes": ["1m", "1h"], "engine": "spot",
+                                           "shorts": "1"})
+    assert submitted[-1][0] == [["learn", "factory", "--n", "200", "--timeframes", "1h", "--engine", "spot"]]
+    client.post("/factory/generate", data={"csrf": csrf, "n": "2", "timeframes": ["1h"]})  # no engine: the view's
+    assert submitted[-1][0] == [["learn", "factory", "--n", "2", "--timeframes", "1h", "--engine", "spot"]]
     r = client.post("/factory/generate", data={"csrf": csrf, "n": "3"}, follow_redirects=True)
     assert "Pick at least one timeframe" in r.text
-    client.post("/factory/evolve", data={"csrf": csrf, "n": "4", "crossover": "0.3"})
-    assert submitted[-1][0] == [["learn", "evolve", "--n", "4", "--crossover", "0.3"]]
+    client.post("/factory/evolve", data={"csrf": csrf, "n": "4", "crossover": "0.3", "engine": "futures"})
+    assert submitted[-1][0] == [["learn", "evolve", "--n", "4", "--crossover", "0.3", "--engine", "futures"]]
 
 
 def test_evolution_lab_and_arena_show_real_registry_numbers(tmp_path, monkeypatch):
     client, _csrf, paths, _sub = _web(tmp_path, monkeypatch)
     assert "No machine-made strategies yet" in client.get("/evolution").text
     reg = Registry(paths.registry)
-    a, b = factory.generate(reg, 2, seed=8)
+    a, b = factory.generate(reg, 2, seed=8, engine="spot")
     _tested(a, 0.3, 0.12)
     _tested(b, 0.2, -0.05)
     a.backtest.update({"luck": {"families_tried": 2, "min_t_oos": 2.24},
@@ -277,8 +282,66 @@ def test_an_improved_factory_strategy_keeps_its_family_but_not_a_stale_genome():
 def test_newest_table_cuts_text_before_escaping(tmp_path, monkeypatch):
     client, _csrf, paths, _sub = _web(tmp_path, monkeypatch)
     reg = Registry(paths.registry)
-    (e,) = factory.generate(reg, 1, seed=13)
+    (e,) = factory.generate(reg, 1, seed=13, engine="spot")
     e.backtest = {"failed": ["&" * 300]}
     reg.save()
     page = client.get("/factory").text
     assert "&amp;" * 240 in page and "&am<" not in page and "&a</td>" not in page
+
+
+def test_an_engines_factory_strategies_belong_to_it_alone():
+    from aitrader.learn.picks import learns_for, owner, trades_now
+
+    reg = Registry("unused/registry.json")
+    fut = factory.generate(reg, 3, seed=21, engine="futures", shorts=True)
+    spot = factory.generate(reg, 3, seed=22, engine="spot", shorts=True)
+    assert all(e.kind == "rule" for e in spot)  # Spot AI never shorts: no twins asked for or not
+    assert any(e.kind == "short" for e in fut)
+    for e in fut:
+        assert owner(e) == "futures" and e.id.startswith(("fut-", "short-fut-"))
+        assert learns_for(e, "futures") and not learns_for(e, "spot")
+        assert not trades_now(e, False, "spot") and trades_now(e, False, "futures")
+        assert luck.family_of(e.spec).startswith("futures:")
+    for e in spot:
+        assert owner(e) == "spot" and learns_for(e, "spot") and not learns_for(e, "futures")
+        assert not trades_now(e, False, "futures")
+    # evolution breeds each engine only from its own
+    for e in [*fut, *spot]:
+        if e.kind == "rule":
+            _tested(e, 0.3, 0.1)
+    assert {owner(p) for p, _f in evolve.parents(reg, engine="futures")} == {"futures"}
+    kids = evolve.breed(reg, 4, seed=5, engine="spot", shorts=True)
+    assert kids and all(owner(k) == "spot" and k.kind == "rule" for k in kids)
+    assert all(set(k.spec["lineage"]["parents"]) <= {e.id for e in spot} for k in kids)
+
+
+@pytest.mark.parametrize("engine,own,other", [("futures", "ETH/USDT", "BTC/USDT"), ("spot", "BTC/USDT", "ETH/USDT")])
+def test_factory_test_runs_only_on_the_engines_own_candles(tmp_path, monkeypatch, engine, own, other):
+    """The bug Shawn found: a Futures AI factory run backtested on spot candles. Spot has only
+    BTC/USDT, the perpetuals only ETH/USDT; each engine's run must see its own pair alone."""
+    from aitrader.cli import main
+    from aitrader.data.perp import futures_db_path
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AITRADER_DB_PATH", str(tmp_path / "spot.db"))
+    monkeypatch.setenv("AITRADER_SYMBOLS", "BTC/USDT")
+    spot_store = CandleStore(str(tmp_path / "spot.db"))
+    fill_store(spot_store, synthetic(n=600), sym="BTC/USDT")
+    spot_store.close()
+    fut_store = CandleStore(futures_db_path(str(tmp_path / "spot.db")))
+    fill_store(fut_store, synthetic(n=600, seed=3), sym="ETH/USDT")
+    fut_store.close()
+    loaded = []
+    real_load = CandleStore.load
+
+    def spy(self, ex, sym, tf, *a, **k):
+        loaded.append(sym)
+        return real_load(self, ex, sym, tf, *a, **k)
+
+    monkeypatch.setattr(CandleStore, "load", spy)
+    assert main(["--env-file", "none", "learn", "factory", "--n", "3", "--seed", "4", "--timeframes", "1h",
+                 "--engine", engine, "--test"]) == 0
+    assert loaded and own in loaded and other not in loaded
+    reg = Registry("data/learn/registry.json")
+    tested = [e for e in reg.entries.values() if e.backtest]
+    assert tested and all(m["symbol"] == own for e in tested for m in e.backtest["markets"])

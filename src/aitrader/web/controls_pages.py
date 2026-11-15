@@ -148,6 +148,10 @@ def add_controls_routes(app, *, settings, page, guard, auth, paths, csrf, clock=
             + chk("generate", auto["generate"], "<b>Automatic strategy generation</b>: the Strategy Factory makes new "
                                                 "strategies on a schedule")
             + chk("evolve", auto["evolve"], "<b>Strategy evolution</b>: breed children from the best tested ones")
+            + '<p>Engines (each builds and backtests on its own pairs and candles only):</p><div class="checks">'
+            + "".join(f'<label class="small"><input type="checkbox" name="engines" value="{x}"'
+                      f'{" checked" if x in auto["engines"] else ""}> {NAMES[x]}</label> ' for x in wallet.MARKETS)
+            + '</div>'
             + chk("shorts", auto["shorts"], "Also make short twins for Futures AI")
             + f'<p><label>Strategy candidates per run <input type="number" name="n" min="{controls.AUTO_N[0]}" '
               f'max="{controls.AUTO_N[1]}" value="{auto["n"]}"></label></p>'
@@ -239,13 +243,16 @@ def add_controls_routes(app, *, settings, page, guard, auth, paths, csrf, clock=
             tfs = [t for t in form.getlist("timeframes") if t in controls.TIMEFRAMES]
             if not tfs:
                 raise ValueError("pick at least one timeframe to build on")
+            engines = [x for x in form.getlist("engines") if x in controls.ENGINES]
+            if not engines:
+                raise ValueError("pick Spot AI, Futures AI or both")
             try:
                 n, hours = int(form.get("n", 20)), float(form.get("every_hours", 24))
             except ValueError:
                 raise ValueError("candidates and hours must be numbers") from None
             c = controls.save(cpath, {"auto": {"generate": bool(form.get("generate")), "evolve": bool(form.get("evolve")),
                                                "shorts": bool(form.get("shorts")), "n": n, "every_hours": hours,
-                                               "timeframes": tfs}}, by=user)
+                                               "timeframes": tfs, "engines": engines}}, by=user)
             a = c["auto"]
             on = [x for x, k in (("generation", "generate"), ("evolution", "evolve")) if a[k]]
             _event(f"AI automation set from the Controls page by {user}: {', '.join(on) or 'off'}")
