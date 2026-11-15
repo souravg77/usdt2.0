@@ -114,8 +114,8 @@ STATS: dict = {}
 class Gated:
     """``base`` whose signals only count when they clear the layer (``need`` of 4 checks)."""
 
-    def __init__(self, base, need: int, sid: str):
-        self.base, self.need, self.sid = base, need, sid
+    def __init__(self, base, need: int, sid: str, since: int = 0):
+        self.base, self.need, self.sid, self.since = base, need, sid, since
 
     def __getattr__(self, name):
         return getattr(self.base, name)
@@ -134,11 +134,13 @@ class Gated:
             if i is None:
                 continue
             row = L["short" if s.side is Side.SELL else "long"].iloc[i]
-            st["signals"] += 1
-            for k in CHECKS:
-                st[k] += bool(row[k])
-            if int(row.sum()) >= self.need:
-                st["kept"] += 1
+            ok = int(row.sum()) >= self.need
+            if s.ts >= self.since:  # count only the signals of the period being tested
+                st["signals"] += 1
+                for k in CHECKS:
+                    st[k] += bool(row[k])
+                st["kept"] += ok
+            if ok:
                 out.append(s)
         return out
 
@@ -164,13 +166,15 @@ def fmt(m: dict) -> str:
 
 
 def recent(args) -> int:
-    """Plain backtest of the last ``months`` on one pair (or all), layer OFF vs ON, win % side by side.
-    Strategies see their full history before the period (indicators, ML training); only trades
-    that enter inside the period count."""
+    """Plain backtest of the last ``months`` on one pair (or every pair): layer OFF, then ON with
+    each ``--needs`` setting (e.g. 3 and 2 of 4), win % and profit per trade side by side, and how
+    often each of the 4 checks passed. Strategies see their full history before the period
+    (indicators, ML training); only trades that enter inside the period count."""
     from aitrader.backtest import metrics, run_backtest
     from aitrader.indicators import candles_to_frame
     from aitrader.learn.registry import make_strategy
 
+    needs = [int(x) for x in str(args.needs).split(",") if x.strip()] if args.needs else [args.need]
     s = Settings.from_env()
     cfg = BacktestConfig(taker_fee=s.paper_taker_fee, maker_fee=s.paper_maker_fee,
                          slippage_bps=s.paper_slippage_bps, max_cost_r=s.max_cost_r)
@@ -180,46 +184,53 @@ def recent(args) -> int:
     pairs = [args.symbol] if args.symbol else list(pairs)[:args.max_pairs]
     end = max((store.last_ts(EXCHANGES[0], p, tf) or 0) for p in pairs for tf in ("15m", "1h", "4h", "1d"))
     start = end - int(args.months * 30.44 * 86_400_000)
-    print(f"=== {args.market}: {', '.join(pairs)}, last {args.months} months "
+    print(f"=== {args.market}: {len(pairs)} pairs ({', '.join(pairs)}), last {args.months} months "
           f"({time.strftime('%Y-%m-%d', time.gmtime(start / 1000))} to "
-          f"{time.strftime('%Y-%m-%d', time.gmtime(end / 1000))}); {len(entries)} strategies; "
-          f"layer needs {args.need} of 4 ===", flush=True)
-    print(f"  {'strategy':46} {'OFF: trades  win   avg R':>26}   {'ON: trades  win   avg R':>25}", flush=True)
-    rows, all_off, all_on = [], [], []
+          f"{time.strftime('%Y-%m-%d', time.gmtime(end / 1000))}); {len(entries)} strategies ===", flush=True)
+    modes = ["OFF"] + [f"{n}of4" for n in needs]
+    print("  " + f"{'strategy':44}" + "".join(f"{m + ': tr  win  avg R':>24}" for m in modes), flush=True)
+    rows, pooled = [], {m: [] for m in modes}
     for e in entries:
         try:
             base = make_strategy(e)
         except Exception as exc:  # a strategy that can't be built here: say so, keep going
-            print(f"  {e.id[:46]:46} skipped ({type(exc).__name__})")
+            print(f"  {e.id[:44]:44} skipped ({type(exc).__name__})")
             continue
-        off, on = [], []
+        got = {m: [] for m in modes}
         for sym in pairs:
             for tf in base.spec.timeframes:
                 candles = store.load(EXCHANGES[0], sym, tf)
                 if len(candles) < lab.MIN_BARS or candles[-1].ts < start:
                     continue
                 df = lab.with_context(base, candles_to_frame(candles), store, EXCHANGES[0], sym, tf)
-                off += [t for t in run_backtest(base, df, EXCHANGES[0], sym, tf, costs) if t.entry_ts >= start]
-                gated = Gated(base, args.need, e.id)
-                on += [t for t in run_backtest(gated, df, EXCHANGES[0], sym, tf, costs) if t.entry_ts >= start]
-        m0, m1 = metrics(off), metrics(on)
-        all_off += off
-        all_on += on
-        rows.append({"id": e.id, "off": m0, "on": m1})
-        print(f"  {e.id[:46]:46} {m0['trades']:6d} {m0['win_rate']:5.0%} {m0['expectancy_r']:+7.3f}R"
-              f"   {m1['trades']:6d} {m1['win_rate']:5.0%} {m1['expectancy_r']:+7.3f}R", flush=True)
+                for m in modes:
+                    strat = base if m == "OFF" else Gated(base, int(m[0]), e.id if m == modes[1] else f"{e.id}|{m}", start)
+                    got[m] += [t for t in run_backtest(strat, df, EXCHANGES[0], sym, tf, costs) if t.entry_ts >= start]
+        ms = {m: metrics(got[m]) for m in modes}
+        for m in modes:
+            pooled[m] += got[m]
+        rows.append({"id": e.id, **{m: ms[m] for m in modes}, "layer": STATS.get(e.id, {})})
+        print("  " + f"{e.id[:44]:44}" + "".join(
+            f"{ms[m]['trades']:10d} {ms[m]['win_rate']:4.0%} {ms[m]['expectancy_r']:+7.3f}R" for m in modes), flush=True)
     store.close()
-    m0, m1 = metrics(all_off), metrics(all_on)
-    print("\n=== Summary: all strategies together, after fees ===")
-    print(f"  Layer OFF: {m0['trades']} trades, WIN {m0['win_rate']:.1%}, {m0['expectancy_r']:+.3f}R per trade, "
-          f"total {m0['total_r']:+.1f}R")
-    print(f"  Layer ON : {m1['trades']} trades, WIN {m1['win_rate']:.1%}, {m1['expectancy_r']:+.3f}R per trade, "
-          f"total {m1['total_r']:+.1f}R")
-    out = args.out.replace(".json", f"_{args.months}m.json")
+    print("\n=== Summary: all strategies and pairs together, after fees ===")
+    summary = {}
+    for m in modes:
+        mm = metrics(pooled[m])
+        summary[m] = mm
+        label = "Layer OFF        " if m == "OFF" else f"Layer ON {m[0]} of 4  "
+        print(f"  {label}: {mm['trades']:5d} trades, WIN {mm['win_rate']:.1%}, {mm['expectancy_r']:+.3f}R per trade, "
+              f"total {mm['total_r']:+.1f}R, worst drop {mm['max_drawdown_r']:.1f}R")
+    sig = sum(r["layer"].get("signals", 0) for r in rows)
+    if sig:
+        print(f"\n  Signals in the period: {sig}. How often each check passed:")
+        for k in CHECKS:
+            print(f"    {k:7} {sum(r['layer'].get(k, 0) for r in rows) / sig:6.0%}")
+    out = args.out.replace(".json", f"_{args.months}m{'_' + args.symbol.replace('/', '') if args.symbol else ''}.json")
     os.makedirs(os.path.dirname(out), exist_ok=True)
     with open(out, "w") as fh:
         json.dump({"pairs": pairs, "months": args.months, "start": start, "end": end, "strategies": rows,
-                   "off": m0, "on": m1}, fh, indent=1, default=str)
+                   "summary": summary}, fh, indent=1, default=str)
     print(f"\nsaved to {out} (nothing changed; nothing traded)")
     return 0
 
@@ -228,6 +239,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--market", choices=["spot", "futures"], default="futures")
     ap.add_argument("--need", type=int, default=3)
+    ap.add_argument("--needs", default="", help="with --months: several settings at once, e.g. 3,2")
     ap.add_argument("--max-strategies", type=int, default=40)
     ap.add_argument("--max-pairs", type=int, default=20)
     ap.add_argument("--no-ml", action="store_true")
