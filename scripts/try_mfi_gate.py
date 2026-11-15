@@ -8,6 +8,8 @@ report and saves it.
     sudo docker compose run --rm -v ~/try_mfi_gate.py:/app/try_mfi_gate.py \
         --entrypoint python collector /app/try_mfi_gate.py
 
+    One pair, last 6 months, win % side by side:  ... /app/try_mfi_gate.py --symbol BTC/USDT --months 6
+
 Options: --market futures|spot (default futures), --need 3 (checks out of 4 that must pass),
 --max-strategies 40, --max-pairs 20, --no-ml (leave out the slower ML strategies).
 
@@ -161,6 +163,67 @@ def fmt(m: dict) -> str:
             f"total={m.get('total_r', 0):+.1f}R maxDD={m['max_drawdown_r']:.1f}R")
 
 
+def recent(args) -> int:
+    """Plain backtest of the last ``months`` on one pair (or all), layer OFF vs ON, win % side by side.
+    Strategies see their full history before the period (indicators, ML training); only trades
+    that enter inside the period count."""
+    from aitrader.backtest import metrics, run_backtest
+    from aitrader.indicators import candles_to_frame
+    from aitrader.learn.registry import make_strategy
+
+    s = Settings.from_env()
+    cfg = BacktestConfig(taker_fee=s.paper_taker_fee, maker_fee=s.paper_maker_fee,
+                         slippage_bps=s.paper_slippage_bps, max_cost_r=s.max_cost_r)
+    reg = Registry(args.registry)
+    entries = pick(reg, args.market, not args.no_ml, args.max_strategies)
+    store, pairs, costs = _engine_market(s, args.market, s.symbols, cfg)
+    pairs = [args.symbol] if args.symbol else list(pairs)[:args.max_pairs]
+    end = max((store.last_ts(EXCHANGES[0], p, tf) or 0) for p in pairs for tf in ("15m", "1h", "4h", "1d"))
+    start = end - int(args.months * 30.44 * 86_400_000)
+    print(f"=== {args.market}: {', '.join(pairs)}, last {args.months} months "
+          f"({time.strftime('%Y-%m-%d', time.gmtime(start / 1000))} to "
+          f"{time.strftime('%Y-%m-%d', time.gmtime(end / 1000))}); {len(entries)} strategies; "
+          f"layer needs {args.need} of 4 ===", flush=True)
+    print(f"  {'strategy':46} {'OFF: trades  win   avg R':>26}   {'ON: trades  win   avg R':>25}", flush=True)
+    rows, all_off, all_on = [], [], []
+    for e in entries:
+        try:
+            base = make_strategy(e)
+        except Exception as exc:  # a strategy that can't be built here: say so, keep going
+            print(f"  {e.id[:46]:46} skipped ({type(exc).__name__})")
+            continue
+        off, on = [], []
+        for sym in pairs:
+            for tf in base.spec.timeframes:
+                candles = store.load(EXCHANGES[0], sym, tf)
+                if len(candles) < lab.MIN_BARS or candles[-1].ts < start:
+                    continue
+                df = lab.with_context(base, candles_to_frame(candles), store, EXCHANGES[0], sym, tf)
+                off += [t for t in run_backtest(base, df, EXCHANGES[0], sym, tf, costs) if t.entry_ts >= start]
+                gated = Gated(base, args.need, e.id)
+                on += [t for t in run_backtest(gated, df, EXCHANGES[0], sym, tf, costs) if t.entry_ts >= start]
+        m0, m1 = metrics(off), metrics(on)
+        all_off += off
+        all_on += on
+        rows.append({"id": e.id, "off": m0, "on": m1})
+        print(f"  {e.id[:46]:46} {m0['trades']:6d} {m0['win_rate']:5.0%} {m0['expectancy_r']:+7.3f}R"
+              f"   {m1['trades']:6d} {m1['win_rate']:5.0%} {m1['expectancy_r']:+7.3f}R", flush=True)
+    store.close()
+    m0, m1 = metrics(all_off), metrics(all_on)
+    print("\n=== Summary: all strategies together, after fees ===")
+    print(f"  Layer OFF: {m0['trades']} trades, WIN {m0['win_rate']:.1%}, {m0['expectancy_r']:+.3f}R per trade, "
+          f"total {m0['total_r']:+.1f}R")
+    print(f"  Layer ON : {m1['trades']} trades, WIN {m1['win_rate']:.1%}, {m1['expectancy_r']:+.3f}R per trade, "
+          f"total {m1['total_r']:+.1f}R")
+    out = args.out.replace(".json", f"_{args.months}m.json")
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    with open(out, "w") as fh:
+        json.dump({"pairs": pairs, "months": args.months, "start": start, "end": end, "strategies": rows,
+                   "off": m0, "on": m1}, fh, indent=1, default=str)
+    print(f"\nsaved to {out} (nothing changed; nothing traded)")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--market", choices=["spot", "futures"], default="futures")
@@ -170,7 +233,11 @@ def main() -> int:
     ap.add_argument("--no-ml", action="store_true")
     ap.add_argument("--registry", default="data/learn/registry.json")
     ap.add_argument("--out", default="data/reports/mfi_gate_test.json")
+    ap.add_argument("--symbol", help="only this pair, e.g. BTC/USDT (with --months: a plain backtest of that period)")
+    ap.add_argument("--months", type=int, default=0, help="backtest only the last N months (e.g. 6)")
     args = ap.parse_args()
+    if args.months:
+        return recent(args)
 
     s = Settings.from_env()
     cfg = BacktestConfig(taker_fee=s.paper_taker_fee, maker_fee=s.paper_maker_fee,
