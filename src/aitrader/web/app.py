@@ -395,6 +395,11 @@ after {_e(window.split(" to ")[1])}; the next one waits for the next night.</p>
     add_factory_routes(app, page=page, guard=guard, auth=auth, paths=paths,
                        csrf=lambda token: _csrf(auth, token), jobs=jobs)
 
+    from .backtest_pages import add_backtest_routes
+
+    add_backtest_routes(app, settings=settings, page=page, guard=guard, auth=auth, paths=paths,
+                        csrf=lambda token: _csrf(auth, token), jobs=jobs)
+
     from .controls_pages import add_controls_routes
 
     add_controls_routes(app, settings=settings, page=page, guard=guard, auth=auth, paths=paths,
@@ -1098,6 +1103,7 @@ NAV = [("/", "Overview"), ("/markets", "Markets"), ("/pairs", "Pairs"), ("/tradi
        ("/replay", "Replay"), ("/learning/spot", "Spot AI learning"), ("/learning/futures", "Futures AI learning"),
        ("/teacher", "Teacher"),
        ("/factory", "Strategy Factory"), ("/evolution", "Evolution Lab"), ("/arena", "Strategy Arena"),
+       ("/backtest", "Backtest"),
        ("/news", "News"), ("/research", "Research"), ("/reports", "Reports"), ("/books", "Submit a book"), ("/changes", "Change requests"), ("/admin/users", "Users"),
        ("/settings", "Settings")]
 

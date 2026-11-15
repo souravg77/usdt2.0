@@ -985,6 +985,46 @@ def cmd_learn(s: Settings, args) -> int:
         print(report_text(rep))
         print(f"report saved to {path}")
         return 0
+    if cmd == "backtest-select":
+        from .learn import select
+
+        market = args.market
+        ids = [i.strip() for i in args.ids.split(",") if i.strip()][:select.MAX_STRATEGIES]
+        entries = []
+        for i in ids:
+            try:
+                entries.append(reg.get(i))
+            except KeyError:
+                print(f"  no strategy {i}; left out", file=sys.stderr)
+        if not entries:
+            print("no strategies to test", file=sys.stderr)
+            return 1
+        store, pairs, costs = _engine_market(s, market, symbols, cfg)
+        want = [p.strip() for p in args.pairs.split(",") if p.strip()]
+        pairs = [p for p in want if p in pairs] if want else list(pairs)
+        if not pairs:
+            print("none of those pairs has candles for this engine", file=sys.stderr)
+            store.close()
+            return 1
+        try:
+            start, end = select.period(args.months, args.start, args.end)
+        except ValueError as exc:
+            print(f"bad period: {exc}", file=sys.stderr)
+            store.close()
+            return 1
+        print(f"{'Futures AI (perpetual candles)' if market == 'futures' else 'Spot AI (spot candles)'}: "
+              f"{len(entries)} strategies on {len(pairs)} pairs", flush=True)
+        try:
+            rep = select.run_selected(entries, store, (args.exchange or EXCHANGES)[0], pairs, start, end, costs,
+                                      progress=lambda t: print(f"  {t}", flush=True))
+        finally:
+            store.close()
+        rep.update({"engine": "Futures AI" if market == "futures" else "Spot AI", "market": market,
+                    "made": time.time()})
+        print(select.text(rep))
+        if args.out:
+            print(f"saved to {select.save(rep, args.out)}")
+        return 0
     if cmd == "list":
         if not reg.entries:
             print("no strategies yet")
@@ -2131,6 +2171,15 @@ def build_parser() -> argparse.ArgumentParser:
     lrp.add_argument("--years", type=int, default=5)
     lrp.add_argument("--out", default="data/reports/backtest.json")
     lrp.add_argument("--no-builtins", action="store_true", help="leave out the hand-coded strategies")
+    lbs = le_sub.add_parser("backtest-select", help="backtest the strategies you pick over a period you pick "
+                            "(the dashboard's Backtest page); reports only, nothing moves or trades")
+    lbs.add_argument("--ids", required=True, help="strategy ids, comma separated")
+    lbs.add_argument("--market", choices=["spot", "futures"], default="spot")
+    lbs.add_argument("--pairs", default="", help="pairs, comma separated (default: every pair of that engine)")
+    lbs.add_argument("--months", type=int, default=6, help="the last N months (unless --start is given)")
+    lbs.add_argument("--start", default="", help="first day, YYYY-MM-DD")
+    lbs.add_argument("--end", default="", help="last day, YYYY-MM-DD (default: now)")
+    lbs.add_argument("--out", default="", help="save the report here (JSON)")
     le_sub.add_parser("list", help="every strategy with its status and results")
     ls = le_sub.add_parser("show", help="full rules, sources and results of one strategy")
     ls.add_argument("id")

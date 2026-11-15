@@ -84,7 +84,21 @@ pages can move a strategy to paper or live by hand.
 - **Strategy Arena** (`/arena`): up to four strategies side by side (`/arena?ids=a,b,c`; by
   default the four best by out-of-sample result): status, out-of-sample trades, R per trade, t,
   win rate, profit factor, drawdown, walk-forward, Monte Carlo, holdout, luck bar, stress test,
-  paper results and why rejected.
+  paper results and why rejected. **Backtest these** opens the Backtest page with them ticked.
+
+## Backtest page
+
+**Backtest** (`/backtest`) runs a backtest of the strategies you tick, on the pairs you tick, over
+the last 1–36 months or between two dates, for the engine the dashboard is showing. Spot AI tests
+long strategies on spot candles; Futures AI tests its long and short strategies on the perpetuals'
+own candles with perp fees and funding. "All strategies paper trading now" ticks those at once (up
+to 60 per run). It runs as a background job (`aitrader learn backtest-select --market --ids
+--pairs --months|--start --end --out`); each strategy sees its whole stored history before the
+period (indicators, ML training), and only trades that open inside the period count. The result
+shows, per strategy and all together, trades, win rate, R per trade, total R, profit factor,
+worst drop and t, with a per-pair breakdown; the last 20 runs per engine are kept in
+`data/reports/selected/`. It is a report only: no strategy moves on the ladder, its own test
+results are not changed, and nothing trades.
 
 ## Monitor page
 
