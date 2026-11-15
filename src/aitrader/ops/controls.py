@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import subprocess
 import sys
@@ -70,8 +71,9 @@ def _clean_auto(a: dict) -> dict:
     except (TypeError, ValueError):
         pass
     try:
-        out["every_hours"] = float(min(max(float(a.get("every_hours", out["every_hours"])), AUTO_HOURS[0]),
-                                       AUTO_HOURS[1]))
+        hours = float(a.get("every_hours", out["every_hours"]))
+        if math.isfinite(hours):  # NaN would make the schedule never come due
+            out["every_hours"] = float(min(max(hours, AUTO_HOURS[0]), AUTO_HOURS[1]))
     except (TypeError, ValueError):
         pass
     tfs = a.get("timeframes", out["timeframes"])

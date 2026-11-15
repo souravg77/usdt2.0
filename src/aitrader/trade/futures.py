@@ -43,8 +43,11 @@ def clamp_leverage(value: float) -> float:
 
 def clamp_paper_leverage(value: float, coin_max: float | None = None) -> float:
     """A paper leverage choice, 1x up to Bybit's 100x and to the coin's own maximum when known."""
+    value = float(value)
+    if not math.isfinite(value):  # "nan" or "inf" typed in a form would size every trade as NaN
+        raise ValueError("leverage must be a number")
     top = min(PAPER_MAX_LEVERAGE, coin_max) if coin_max else PAPER_MAX_LEVERAGE
-    return min(max(float(value), 1.0), top)
+    return min(max(value, 1.0), top)
 
 
 def perp_symbol(symbol: str) -> str:

@@ -236,6 +236,23 @@ def test_executor_mirrors_paper_entry_and_exit(ex):
     assert "trade_open" in kinds and "trade_close" in kinds
 
 
+def test_executor_waits_for_papers_limit_entry_to_fill(ex):
+    make, adapter, paper, _events = ex
+    waiting = {**_pos(SIG), "maker_entry": True, "filled": False}
+    _paper(paper, {KEY: waiting})
+    e = make()
+    out = run(e.tick())
+    assert out["opened"] == [] and not adapter.sent and not e.state["skipped"]
+    # paper's limit never filled and it dropped the trade: nothing was bought, nothing to sell
+    _paper(paper, {})
+    run(e.tick())
+    assert not adapter.sent and not e.state["positions"]
+    # a limit that did fill is mirrored
+    _paper(paper, {KEY: {**waiting, "filled": True}})
+    out = run(e.tick())
+    assert out["opened"] == [KEY] and len(adapter.sent) == 1
+
+
 def test_executor_exits_at_stop_from_live_price(ex):
     make, adapter, *_ = ex
     e = make()

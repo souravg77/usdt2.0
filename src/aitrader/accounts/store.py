@@ -17,6 +17,7 @@ import base64
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import secrets
@@ -223,7 +224,7 @@ class UserStore:
                 raise AccountError("the admin hasn't allowed live trading for this account")
             if not self.key_info(user_id, EXCHANGE, testnet=False):
                 raise AccountError("connect and verify your real-account API key first")
-            if not pilot_max_usdt or pilot_max_usdt <= 0:
+            if not pilot_max_usdt or not math.isfinite(pilot_max_usdt) or pilot_max_usdt <= 0:
                 raise AccountError("set the most USDT the agent may use (your pilot budget)")
         with self.conn:
             self.conn.execute("UPDATE users SET mode=?, pilot_max_usdt=COALESCE(?, pilot_max_usdt) WHERE id=?",
