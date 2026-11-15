@@ -375,4 +375,6 @@ def add_factory_routes(app, *, page, guard, auth, paths, csrf, jobs, clock=time.
         body = "".join(f"<tr><td>{_e(name)}</td>" + "".join(f"<td>{cell(e, f)}</td>" for e in chosen) + "</tr>"
                        for name, f in metrics_rows)
         parts.append(f"<table><tr><th></th>{head}</tr>{body}</table>")
+        q = urllib.parse.quote(",".join(e.id for e in chosen))
+        parts.append(f'<p><a href="/backtest?ids={q}">Backtest these over a period you choose</a></p>')
         return page("Strategy Arena", "".join(parts), user, token, refresh=None)
