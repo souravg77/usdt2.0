@@ -39,7 +39,8 @@ import time
 
 from ..backtest import BacktestConfig, metrics, run_backtest, split_periods
 from ..indicators import candles_to_frame
-from .lab import MIN_BARS, evaluate, with_context
+from . import luck
+from .lab import MIN_BARS, Gate, evaluate, with_context
 from .registry import Entry, Registry, builtin_name, make_strategy
 
 log = logging.getLogger(__name__)
@@ -112,6 +113,15 @@ def with_settings(entry: Entry, settings: dict) -> Entry:
         if spec.get(part) is not None:
             spec[part][field_] = value
     return Entry(id=entry.id, kind=entry.kind, name=entry.name, spec=spec, source=entry.source)
+
+
+def mark_improved(candidate: Entry, parent_id: str) -> None:
+    """A factory strategy's genome describes its old numbers: the improved copy keeps its family
+    (for the luck bar) but no genome, so evolution never breeds from rules it doesn't have."""
+    spec = candidate.spec or {}
+    if spec.get("lineage"):
+        lin = {k: v for k, v in spec["lineage"].items() if k != "genome"}
+        spec["lineage"] = {**lin, "op": "improved", "parents": [parent_id]}
 
 
 def _score(m: dict) -> float:
@@ -212,6 +222,7 @@ def improve_one(entry: Entry, reg: Registry, markets: Markets, cfg: BacktestConf
         return out
     out["changes"] = {k: [current[k], v] for k, v in found["settings"].items()}
     candidate = with_settings(entry, found["settings"])
+    mark_improved(candidate, entry.id)
     before, after = markets.run(entry, 1, cfg), markets.run(candidate, 1, cfg)
     out["out_of_sample"] = {"before": _m(before), "after": _m(after)}
     if after["trades"] < MIN_TRADES or after["expectancy_r"] <= 0 or \
@@ -227,7 +238,8 @@ def improve_one(entry: Entry, reg: Registry, markets: Markets, cfg: BacktestConf
     if new.id in reg.entries:
         out["outcome"] = f"this improvement was already found before ({new.id})"
         return out
-    evaluate(new, markets.store, exchanges, symbols, cfg)
+    # a machine-made strategy meets the luck bar for every family tried, as in `learn test`
+    evaluate(new, markets.store, exchanges, symbols, cfg, gate=Gate(machine_trials=luck.families(reg.entries.values())))
     out["new_id"] = new.id
     if new.status != "paper":
         out["outcome"] = "failed the full backtest gate: " + "; ".join(new.backtest.get("failed", []))[:300]

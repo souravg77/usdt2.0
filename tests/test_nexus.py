@@ -253,3 +253,32 @@ def test_evolution_lab_and_arena_show_real_registry_numbers(tmp_path, monkeypatc
     assert "2.24" in arena and "passed" in arena
     one = client.get(f"/arena?ids={b.id}").text
     assert b.id in one and a.id not in one.split("<table>")[1]
+
+
+def test_an_improved_factory_strategy_keeps_its_family_but_not_a_stale_genome():
+    from aitrader.learn.improve import with_settings
+
+    reg = Registry("unused/registry.json")
+    (e,) = factory.generate(reg, 1, seed=12)
+    from aitrader.learn.improve import mark_improved
+
+    copy_ = with_settings(e, {"target.r": 5.0} if e.spec.get("target") else {"exit.time_stop_bars": 7})
+    mark_improved(copy_, e.id)
+    lin = copy_.spec["lineage"]
+    assert "genome" not in lin and lin["family"] == e.spec["lineage"]["family"]
+    assert lin["op"] == "improved" and lin["parents"] == [e.id]
+    assert e.spec["lineage"]["genome"]  # the original keeps its own
+    reg.add(type(e)(id=e.id + "~x", kind="rule", name=e.name, spec=copy_.spec))
+    _tested(reg.entries[e.id + "~x"], 0.5, 0.1)
+    assert all(p.id != e.id + "~x" for p, _f in evolve.parents(reg))  # never bred from
+    assert luck.families(reg.entries.values()) == 1  # still one family
+
+
+def test_newest_table_cuts_text_before_escaping(tmp_path, monkeypatch):
+    client, _csrf, paths, _sub = _web(tmp_path, monkeypatch)
+    reg = Registry(paths.registry)
+    (e,) = factory.generate(reg, 1, seed=13)
+    e.backtest = {"failed": ["&" * 300]}
+    reg.save()
+    page = client.get("/factory").text
+    assert "&amp;" * 240 in page and "&am<" not in page and "&a</td>" not in page

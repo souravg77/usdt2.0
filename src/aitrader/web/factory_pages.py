@@ -174,7 +174,7 @@ def add_factory_routes(app, *, page, guard, auth, paths, csrf, jobs, clock=time.
                 f'<tr><td>{_link(e.id)}</td><td>{_e(e.kind)}</td>'
                 f'<td>{luck.lineage_of(e.spec).get("generation", 0)}</td><td>{_status(e.status)}</td>'
                 f'<td>{_oos(e).get("trades", "–")}</td><td>{_r(_oos(e).get("expectancy_r"))}</td>'
-                f'<td class="small">{_e(_why(e))[:240]}</td></tr>' for e in recent)
+                f'<td class="small">{_e(_why(e)[:240])}</td></tr>' for e in recent)
             parts.append('<h2>Newest</h2><table><tr><th>Strategy</th><th>Side</th><th>Gen</th><th>Status</th>'
                          '<th>OOS trades</th><th>OOS per trade</th><th>Why rejected</th></tr>' + rows + '</table>')
         return page("Strategy Factory", "".join(parts), user, token, refresh=60 if busy else None)
