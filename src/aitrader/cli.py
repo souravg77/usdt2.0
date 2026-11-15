@@ -820,6 +820,7 @@ def cmd_learn(s: Settings, args) -> int:
         return 0
     if cmd in ("factory", "evolve"):
         from .learn import evolve, factory, luck
+        from .learn.picks import learns_for
 
         tfs = [t.strip() for t in args.timeframes.split(",") if t.strip()] if args.timeframes else list(factory.TIMEFRAMES)
         bad = [t for t in tfs if t not in factory.TIMEFRAMES]
@@ -827,16 +828,17 @@ def cmd_learn(s: Settings, args) -> int:
             print(f"timeframes {bad} not allowed; use {', '.join(factory.TIMEFRAMES)}", file=sys.stderr)
             return 2
         if cmd == "factory":
-            added = factory.generate(reg, args.n, seed=args.seed, timeframes=tfs, shorts=args.shorts)
+            added = factory.generate(reg, args.n, seed=args.seed, timeframes=tfs, shorts=args.shorts,
+                                     engine=args.engine or "")
         else:
-            pool = evolve.parents(reg, args.top)
+            pool = evolve.parents(reg, args.top, args.engine or "")
             if len(pool) < 2:
                 print(f"evolution needs at least 2 factory strategies with {evolve.MIN_TRADES}+ in-sample trades "
                       f"and a positive in-sample result; {len(pool)} qualify. Run `learn factory` and `learn test` first.")
                 return 0
             print(f"{len(pool)} parents, best in-sample {pool[0][1]:+.3f}R per trade ({pool[0][0].id})")
             added = evolve.breed(reg, args.n, seed=args.seed, crossover_share=args.crossover, shorts=args.shorts,
-                                 top=args.top, timeframes=tfs)
+                                 top=args.top, timeframes=tfs, engine=args.engine or "")
         reg.save()
         n_fam = luck.families(reg.entries.values())
         for e in added:
@@ -848,7 +850,16 @@ def cmd_learn(s: Settings, args) -> int:
         print(f"{len(added)} new strategies at RESEARCH -> {args.registry}")
         print(f"{n_fam} strategy families tried so far: a machine-made strategy now needs an out-of-sample "
               f"t of at least {luck.required_t(n_fam):.2f} (book strategies: 2.00)")
-        print("test them with `aitrader learn test` (add `--market futures` for the short twins)")
+        if args.test and added:
+            # each engine backtests only what it owns, on its own candles and pairs: Spot AI on
+            # spot, Futures AI on the perpetuals (``_engine_market``); never the other's
+            for mkt in ([args.engine] if args.engine else ["spot", "futures"]):
+                mine = [e for e in added if learns_for(e, mkt)]
+                if mine:
+                    run_tests(mine, market=mkt)
+        elif added:
+            print("test them with " + (f"`aitrader learn test --market {args.engine}`" if args.engine else
+                                       "`aitrader learn test` (add `--market futures` for the short twins)"))
         return 0
     if cmd == "auto":
         from .ops import controls
@@ -2075,6 +2086,9 @@ def build_parser() -> argparse.ArgumentParser:
     lfa.add_argument("--seed", type=int, help="random seed, to repeat a run")
     lfa.add_argument("--timeframes", help="comma separated, from 15m,30m,1h,4h (default all four)")
     lfa.add_argument("--shorts", action="store_true", help="also add each one's short twin for Futures AI")
+    lfa.add_argument("--engine", choices=["spot", "futures"],
+                     help="make them this engine's alone: tested and traded only on its own pairs and candles")
+    lfa.add_argument("--test", action="store_true", help="backtest them straight away, each on its own engine")
     lev = le_sub.add_parser("evolve", help="breed N children (mutation and crossover) from the factory strategies "
                                            "with the best in-sample results")
     lev.add_argument("--n", type=int, default=20, help="how many children (default 20)")
@@ -2083,6 +2097,9 @@ def build_parser() -> argparse.ArgumentParser:
     lev.add_argument("--crossover", type=float, default=0.5, help="share made by crossover, the rest by mutation")
     lev.add_argument("--timeframes", help="timeframes a mutation may move to (default 15m,30m,1h,4h)")
     lev.add_argument("--shorts", action="store_true", help="also add each child's short twin")
+    lev.add_argument("--engine", choices=["spot", "futures"],
+                     help="breed only from this engine's own strategies; the children are its alone")
+    lev.add_argument("--test", action="store_true", help="backtest the children straight away, each on its own engine")
     lau = le_sub.add_parser("auto", help="automatic strategy generation and evolution as set on the Controls page; "
                                          "with --run, keep checking and run when due")
     lau.add_argument("--run", action="store_true")

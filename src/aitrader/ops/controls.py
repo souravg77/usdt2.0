@@ -38,8 +38,10 @@ log = logging.getLogger(__name__)
 
 DEFAULT_PATH = "data/settings/controls.json"
 TIMEFRAMES = ("15m", "30m", "1h", "4h")  # what the factory can build on (learn.factory.TIMEFRAMES)
+ENGINES = ("spot", "futures")
 AUTO_DEFAULTS = {"generate": False, "evolve": False, "n": 20, "timeframes": list(TIMEFRAMES),
-                 "shorts": True, "every_hours": 24.0, "last_run": 0.0, "last_result": ""}
+                 "shorts": True, "every_hours": 24.0, "last_run": 0.0, "last_result": "",
+                 "engines": list(ENGINES)}
 AUTO_N = (1, 100)
 AUTO_HOURS = (1.0, 168.0)
 
@@ -80,6 +82,10 @@ def _clean_auto(a: dict) -> dict:
     if isinstance(tfs, str):
         tfs = tfs.split(",")
     out["timeframes"] = [t for t in TIMEFRAMES if isinstance(tfs, (list, tuple)) and t in tfs] or list(TIMEFRAMES)
+    engs = a.get("engines", out["engines"])
+    if isinstance(engs, str):
+        engs = engs.split(",")
+    out["engines"] = [x for x in ENGINES if isinstance(engs, (list, tuple)) and x in engs] or list(ENGINES)
     for k in ("last_run",):
         try:
             out[k] = float(a.get(k, 0) or 0)
@@ -178,18 +184,17 @@ def due(auto: dict, now: float) -> bool:
 
 
 def steps(auto: dict) -> list[list[str]]:
-    """The ``aitrader`` commands one automatic run makes."""
+    """The ``aitrader`` commands one automatic run makes: for each chosen engine, its own factory
+    and/or evolution run, backtested on that engine's own pairs and candles only (``--engine
+    --test``). Spot AI's strategies never see perpetual data and Futures AI's never see spot."""
     out = []
     tfs = ",".join(auto["timeframes"])
-    shorts = ["--shorts"] if auto["shorts"] else []
-    if auto["generate"]:
-        out.append(["learn", "factory", "--n", str(auto["n"]), "--timeframes", tfs, *shorts])
-    if auto["evolve"]:
-        out.append(["learn", "evolve", "--n", str(auto["n"]), "--timeframes", tfs, *shorts])
-    if out:
-        out.append(["learn", "test"])
-        if auto["shorts"]:
-            out.append(["learn", "test", "--market", "futures"])
+    for eng in auto["engines"]:
+        flags = ["--engine", eng, *(["--shorts"] if auto["shorts"] and eng == "futures" else []), "--test"]
+        if auto["generate"]:
+            out.append(["learn", "factory", "--n", str(auto["n"]), "--timeframes", tfs, *flags])
+        if auto["evolve"]:
+            out.append(["learn", "evolve", "--n", str(auto["n"]), "--timeframes", tfs, *flags])
     return out
 
 

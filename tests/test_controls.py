@@ -54,9 +54,12 @@ def test_auto_runs_only_when_on_and_due(tmp_path):
     controls.save(path, {"auto": {"generate": True, "evolve": True, "n": 7, "timeframes": ["1h", "4h"],
                                   "every_hours": 12}}, by="me")
     text = controls.run_auto(path, now=lambda: 1e9, runner=runner)
-    assert ran == [["learn", "factory", "--n", "7", "--timeframes", "1h,4h", "--shorts"],
-                   ["learn", "evolve", "--n", "7", "--timeframes", "1h,4h", "--shorts"],
-                   ["learn", "test"], ["learn", "test", "--market", "futures"]]
+    # each engine builds and tests on its own candles; only Futures AI gets short twins
+    assert ran == [["learn", "factory", "--n", "7", "--timeframes", "1h,4h", "--engine", "spot", "--test"],
+                   ["learn", "evolve", "--n", "7", "--timeframes", "1h,4h", "--engine", "spot", "--test"],
+                   ["learn", "factory", "--n", "7", "--timeframes", "1h,4h", "--engine", "futures", "--shorts", "--test"],
+                   ["learn", "evolve", "--n", "7", "--timeframes", "1h,4h", "--engine", "futures", "--shorts", "--test"]]
+    assert not any(step[:2] == ["learn", "test"] for step in ran)  # never a mixed, all-strategies test
     assert "ok" in text and controls.load(path)["auto"]["last_result"] == text
     assert controls.run_auto(path, now=lambda: 1e9 + 3600, runner=runner) == ""  # not due for 12 h
     failing = controls.run_auto(path, now=lambda: 1e9 + 13 * 3600, runner=lambda cmd: 2)
@@ -123,8 +126,12 @@ def test_controls_page_saves_every_control(tmp_path, monkeypatch):
 
     r = client.post("/controls/auto", data={"csrf": csrf, "generate": "1", "n": "15", "every_hours": "24",
                                             "timeframes": ["1h"]}, follow_redirects=True)
+    assert "pick Spot AI, Futures AI or both" in r.text
+    r = client.post("/controls/auto", data={"csrf": csrf, "generate": "1", "n": "15", "every_hours": "24",
+                                            "timeframes": ["1h"], "engines": ["futures"]}, follow_redirects=True)
     a = controls.load(paths.controls)["auto"]
     assert a["generate"] and not a["evolve"] and not a["shorts"] and a["n"] == 15 and a["timeframes"] == ["1h"]
+    assert a["engines"] == ["futures"]
     assert "Automatic generation on: 15 candidates every 24 h" in r.text
 
 

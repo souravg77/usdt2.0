@@ -8,6 +8,18 @@ order or changes the live lock. Every new strategy starts at RESEARCH on the
 
 Code: `src/aitrader/learn/factory.py`, `evolve.py`, `luck.py`, `stress.py`.
 
+## Spot AI and Futures AI are kept apart
+
+Every factory or evolution run belongs to one engine (`--engine spot` or `--engine futures`, and on
+the dashboard, the engine you are viewing). Its strategies carry `"engine"` in their spec, and
+their ids start with `spot-` or `fut-`. The other engine never backtests, ranks or paper-trades
+them. `--test` backtests them straight away on that engine's own data only: Spot AI on spot pairs
+and candles, Futures AI on the perpetuals' own database and pairs, with perp fees and funding.
+Evolution breeds an engine only from its own strategies. Spot AI never shorts, so a Spot run makes
+no short twins. Automation (Controls page) runs each chosen engine separately.
+
+Factory strategies made before this split have no engine and stay shared.
+
 ## 1. Strategy Factory (`aitrader learn factory`)
 
 The factory writes rule strategies from building blocks the [rule language](learning.md) already has.
@@ -29,9 +41,8 @@ factory can only write what the safe rule language allows: long entries with a s
 trades them short through their short twins (`--shorts`).
 
 ```bash
-aitrader learn factory --n 20 --timeframes 1h,4h --shorts
-aitrader learn test                      # Spot AI
-aitrader learn test --market futures     # the short twins
+aitrader learn factory --n 20 --timeframes 1h,4h --engine futures --shorts --test
+aitrader learn factory --n 20 --timeframes 1h,4h --engine spot --test
 ```
 
 At most 2 strategies of one family are made, so one lucky idea can't fill the list.
@@ -49,8 +60,7 @@ would be fitted to the data that is meant to judge them.
 Children record their parents, how they were made and their generation. Parents are never changed.
 
 ```bash
-aitrader learn evolve --n 20 --shorts
-aitrader learn test
+aitrader learn evolve --n 20 --engine futures --shorts --test
 aitrader learn lineage <id>              # the family tree
 ```
 

@@ -113,9 +113,19 @@ def trades_now(entry: Entry, only_winners: bool, market: str | None = None, kept
     "Keep only the best" ranking (``kept``, its ids; None before its first ranking) kept it."""
     if market and picked_for(entry) and pick_market(entry) != market:
         return False
+    if market and owner(entry) and owner(entry) != market:  # a factory strategy made for one engine
+        return False
     if market and not picked_for(entry) and kept is not None and entry.id not in kept:
         return False
     return not only_winners or bool(picked_for(entry))
+
+
+def owner(entry: Entry) -> str:
+    """The engine a strategy belongs to alone ("spot" or "futures"), or "" when both may use it.
+    Set by the Strategy Factory (``spec["engine"]``); a short twin carries its long's."""
+    spec = entry.spec or {}
+    e = spec.get("engine") or (spec.get("base_spec") or {}).get("engine") or ""
+    return e if e in ("spot", "futures") else ""
 
 
 def learns_for(entry: Entry, market: str) -> bool:
@@ -125,6 +135,8 @@ def learns_for(entry: Entry, market: str) -> bool:
     base = spec.get("base_spec") or {}
     if market == "spot" and entry.kind == "short":
         return False
+    if owner(entry):  # the Strategy Factory made it for one engine: the other never tests or trades it
+        return owner(entry) == market
     if spec.get("pick") or base.get("pick"):
         made_for = "futures" if (spec.get("pick_market") or base.get("pick_market")) == "futures" else "spot"
         return made_for == market
