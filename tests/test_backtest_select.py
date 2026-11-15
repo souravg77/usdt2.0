@@ -327,3 +327,32 @@ def test_win_strategies_added_from_a_backtest_can_be_removed(tmp_path, monkeypat
     assert cur["picked"] == ["kept"] and [r["id"] for r in cur["results"]] == ["kept"]
     assert Registry(paths.registry).get("win1h-up").status == "retired"
     assert "you added from a backtest" not in client.get("/backtest").text
+
+
+def test_the_backtest_can_download_the_missing_candles_first(tmp_path, monkeypatch):
+    client, csrf, paths, submitted = _web(tmp_path, monkeypatch)
+    _entries(paths.registry)
+    page = client.get("/backtest").text
+    assert 'name="fetch" value="1" checked' in page
+    r = client.post("/backtest/run", data={"csrf": csrf, "ids": ["up", "other"], "pairs": ["BTC/USDT", "ETH/USDT"],
+                                           "start": "2026-05-01", "end": "2026-05-31", "fetch": "1"},
+                    follow_redirects=True)
+    assert "Downloading the missing 1h candles from Bybit first" in r.text
+    steps, meta = submitted[-1]
+    assert meta["kind"] == "backtest" and len(steps) == 2  # one timeframe: one download, then the backtest
+    dl = steps[0]
+    assert dl[0] == "download" and dl[dl.index("--timeframe") + 1] == "1h" and dl[dl.index("--market") + 1] == "spot"
+    assert dl[dl.index("--since") + 1] == "2026-04-18"  # 300 hours of warm-up before May 1
+    assert dl[dl.index("--until") + 1] == "2026-06-01"
+    assert [dl[i + 1] for i, a in enumerate(dl) if a == "--symbol"] == ["BTC/USDT", "ETH/USDT"]
+    assert steps[1][:2] == ["learn", "backtest-select"]
+
+
+def test_the_log_says_when_the_candles_start_inside_the_period():
+    m = {"trades": 4, "win_rate": 0.75, "expectancy_r": 1.18, "total_r": 4.7, "profit_factor": 5.5,
+         "max_drawdown_r": 1.0, "t_stat": 1.3}
+    rep = {"engine": "Futures AI", "start": 0, "end": 700 * DAY, "pairs": ["BTC/USDT"],
+           "strategies": [{"id": "x" * 70, **m, "tested_from": {"BTC/USDT 15m": 690 * DAY}}], "total": m}
+    out = select.text(rep)
+    assert "NOTE: on 1 pair/timeframes the stored candles start after the period began" in out
+    assert "x" * 60 in out

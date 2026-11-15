@@ -97,7 +97,10 @@ to 60 per run). It runs as a background job (`aitrader learn backtest-select --m
 period (indicators, ML training), and only trades that open inside the period count. The result
 shows, per strategy and all together, trades, win rate, R per trade, total R, profit factor,
 worst drop and t, with a per-pair breakdown; the last 20 runs per engine are kept in
-`data/reports/selected/`. It is a report only: no strategy moves on the ladder, its own test
+`data/reports/selected/`. "Download the missing candles for this period from Bybit first" (ticked
+by default) first runs `aitrader download` for each timeframe the strategies use, from far enough
+back for the indicators to warm up: the collector keeps only recent days of 5m, 15m and 30m, so
+without it a long period on those timeframes tests only those days. It is a report only: no strategy moves on the ladder, its own test
 results are not changed, and nothing trades.
 
 The result also draws each strategy's running total in R (and all of them together), lists every

@@ -48,9 +48,13 @@ def _oos(e, market: str) -> dict:
     return bt.get("out_of_sample") or {}
 
 
-def _tfs(e) -> str:
+def _tf_list(e) -> list[str]:
     spec = e.spec or {}
-    return ", ".join(spec.get("timeframes") or (spec.get("base_spec") or {}).get("timeframes") or [])
+    return list(spec.get("timeframes") or (spec.get("base_spec") or {}).get("timeframes") or [])
+
+
+def _tfs(e) -> str:
+    return ", ".join(_tf_list(e))
 
 
 def candidates(reg: Registry, market: str) -> list:
@@ -135,9 +139,10 @@ def add_backtest_routes(app, *, settings, page, guard, auth, paths, csrf, jobs):
         parts = [f"{tf}: {len(v)} pairs, from {time.strftime(fmt, time.gmtime(min(v) / 1000))} at the earliest, "
                  f"{time.strftime(fmt, time.gmtime(max(v) / 1000))} at the latest"
                  for tf, v in sorted(by_tf.items(), key=lambda kv: _tf_order(kv[0]))]
-        return ('<p class="bad small"><b>Not the whole period:</b> this server\'s stored candles start after the '
+        return ('<div class="card"><p class="bad small"><b>Not the whole period:</b> this server\'s stored candles start after the '
                 'period began, so trades before then could not be tested and a longer period gives the same '
-                f'result. {_e("; ".join(parts))}. Each pair also needs {select.MIN_BARS} candles to warm up first.</p>')
+                f'result. {_e("; ".join(parts))}. Each pair also needs {select.MIN_BARS} candles to warm up first. Run it again with "Download the missing '
+                'candles" ticked to test the whole period.</p></div>')
 
     def _downloads(run_name: str) -> str:
         if not run_name:
@@ -145,8 +150,8 @@ def add_backtest_routes(app, *, settings, page, guard, auth, paths, csrf, jobs):
         q = urllib.parse.quote(run_name)
         links = [("trades.csv", "Trades (CSV)"), ("summary.csv", "Summary (CSV)"), ("chart.svg", "Chart (SVG image)"),
                  ("report.json", "Full report (JSON)")]
-        return ('<p class="small">Download: ' + " · ".join(
-            f'<a href="/backtest/download?run={q}&amp;what={w}" download>{t}</a>' for w, t in links) + '</p>')
+        return ('<div class="card"><p>Download: ' + " · ".join(
+            f'<a href="/backtest/download?run={q}&amp;what={w}" download>{t}</a>' for w, t in links) + '</p></div>')
 
     def _chart(rep: dict) -> str:
         if not any("trade_list" in r for r in rep.get("strategies", [])):
@@ -188,7 +193,7 @@ def add_backtest_routes(app, *, settings, page, guard, auth, paths, csrf, jobs):
                 'A simulation on the real Bybit candles stored on this server: no order is placed. '
                 'Out of the period only trades that opened inside it count; after fees, slippage and (Futures) '
                 'funding. Fewer than 30 trades proves little either way.</p>'
-                + _coverage(rep) + _downloads(run_name) + '</div>' + _chart(rep) + _trade_list(rep))
+                + '</div>' + _coverage(rep) + _chart(rep) + _downloads(run_name) + _trade_list(rep))
 
         def line(name, m, extra="", tick=""):
             return (f'<tr><td>{tick}</td><td>{name}</td><td>{m.get("trades", 0)}</td><td>{m.get("win_rate", 0):.0%}</td>'
@@ -218,8 +223,8 @@ def add_backtest_routes(app, *, settings, page, guard, auth, paths, csrf, jobs):
         rows.append(line("<b>All together</b>", rep["total"]))
         table = ('<table><tr><th></th><th>Strategy</th><th>Trades</th><th>Win</th><th>Per trade</th><th>Total</th>'
                  '<th>Profit factor</th><th>Worst drop</th><th>t</th><th></th></tr>' + "".join(rows) + '</table>')
-        if not run_name:
-            return head + table
+        if not run_name or not any(r.get("trades") and not r.get("error") for r in rep["strategies"]):
+            return head + table  # nothing with trades to add to the WIN strategies
         have = [tf for tf, cur in picks.load(picks.picks_path(paths.registry, market)).items() if (cur or {}).get("results")]
         name = ENGINE_NAMES.get(market, "")
         lists = (f"{name} has WIN strategies on {', '.join(sorted(have, key=_tf_order))}"
@@ -298,7 +303,11 @@ def add_backtest_routes(app, *, settings, page, guard, auth, paths, csrf, jobs):
                 + '</div><div class="card"><h3>3. Period</h3>'
                 f'<p><select name="months">{month_opts}</select> or from '
                 '<input type="date" name="start"> to <input type="date" name="end"> '
-                '<span class="small muted">(dates win when given)</span></p></div>'
+                '<span class="small muted">(dates win when given)</span></p>'
+                '<p><label><input type="checkbox" name="fetch" value="1" checked> Download the missing candles for '
+                'this period from Bybit first</label><br><span class="small muted">The server keeps only recent '
+                'days of the short timeframes (5m, 15m, 30m), so without this a long period tests only those '
+                'days. Only candles that aren\'t stored yet are fetched.</span></p></div>'
                 + ('<button disabled>A backtest is already running</button>' if busy else '<button>Run backtest</button>')
                 + '</form>')
         parts.append(form)
@@ -346,9 +355,21 @@ def add_backtest_routes(app, *, settings, page, guard, auth, paths, csrf, jobs):
             months = 6
         months = months if months in MONTHS else 6
         try:
-            select.period(months, start, end)
+            begin_ms, end_ms = select.period(months, start, end)
         except ValueError as exc:
             return back(f"Bad period: {exc}.", ids)
+        fetch = []
+        if form.get("fetch"):  # first download the candles the period needs that aren't stored yet
+            from ..config import EXCHANGE
+            from ..models import TIMEFRAME_MS
+
+            tfs = sorted({tf for i in ids for tf in _tf_list(allowed[i]) if tf in TIMEFRAME_MS}, key=_tf_order)
+            sym_args = [a for p in pairs for a in ("--symbol", p)]
+            day = "%Y-%m-%d"
+            for tf in tfs:  # from far enough back for the indicators to warm up
+                since = time.strftime(day, time.gmtime((begin_ms - select.MIN_BARS * TIMEFRAME_MS[tf]) / 1000))
+                fetch.append(["download", "--since", since, "--until", time.strftime(day, time.gmtime(end_ms / 1000)),
+                              "--market", eng, "--exchange", EXCHANGE, "--timeframe", tf, *sym_args])
         os.makedirs(runs_dir, exist_ok=True)
         for old in _runs(eng)[KEEP_RUNS - 1:]:  # keep the newest runs only
             try:
@@ -364,9 +385,12 @@ def add_backtest_routes(app, *, settings, page, guard, auth, paths, csrf, jobs):
             step += ["--end", end]
         when = f"{start or '…'} to {end or 'now'}" if (start or end) else f"last {months} months"
         jobs.submit(f"Backtest ({ENGINE_NAMES[eng]}): {len(ids)} strategies, {len(pairs)} pairs, {when}",
-                    [step], meta={"kind": "backtest", "market": eng})
-        return back(f"Backtesting {len(ids)} strategies on {len(pairs)} pairs ({when}). The result appears below "
-                    "when it is done.")
+                    fetch + [step], meta={"kind": "backtest", "market": eng})
+        first = (f"Downloading the missing {', '.join(s[s.index('--timeframe') + 1] for s in fetch)} candles from "
+                 "Bybit first (only what isn't stored yet; long periods on short timeframes take a while), then "
+                 if fetch else "")
+        return back(f"{first}{'backtesting' if first else 'Backtesting'} {len(ids)} strategies on {len(pairs)} pairs ({when}). The result appears "
+                    "below when it is done.")
 
     @app.post("/backtest/add-win")
     async def backtest_add_win(request: Request):

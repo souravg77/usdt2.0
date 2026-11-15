@@ -152,11 +152,16 @@ def text(report: dict) -> str:
              f"{time.strftime(fmt, time.gmtime((report['end'] - 1) / 1000))} on {len(report['pairs'])} pairs, after fees"]
     for r in report["strategies"]:
         if r.get("error"):
-            lines.append(f"  {r['id'][:50]:50} could not run: {r['error']}")
+            lines.append(f"  {r['id'][:60]:60} could not run: {r['error']}")
             continue
-        lines.append(f"  {r['id'][:50]:50} trades={r['trades']:5d} win={r['win_rate']:.0%} "
+        lines.append(f"  {r['id'][:60]:60} trades={r['trades']:5d} win={r['win_rate']:.0%} "
                      f"avg={r['expectancy_r']:+.3f}R total={r['total_r']:+.1f}R maxDD={r['max_drawdown_r']:.1f}R")
+    late = {k: ts for r in report["strategies"] for k, ts in (r.get("tested_from") or {}).items()}
+    if late:
+        lines.append(f"  NOTE: on {len(late)} pair/timeframes the stored candles start after the period began "
+                     f"(latest start {time.strftime(fmt, time.gmtime(max(late.values()) / 1000))}), so only the "
+                     "time since then was tested. Tick 'Download the missing candles' to test the whole period.")
     t = report["total"]
-    lines.append(f"  {'ALL TOGETHER':50} trades={t['trades']:5d} win={t['win_rate']:.0%} "
+    lines.append(f"  {'ALL TOGETHER':60} trades={t['trades']:5d} win={t['win_rate']:.0%} "
                  f"avg={t['expectancy_r']:+.3f}R total={t['total_r']:+.1f}R maxDD={t['max_drawdown_r']:.1f}R")
     return "\n".join(lines)
