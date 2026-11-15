@@ -145,3 +145,12 @@ def test_nan_and_inf_are_refused_not_stored(tmp_path):
     assert wallet.paper_leverage(mpath) is None  # falls back to the default, never sizes with NaN
     c = controls.save(str(tmp_path / "c.json"), {"auto": {"every_hours": "nan", "generate": True}})
     assert c["auto"]["every_hours"] == controls.AUTO_DEFAULTS["every_hours"]
+
+
+def test_limits_with_a_bad_daily_loss_save_nothing(tmp_path, monkeypatch):
+    client, csrf, paths = _web(tmp_path, monkeypatch)
+    mpath = wallet.market_path(paths.paper_state)
+    before = wallet.paper_leverage(mpath)
+    r = client.post("/controls/limits", data={"csrf": csrf, "leverage": "7", "day_spot": "nan", "day_futures": "3"},
+                    follow_redirects=True)
+    assert "Not saved" in r.text and wallet.paper_leverage(mpath) == before  # the leverage wasn't half-saved

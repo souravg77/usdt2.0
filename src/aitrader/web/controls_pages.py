@@ -8,6 +8,7 @@ trading: the page shows the live lock and says how it is opened, at a terminal.
 from __future__ import annotations
 
 import html
+import math
 import time
 import urllib.parse
 
@@ -192,6 +193,8 @@ def add_controls_routes(app, *, settings, page, guard, auth, paths, csrf, clock=
                 days = {m: float(form.get(f"day_{m}", "")) for m in wallet.MARKETS}
             except ValueError:
                 raise ValueError("leverage and daily loss must be numbers") from None
+            if not all(math.isfinite(d) for d in days.values()):  # check everything before saving anything
+                raise ValueError("daily loss must be a number")
             wallet.set_leverage(mpath, lev, by=user)
             for m, d in days.items():
                 guards.save(gpath, m, {"day_pause_pct": d}, by=user)
