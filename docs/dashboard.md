@@ -100,6 +100,13 @@ worst drop and t, with a per-pair breakdown; the last 20 runs per engine are kep
 `data/reports/selected/`. It is a report only: no strategy moves on the ladder, its own test
 results are not changed, and nothing trades.
 
+The result also draws each strategy's running total in R (and all of them together), lists every
+trade (newest 200; the download has them all), and offers downloads: the trades and the summary as
+CSV, the chart as an SVG image and the whole report as JSON (`/backtest/download?run=&what=`). A
+backtest is a simulation on the Bybit candles stored on the server and places no order. When a
+pair's stored candles start after the period began, the result says so in red: nothing before
+then could be tested, so a longer period gives the same result until more history is downloaded.
+
 Under the result, tick strategies and press **Add the ticked ones to the WIN strategies** to make
 each one a WIN strategy of the engine you are viewing, on its own timeframe (`aitrader learn
 win-add --report --ids --market`). Only timeframes that already have WIN strategies (from Keep only
@@ -108,6 +115,12 @@ trading that timeframe; the others are refused with the reason. The WIN strategi
 stay, the backtest result is saved with the new one so it shows in the Trading page's tick list
 (where it can be unticked again), and a later Keep only the winners on that timeframe judges it
 again by its own rules.
+
+The WIN strategies added this way are listed at the top of the Backtest page (one list per engine)
+with tick boxes and **Remove the ticked ones from the WIN strategies** (`aitrader learn win-remove
+--items id:timeframe,...`): each removed one's WIN copy stops opening paper trades on the next scan
+(its open trades close normally) and it leaves that timeframe's pick. WIN strategies kept by Keep
+only the winners are not listed there; use the Trading page's tick list for those.
 
 ## Monitor page
 

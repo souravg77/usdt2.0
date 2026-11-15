@@ -17,11 +17,12 @@ import time
 import urllib.parse
 
 from fastapi import Request
-from fastapi.responses import PlainTextResponse, RedirectResponse
+from fastapi.responses import PlainTextResponse, RedirectResponse, Response
 
 from ..learn import picks, select, wallet
 from ..learn.picks import learns_for
 from ..learn.registry import Registry
+from . import backtest_chart
 
 ENGINE_NAMES = {"spot": "Spot AI", "futures": "Futures AI"}
 MONTHS = (1, 3, 6, 12, 24, 36)
@@ -98,6 +99,85 @@ def add_backtest_routes(app, *, settings, page, guard, auth, paths, csrf, jobs):
         except (OSError, ValueError):
             return None
 
+    def _added_list(market: str, token: str) -> str:
+        """This engine's WIN strategies that were added from a backtest, with tick boxes to remove them."""
+        added = picks.added_from_backtests(picks.load(picks.picks_path(paths.registry, market)))
+        if not added:
+            return ""
+        name = ENGINE_NAMES[market]
+        rows = "".join(
+            f'<tr><td><input type="checkbox" name="items" value="{_e(r["id"])}:{_e(tf)}" aria-label="remove {_e(r["id"])}"></td>'
+            f'<td>{_e(r["id"])}</td><td>{_e(tf)}</td><td>{r["trades"]}</td>'
+            f'<td class="{"good" if r["total_r"] > 0 else "bad"}">{r["total_r"]:+.2f}R</td>'
+            f'<td class="small">{_e(r.get("from_backtest", ""))}{" by " + _e(r["added_by"]) if r.get("added_by") else ""}</td></tr>'
+            for tf, r in sorted(added, key=lambda x: (_tf_order(x[0]), x[1]["id"])))
+        return (f'<div class="card"><details open><summary><b>{name} WIN strategies you added from a backtest '
+                f'({len(added)})</b></summary><form method="post" action="/backtest/remove-win">{csrf(token)}'
+                f'<input type="hidden" name="engine" value="{market}"><table><tr><th></th><th>Strategy</th>'
+                '<th>Timeframe</th><th>Trades</th><th>Total</th><th>Backtest</th></tr>' + rows + '</table>'
+                '<p><button class="ghost">Remove the ticked ones from the WIN strategies</button></p>'
+                '<p class="small muted">A removed one stops opening paper trades on the next scan; its open trades '
+                'close normally. The other WIN strategies stay.</p></form></details></div>')
+
+    def _coverage(rep: dict) -> str:
+        """Where the stored candles start inside the period: before then nothing could be tested,
+        so a longer period gives the same result."""
+        late: dict[str, int] = {}
+        for r in rep.get("strategies", []):
+            for k, ts in (r.get("tested_from") or {}).items():
+                late[k] = ts
+        if not late:
+            return ""
+        by_tf: dict[str, list[int]] = {}
+        for k, ts in late.items():
+            by_tf.setdefault(k.rsplit(" ", 1)[-1], []).append(ts)
+        fmt = "%Y-%m-%d"
+        parts = [f"{tf}: {len(v)} pairs, from {time.strftime(fmt, time.gmtime(min(v) / 1000))} at the earliest, "
+                 f"{time.strftime(fmt, time.gmtime(max(v) / 1000))} at the latest"
+                 for tf, v in sorted(by_tf.items(), key=lambda kv: _tf_order(kv[0]))]
+        return ('<p class="bad small"><b>Not the whole period:</b> this server\'s stored candles start after the '
+                'period began, so trades before then could not be tested and a longer period gives the same '
+                f'result. {_e("; ".join(parts))}. Each pair also needs {select.MIN_BARS} candles to warm up first.</p>')
+
+    def _downloads(run_name: str) -> str:
+        if not run_name:
+            return ""
+        q = urllib.parse.quote(run_name)
+        links = [("trades.csv", "Trades (CSV)"), ("summary.csv", "Summary (CSV)"), ("chart.svg", "Chart (SVG image)"),
+                 ("report.json", "Full report (JSON)")]
+        return ('<p class="small">Download: ' + " · ".join(
+            f'<a href="/backtest/download?run={q}&amp;what={w}" download>{t}</a>' for w, t in links) + '</p>')
+
+    def _chart(rep: dict) -> str:
+        if not any("trade_list" in r for r in rep.get("strategies", [])):
+            return ('<div class="card"><p class="muted small">This run is from before the chart was added: run it '
+                    'again to see the chart and the trade list.</p></div>')
+        drawn = backtest_chart.svg(rep)
+        if not drawn:
+            return '<div class="card"><p class="muted">No trades in this period, so there is nothing to chart.</p></div>'
+        return ('<div class="card chart"><h3>Running total in R</h3><p class="small muted">Each strategy\'s result '
+                'added up trade by trade, at the moment each trade closed (after costs).</p>' + drawn + '</div>')
+
+    def _trade_list(rep: dict) -> str:
+        rows = [(r["id"], t) for r in rep.get("strategies", []) for t in r.get("trade_list") or []]
+        if not rows:
+            return ""
+        rows.sort(key=lambda rt: -rt[1]["exit_ts"])
+        shown = rows[:200]
+
+        def when(ms):
+            return time.strftime("%Y-%m-%d %H:%M", time.gmtime(ms / 1000)) if ms else "–"
+
+        body = "".join(
+            f'<tr><td class="small">{_e(sid)}</td><td>{_e(t["symbol"])} {_e(t["timeframe"])}</td><td>{_e(t["side"])}</td>'
+            f'<td class="small">{when(t["entry_ts"])}</td><td class="small">{when(t["exit_ts"])}</td>'
+            f'<td>{t["entry"]:.6g}</td><td>{t["exit"]:.6g}</td><td class="small">{_e(t["exit_reason"])}</td>'
+            f'<td class="{"good" if t["r"] > 0 else "bad"}">{t["r"]:+.2f}R</td></tr>' for sid, t in shown)
+        more = f" (newest {len(shown)} of {len(rows)}; the CSV has them all)" if len(rows) > len(shown) else ""
+        return (f'<div class="card"><details><summary>Every trade{more}</summary><table><tr><th>Strategy</th>'
+                '<th>Pair</th><th>Side</th><th>Opened (UTC)</th><th>Closed (UTC)</th><th>Entry</th><th>Exit</th>'
+                f'<th>Why closed</th><th>Result</th></tr>{body}</table></details></div>')
+
     def _result(rep: dict, token: str = "", run_name: str = "", market: str = "spot") -> str:
         fmt = "%Y-%m-%d"
         made = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(rep.get("made", 0)))
@@ -105,8 +185,10 @@ def add_backtest_routes(app, *, settings, page, guard, auth, paths, csrf, jobs):
                 f'{time.strftime(fmt, time.gmtime(rep["start"] / 1000))} to '
                 f'{time.strftime(fmt, time.gmtime((rep["end"] - 1) / 1000))}</h3>'
                 f'<p class="small muted">Run {made} on {len(rep["pairs"])} pairs: {_e(", ".join(rep["pairs"]))}. '
+                'A simulation on the real Bybit candles stored on this server: no order is placed. '
                 'Out of the period only trades that opened inside it count; after fees, slippage and (Futures) '
-                'funding. Fewer than 30 trades proves little either way.</p></div>')
+                'funding. Fewer than 30 trades proves little either way.</p>'
+                + _coverage(rep) + _downloads(run_name) + '</div>' + _chart(rep) + _trade_list(rep))
 
         def line(name, m, extra="", tick=""):
             return (f'<tr><td>{tick}</td><td>{name}</td><td>{m.get("trades", 0)}</td><td>{m.get("win_rate", 0):.0%}</td>'
@@ -173,6 +255,7 @@ def add_backtest_routes(app, *, settings, page, guard, auth, paths, csrf, jobs):
         if busy:
             parts.append(f'<div class="card"><p>Running now: {_e(busy["title"])} '
                          f'(<a href="/jobs/{_e(busy["id"])}">progress</a>). The result appears here when it is done.</p></div>')
+        parts.append(_added_list(eng, token))
         runs = _runs(eng)
         shown = os.path.join(runs_dir, os.path.basename(run)) if run else (runs[0] if runs else "")
         rep = _load(shown) if shown and shown in runs else None
@@ -336,3 +419,66 @@ def add_backtest_routes(app, *, settings, page, guard, auth, paths, csrf, jobs):
         if refused:
             msg += " Not added: " + "; ".join(refused) + "."
         return back(msg)
+
+    @app.get("/backtest/download")
+    def backtest_download(request: Request, run: str = "", what: str = ""):
+        """One saved Backtest result as a file: the trades or the summary as CSV, the chart as an
+        SVG image, or the whole report as JSON."""
+        user, token, redirect = guard(request)
+        if redirect:
+            return redirect
+        name = os.path.basename(run)
+        path = os.path.join(runs_dir, name)
+        if path not in _runs("spot") + _runs("futures"):
+            return PlainTextResponse("no such backtest result", status_code=404)
+        rep = _load(path)
+        if rep is None:
+            return PlainTextResponse("that result can't be read", status_code=404)
+        stem = name[:-5]
+        if what == "trades.csv":
+            body, kind = select.trades_csv(rep), "text/csv"
+        elif what == "summary.csv":
+            body, kind = select.summary_csv(rep), "text/csv"
+        elif what == "chart.svg":
+            body, kind = backtest_chart.svg(rep, standalone=True), "image/svg+xml"
+            if not body:
+                return PlainTextResponse("no trades in this result, so there is no chart", status_code=404)
+        elif what == "report.json":
+            body, kind = json.dumps(rep, indent=1), "application/json"
+        else:
+            return PlainTextResponse("unknown download", status_code=404)
+        return Response(body, media_type=kind,
+                        headers={"Content-Disposition": f'attachment; filename="backtest-{stem}-{what}"',
+                                 "X-Content-Type-Options": "nosniff"})
+
+    @app.post("/backtest/remove-win")
+    async def backtest_remove_win(request: Request):
+        """Take ticked strategies that were added from a backtest out of this engine's WIN strategies
+        (``learn win-remove``, a background job like the other picks)."""
+        form = await request.form()
+        user, token, redirect = guard(request)
+        if redirect:
+            return redirect
+        if not auth.check_csrf(token, form.get("csrf", "")):
+            return PlainTextResponse("bad form token; reload the page", status_code=403)
+        eng = str(form.get("engine", ""))
+        if eng not in ENGINE_NAMES:
+            eng = _engine()
+        name = ENGINE_NAMES[eng]
+
+        def back(msg: str):
+            return RedirectResponse("/backtest?" + urllib.parse.urlencode({"msg": msg}), status_code=303)
+
+        known = {f"{r['id']}:{tf}" for tf, r in
+                 picks.added_from_backtests(picks.load(picks.picks_path(paths.registry, eng)))}
+        items = [i for i in dict.fromkeys(str(v) for v in form.getlist("items")) if i in known]
+        if not items:
+            return back("Tick at least one WIN strategy to remove.")
+        if any(j["status"] in ("queued", "running") and j.get("meta", {}).get("kind") == "pick" for j in jobs.list()):
+            return back("A WIN pick is already running; try again when it ends.")
+        jobs.submit(f"{name}: remove {len(items)} WIN strategies added from backtests",
+                    [["learn", "win-remove", "--items", ",".join(items), "--market", eng, "--by", user]],
+                    meta={"kind": "pick", "by": user, "market": eng})
+        shown = ", ".join(i.replace(":", " ") for i in items)
+        return back(f"Removing from {name}'s WIN strategies: {shown}. They stop opening paper trades on the next "
+                    "scan; their open trades close normally.")

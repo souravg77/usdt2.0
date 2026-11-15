@@ -370,7 +370,9 @@ after {_e(window.split(" to ")[1])}; the next one waits for the next night.</p>
                 f'{" · this page refreshes every 5 seconds" if running else ""}</p>'
                 f'<p>Started {_when(j["started"])}, finished {_when(j["finished"])}</p>'
                 f'<pre class="log">{_e(jobs.log_text(job_id)) or "(no output yet)"}</pre>'
-                '<p><a href="/">Back to the overview</a> to see the strategies and their results.</p>')
+                + ('<p><a href="/backtest">See the result on the Backtest page</a>: chart, every trade and '
+                   'downloads.</p>' if (j.get("meta") or {}).get("kind") == "backtest" else
+                   '<p><a href="/">Back to the overview</a> to see the strategies and their results.</p>'))
         return page(j["title"], body, user, token, refresh=5 if running else None)
 
     # ---- trading (Phases 5 and 6) ---------------------------------------------------------------

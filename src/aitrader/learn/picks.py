@@ -399,6 +399,41 @@ def add_backtested(reg: Registry, report: dict, ids: list[str], picks_file: str,
     return {"added": added, "refused": refused}
 
 
+def added_from_backtests(picks: dict) -> list[tuple[str, dict]]:
+    """(timeframe, result) for each WIN strategy that was added from a Backtest page result and is
+    still selected."""
+    out = []
+    for tf, cur in picks.items():
+        kept = set((cur or {}).get("picked", []))
+        out += [(tf, r) for r in (cur or {}).get("results", []) if r.get("from_backtest") and r["id"] in kept]
+    return out
+
+
+def remove_added(reg: Registry, items: list[tuple[str, str]], picks_file: str, market: str = "spot",
+                 by: str = "") -> dict:
+    """Take strategies added from a backtest out of ``market``'s WIN strategies: for each
+    (id, timeframe) its WIN copy stops paper trading (open trades close normally) and it leaves
+    that timeframe's pick. Only ones added from a backtest are touched."""
+    picks = load(picks_file)
+    removed, refused = [], []
+    for sid, tf in dict.fromkeys(items):
+        cur = picks.get(tf) or {}
+        row = next((r for r in cur.get("results", []) if r["id"] == sid), None)
+        if not row or not row.get("from_backtest") or sid not in cur.get("picked", []):
+            refused.append(f"{sid} {tf}: not a WIN strategy added from a backtest")
+            continue
+        cur["picked"] = [i for i in cur["picked"] if i != sid]
+        cur["results"] = [r for r in cur["results"] if r["id"] != sid]
+        c = reg.entries.get(copy_id(sid, tf, market))
+        if c is not None and c.status == "paper":
+            c.set_status("retired", f"removed from the WIN strategies on {tf}{' by ' + by if by else ''}")
+        removed.append(f"{sid} {tf}")
+    reg.save()
+    if removed:
+        save(picks_file, picks)
+    return {"removed": removed, "refused": refused}
+
+
 def clear(reg: Registry, timeframe: str, picks_file: str, market: str = "spot") -> list[str]:
     """Undo ``market``'s pick: every strategy trades ``timeframe`` again on that engine and its
     pick copies stop."""
