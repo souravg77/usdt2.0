@@ -985,6 +985,22 @@ def cmd_learn(s: Settings, args) -> int:
         print(report_text(rep))
         print(f"report saved to {path}")
         return 0
+    if cmd == "win-remove":
+        from .learn import picks
+
+        items = []
+        for it in args.items.split(","):
+            sid, _, tf = it.strip().rpartition(":")
+            if sid and tf:
+                items.append((sid, tf))
+        out = picks.remove_added(reg, items, picks.picks_path(args.registry, args.market), args.market,
+                                 by=args.by or "")
+        for r in out["removed"]:
+            print(f"  removed from WIN: {r}")
+        for r in out["refused"]:
+            print(f"  not removed: {r}")
+        print(f"{len(out['removed'])} removed, {len(out['refused'])} not removed")
+        return 0
     if cmd == "win-add":
         from .learn import picks
 
@@ -2192,6 +2208,11 @@ def build_parser() -> argparse.ArgumentParser:
     lrp.add_argument("--years", type=int, default=5)
     lrp.add_argument("--out", default="data/reports/backtest.json")
     lrp.add_argument("--no-builtins", action="store_true", help="leave out the hand-coded strategies")
+    lwr = le_sub.add_parser("win-remove", help="take WIN strategies added from a backtest out again (their "
+                            "WIN copies stop paper trading)")
+    lwr.add_argument("--items", required=True, help="id:timeframe pairs, comma separated")
+    lwr.add_argument("--market", choices=["spot", "futures"], default="spot")
+    lwr.add_argument("--by", help="who removed them")
     lwa = le_sub.add_parser("win-add", help="add strategies from a Backtest-page report to the WIN strategies "
                             "on their timeframes that already have some (the others stay)")
     lwa.add_argument("--report", required=True, help="the backtest-select report (JSON)")

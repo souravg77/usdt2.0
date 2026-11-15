@@ -242,3 +242,88 @@ def test_the_win_add_command_adds_from_a_report(tmp_path, monkeypatch):
                  "--market", "futures", "--by", "admin"]) == 0
     assert Registry(reg_path).get("fwin1h-up").status == "paper"
     assert picks.load(path)["1h"]["picked"] == ["kept", "up"]
+
+
+def test_the_report_keeps_the_trades_and_says_where_the_candles_start(tmp_path):
+    df = synthetic(n=3000)
+    store = CandleStore(str(tmp_path / "c.db"))
+    fill_store(store, df)
+    fill_store(store, synthetic(n=400, seed=9), sym="ETH/USDT")  # only the newest 400 hours stored
+    reg, up, _o, _s = _entries(str(tmp_path / "reg.json"))
+    end = int(df.ts.iloc[-1]) + H
+    rep = select.run_selected([up], store, "bybit", ["BTC/USDT", "ETH/USDT"], end - 60 * DAY, end,
+                              select.BacktestConfig())
+    store.close()
+    row = rep["strategies"][0]
+    assert len(row["trade_list"]) == row["trades"] and row["trade_list"][0]["side"] == "long"
+    assert [t["exit_ts"] for t in row["trade_list"]] == sorted(t["exit_ts"] for t in row["trade_list"])
+    assert "BTC/USDT 1h" not in row["tested_from"]  # its candles start long before the period
+    late = row["tested_from"].get("ETH/USDT 1h")
+    assert late is None or late > end - 60 * DAY
+    pts = select.curve(row["trade_list"])
+    assert abs(pts[-1][1] - row["total_r"]) < 0.01
+    csv_text = select.trades_csv(rep)
+    assert csv_text.splitlines()[0].startswith("strategy,pair,timeframe,side,opened_utc")
+    assert len(csv_text.strip().splitlines()) == row["trades"] + 1
+    assert "ALL TOGETHER" in select.summary_csv(rep) and "BTC/USDT 1h" in select.summary_csv(rep)
+
+
+def test_the_result_shows_a_chart_the_trades_and_downloads(tmp_path, monkeypatch):
+    from aitrader.web import backtest_chart
+
+    client, _csrf, paths, _sub = _web(tmp_path, monkeypatch)
+    _entries(paths.registry)
+    runs = os.path.join(os.path.dirname(paths.report), "selected")
+    os.makedirs(runs, exist_ok=True)
+    t = {"symbol": "BTC/USDT", "timeframe": "1h", "side": "long", "entry": 100.0, "exit": 102.0, "stop": 99.0,
+         "target": 102.0, "exit_reason": "target"}
+    trades = [{**t, "entry_ts": 2 * DAY, "exit_ts": 3 * DAY, "r": 2.0},
+              {**t, "entry_ts": 5 * DAY, "exit_ts": 6 * DAY, "r": -1.0, "exit_reason": "stop"}]
+    rep = {**_report(), "strategies": [{**_report()["strategies"][0], "trade_list": trades,
+                                        "tested_from": {"ETH/USDT 1h": 10 * DAY}}]}
+    select.save(rep, os.path.join(runs, "spot-20261115-100000.json"))
+    page = client.get("/backtest").text
+    assert "Running total in R" in page and "<svg" in page and "up: +1.0R over 2 trades" in page
+    assert "Not the whole period" in page and "1970-01-11" in page
+    assert "Every trade" in page and "target" in page and "-1.00R" in page
+    assert "what=trades.csv" in page and "what=chart.svg" in page
+    r = client.get("/backtest/download?run=spot-20261115-100000.json&what=trades.csv")
+    assert r.status_code == 200 and "attachment" in r.headers["content-disposition"]
+    assert r.text.splitlines()[1].startswith("up,BTC/USDT,1h,long,1970-01-03 00:00")
+    svg = client.get("/backtest/download?run=spot-20261115-100000.json&what=chart.svg")
+    assert svg.headers["content-type"].startswith("image/svg+xml") and 'fill="#ffffff"' in svg.text
+    assert "var(--" not in svg.text  # a file on its own: fixed colours
+    assert client.get("/backtest/download?run=spot-20261115-100000.json&what=summary.csv").text.startswith("strategy,pair")
+    assert json.loads(client.get("/backtest/download?run=spot-20261115-100000.json&what=report.json").text)["market"] == "spot"
+    assert client.get("/backtest/download?run=../../reg.json&what=report.json").status_code == 404
+    assert client.get("/backtest/download?run=spot-20261115-100000.json&what=x").status_code == 404
+    assert backtest_chart.svg({**rep, "strategies": []}) == ""
+
+
+def test_win_strategies_added_from_a_backtest_can_be_removed(tmp_path, monkeypatch):
+    from aitrader.cli import main
+    from aitrader.learn import picks
+
+    client, csrf, paths, submitted = _web(tmp_path, monkeypatch)
+    reg, *_ = _entries(paths.registry)
+    path = _one_h_pick(paths.registry)
+    assert "you added from a backtest" not in client.get("/backtest").text
+    picks.add_backtested(reg, _report(), ["up"], path, "spot", by="admin")
+    page = client.get("/backtest").text
+    assert "Spot AI WIN strategies you added from a backtest (1)" in page and 'value="up:1h"' in page
+    assert 'value="kept:1h"' not in page  # only ones added from a backtest can be removed here
+    r = client.post("/backtest/remove-win", data={"csrf": csrf, "engine": "spot", "items": ["kept:1h"]},
+                    follow_redirects=True)
+    assert "Tick at least one" in r.text and not submitted
+    r = client.post("/backtest/remove-win", data={"csrf": csrf, "engine": "spot", "items": ["up:1h", "kept:1h"]},
+                    follow_redirects=True)
+    assert "Removing from Spot AI" in r.text
+    steps, meta = submitted[-1]
+    assert steps[0] == ["learn", "win-remove", "--items", "up:1h", "--market", "spot", "--by", "admin"]
+    assert meta["kind"] == "pick"
+    monkeypatch.chdir(tmp_path)
+    assert main(["learn", "--registry", paths.registry, "win-remove", "--items", "up:1h,kept:1h"]) == 0
+    cur = picks.load(path)["1h"]
+    assert cur["picked"] == ["kept"] and [r["id"] for r in cur["results"]] == ["kept"]
+    assert Registry(paths.registry).get("win1h-up").status == "retired"
+    assert "you added from a backtest" not in client.get("/backtest").text
