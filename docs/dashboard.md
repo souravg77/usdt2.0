@@ -100,6 +100,15 @@ worst drop and t, with a per-pair breakdown; the last 20 runs per engine are kep
 `data/reports/selected/`. It is a report only: no strategy moves on the ladder, its own test
 results are not changed, and nothing trades.
 
+Under the result, tick strategies and press **Add the ticked ones to the WIN strategies** to make
+each one a WIN strategy of the engine you are viewing, on its own timeframe (`aitrader learn
+win-add --report --ids --market`). Only timeframes that already have WIN strategies (from Keep only
+the winners on the Replay page) take one, because starting a list stops every other strategy
+trading that timeframe; the others are refused with the reason. The WIN strategies already there
+stay, the backtest result is saved with the new one so it shows in the Trading page's tick list
+(where it can be unticked again), and a later Keep only the winners on that timeframe judges it
+again by its own rules.
+
 ## Monitor page
 
 **Monitor** (`/monitor`, refreshes every 30 s) has four panels, each also served as JSON for other

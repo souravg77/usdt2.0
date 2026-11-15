@@ -328,6 +328,77 @@ def choose(reg: Registry, entries: list[Entry], timeframe: str, picks_file: str,
                  min_trades=cur.get("min_trades", MIN_TRADES), market=market, chosen=list(ids))
 
 
+def can_add(entry: Entry | None, timeframe: str, picks: dict, market: str) -> str:
+    """Why ``entry`` can't be added to ``market``'s WIN strategies on ``timeframe`` ("" when it can).
+    Only a timeframe that already has WIN strategies takes one: starting a list would stop every
+    other strategy trading that timeframe, which only Keep only the winners does."""
+    if entry is None:
+        return "not in the registry"
+    if is_copy(entry):
+        return "already a WIN copy or a twin"
+    if not learns_for(entry, market):
+        return "not a strategy this engine trades"
+    if not (picks.get(timeframe) or {}).get("results"):
+        return f"no WIN strategies on {timeframe} yet (run Keep only the winners on {timeframe} first)"
+    return ""
+
+
+def tf_result(row: dict, timeframe: str) -> dict | None:
+    """One strategy's Backtest-page result (``learn backtest-select``) on one timeframe, in the
+    shape of a pick's results (no quarters: that test didn't split them). None without trades."""
+    parts = [m for k, m in (row.get("by_pair") or {}).items() if k.rsplit(" ", 1)[-1] == timeframe]
+    trades = sum(m.get("trades", 0) for m in parts)
+    if not trades:
+        return None
+    wins = sum(m.get("trades", 0) * m.get("win_rate", 0) for m in parts)
+    return {"id": row["id"], "trades": trades, "win_rate": round(100 * wins / trades, 1),
+            "total_r": round(sum(m.get("total_r", 0) for m in parts), 2),
+            "quarters_up": 0, "quarters_down": 0, "quarters": {}}
+
+
+def add_backtested(reg: Registry, report: dict, ids: list[str], picks_file: str, market: str = "spot",
+                   by: str = "") -> dict:
+    """Add the strategies ``ids`` from a Backtest-page ``report`` to ``market``'s WIN strategies on
+    each of their timeframes that already has some; every WIN strategy already there stays. Returns
+    {"added": ["<id> <tf>"], "refused": ["<id> <tf>: why"]}."""
+    picks = load(picks_file)
+    rows = {r["id"]: r for r in report.get("strategies", []) if not r.get("error")}
+    fmt = "%Y-%m-%d"
+    period = (f"{time.strftime(fmt, time.gmtime(report['start'] / 1000))} to "
+              f"{time.strftime(fmt, time.gmtime((report['end'] - 1) / 1000))}")
+    added, refused = [], []
+    for sid in dict.fromkeys(ids):
+        row, entry = rows.get(sid), reg.entries.get(sid)
+        if row is None:
+            refused.append(f"{sid}: not in this backtest's results")
+            continue
+        for tf in row.get("timeframes") or []:
+            why = can_add(entry, tf, picks, market)
+            res = None if why else tf_result(row, tf)
+            if not why and res is None:
+                why = f"no trades on {tf} in this backtest"
+            if why:
+                refused.append(f"{sid} {tf}: {why}")
+                continue
+            res.update(name=entry.name, from_backtest=period, added_by=by)
+            c = pick_copy(entry, tf, market)
+            note = (f"added to the WIN strategies on {tf}{' by ' + by if by else ''} from a backtest {period}: "
+                    f"{res['total_r']:+.2f}R over {res['trades']} trades")
+            if reg.add(c):
+                reg.entries[c.id].set_status("paper", note)
+            elif reg.entries[c.id].status != "paper":
+                reg.entries[c.id].set_status("paper", note)
+            cur = picks[tf]
+            cur["results"] = [r for r in cur["results"] if r["id"] != sid] + [res]
+            if sid not in cur.get("picked", []):
+                cur["picked"] = list(cur.get("picked", [])) + [sid]
+            added.append(f"{sid} {tf}")
+    reg.save()
+    if added:
+        save(picks_file, picks)
+    return {"added": added, "refused": refused}
+
+
 def clear(reg: Registry, timeframe: str, picks_file: str, market: str = "spot") -> list[str]:
     """Undo ``market``'s pick: every strategy trades ``timeframe`` again on that engine and its
     pick copies stop."""
