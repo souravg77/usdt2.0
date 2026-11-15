@@ -985,6 +985,27 @@ def cmd_learn(s: Settings, args) -> int:
         print(report_text(rep))
         print(f"report saved to {path}")
         return 0
+    if cmd == "win-add":
+        from .learn import picks
+
+        try:
+            with open(args.report, encoding="utf-8") as fh:
+                rep = json.load(fh)
+        except (OSError, ValueError) as exc:
+            print(f"can't read the backtest report: {exc}", file=sys.stderr)
+            return 1
+        if rep.get("market", "spot") != args.market:
+            print(f"that backtest ran on {rep.get('market')}, not {args.market}", file=sys.stderr)
+            return 1
+        ids = [i.strip() for i in args.ids.split(",") if i.strip()]
+        out = picks.add_backtested(reg, rep, ids, picks.picks_path(args.registry, args.market), args.market,
+                                   by=args.by or "")
+        for a in out["added"]:
+            print(f"  added to WIN: {a}")
+        for r in out["refused"]:
+            print(f"  not added: {r}")
+        print(f"{len(out['added'])} added, {len(out['refused'])} not added")
+        return 0
     if cmd == "backtest-select":
         from .learn import select
 
@@ -2171,6 +2192,12 @@ def build_parser() -> argparse.ArgumentParser:
     lrp.add_argument("--years", type=int, default=5)
     lrp.add_argument("--out", default="data/reports/backtest.json")
     lrp.add_argument("--no-builtins", action="store_true", help="leave out the hand-coded strategies")
+    lwa = le_sub.add_parser("win-add", help="add strategies from a Backtest-page report to the WIN strategies "
+                            "on their timeframes that already have some (the others stay)")
+    lwa.add_argument("--report", required=True, help="the backtest-select report (JSON)")
+    lwa.add_argument("--ids", required=True, help="strategy ids, comma separated")
+    lwa.add_argument("--market", choices=["spot", "futures"], default="spot")
+    lwa.add_argument("--by", help="who added them (kept with the pick)")
     lbs = le_sub.add_parser("backtest-select", help="backtest the strategies you pick over a period you pick "
                             "(the dashboard's Backtest page); reports only, nothing moves or trades")
     lbs.add_argument("--ids", required=True, help="strategy ids, comma separated")

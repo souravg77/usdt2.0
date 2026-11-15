@@ -153,3 +153,92 @@ def test_futures_view_tests_on_the_perpetuals_with_shorts(tmp_path, monkeypatch)
     step = submitted[-1][0][0]
     assert step[3] == "futures" and step[5] == sh.id and step[7] == "ZEC/USDT"  # only pairs it has candles for
     assert 'href="/backtest?ids=' in client.get(f"/arena?ids={up.id}").text
+
+
+def _report(market="spot"):
+    m = {"trades": 12, "win_rate": 0.5, "expectancy_r": 0.2, "total_r": 2.4, "profit_factor": 1.5,
+         "max_drawdown_r": 2.0, "t_stat": 0.8}
+    return {"engine": "Spot AI", "market": market, "made": 0, "start": 0, "end": 30 * DAY, "pairs": ["BTC/USDT"],
+            "strategies": [{"id": "up", "status": "paper", "timeframes": ["1h"], **m,
+                            "by_pair": {"BTC/USDT 1h": m, "ETH/USDT 1h": m}, "no_data": []},
+                           {"id": "other", "status": "candidate", "timeframes": ["4h"], **m,
+                            "by_pair": {"BTC/USDT 4h": m}, "no_data": []}],
+            "total": m}
+
+
+def _one_h_pick(reg_path, market="spot"):
+    from aitrader.learn import picks
+
+    path = picks.picks_path(reg_path, market)
+    picks.save(path, {"1h": {"at": 1, "market": market, "picked": ["kept"],
+                             "results": [{"id": "kept", "name": "kept", "trades": 40, "win_rate": 50.0,
+                                          "total_r": 5.0, "quarters_up": 2, "quarters_down": 1}]}})
+    return path
+
+
+def test_adding_backtested_strategies_to_win_keeps_the_others_and_needs_a_list(tmp_path):
+    from aitrader.learn import picks
+
+    reg, up, other, sh = _entries(str(tmp_path / "reg.json"))
+    path = _one_h_pick(str(tmp_path / "reg.json"))
+    out = picks.add_backtested(reg, _report(), ["up", "other", "nope"], path, "spot", by="admin")
+    assert out["added"] == ["up 1h"]
+    assert any(r.startswith("other 4h: no WIN strategies on 4h") for r in out["refused"])
+    assert any(r.startswith("nope:") for r in out["refused"])
+    reg2 = Registry(str(tmp_path / "reg.json"))
+    c = reg2.get("win1h-up")
+    assert c.status == "paper" and c.spec["pick"] == "1h" and "from a backtest" in c.history[-1]["why"]
+    cur = picks.load(path)["1h"]
+    assert cur["picked"] == ["kept", "up"]  # the WIN strategy already there stays
+    row = next(r for r in cur["results"] if r["id"] == "up")
+    assert row["trades"] == 24 and row["total_r"] == 4.8 and row["from_backtest"] and row["added_by"] == "admin"
+    assert picks.why_not(row) == "only 24 trades (needs 30)"  # the Trading page's tick list shows why
+    assert "4h" not in picks.load(path)  # no list was started
+    # a copy can't be added again, and Spot AI never takes a short
+    assert picks.can_add(reg2.get("win1h-up"), "1h", picks.load(path), "spot") == "already a WIN copy or a twin"
+    assert "not a strategy this engine trades" == picks.can_add(sh, "1h", picks.load(path), "spot")
+    again = picks.add_backtested(reg2, _report(), ["up"], path, "spot")
+    assert again["added"] == ["up 1h"] and picks.load(path)["1h"]["picked"] == ["kept", "up"]
+
+
+def test_the_result_adds_ticked_strategies_to_win_as_a_job(tmp_path, monkeypatch):
+    client, csrf, paths, submitted = _web(tmp_path, monkeypatch)
+    _entries(paths.registry)
+    runs = os.path.join(os.path.dirname(paths.report), "selected")
+    os.makedirs(runs, exist_ok=True)
+    run = os.path.join(runs, "spot-20261115-100000.json")
+    select.save(_report(), run)
+    page = client.get("/backtest").text
+    assert "Add the ticked ones to the WIN strategies" in page and "no WIN strategies on any timeframe yet" in page
+    data = {"csrf": csrf, "run": "spot-20261115-100000.json", "engine": "spot", "ids": ["up", "other"]}
+    r = client.post("/backtest/add-win", data=data, follow_redirects=True)
+    assert "Nothing added" in r.text and "no WIN strategies on 1h yet" in r.text and not submitted
+    _one_h_pick(paths.registry)
+    assert "has WIN strategies on 1h" in client.get("/backtest").text
+    assert client.post("/backtest/add-win", data={**data, "csrf": "x"}).status_code == 403
+    r = client.post("/backtest/add-win", data=data, follow_redirects=True)
+    assert "Adding to Spot AI" in r.text and "up 1h" in r.text and "Not added: other 4h" in r.text
+    steps, meta = submitted[-1]
+    assert meta["kind"] == "pick" and meta["market"] == "spot"
+    assert steps[0][:3] == ["learn", "win-add", "--report"] and steps[0][3] == run
+    assert steps[0][4:8] == ["--ids", "up,other", "--market", "spot"]
+    r = client.post("/backtest/add-win", data={**data, "run": "../../reg.json"}, follow_redirects=True)
+    assert "one of Spot AI" in r.text and len(submitted) == 1
+
+
+def test_the_win_add_command_adds_from_a_report(tmp_path, monkeypatch):
+    from aitrader.cli import main
+    from aitrader.learn import picks
+
+    monkeypatch.chdir(tmp_path)
+    reg_path = str(tmp_path / "reg.json")
+    _entries(reg_path)
+    path = _one_h_pick(reg_path, "futures")
+    rep = tmp_path / "rep.json"
+    select.save(_report("futures"), str(rep))
+    assert main(["learn", "--registry", reg_path, "win-add", "--report", str(rep), "--ids", "up",
+                 "--market", "spot"]) == 1  # a Futures report never feeds Spot AI
+    assert main(["learn", "--registry", reg_path, "win-add", "--report", str(rep), "--ids", "up",
+                 "--market", "futures", "--by", "admin"]) == 0
+    assert Registry(reg_path).get("fwin1h-up").status == "paper"
+    assert picks.load(path)["1h"]["picked"] == ["kept", "up"]

@@ -19,7 +19,7 @@ import urllib.parse
 from fastapi import Request
 from fastapi.responses import PlainTextResponse, RedirectResponse
 
-from ..learn import select, wallet
+from ..learn import picks, select, wallet
 from ..learn.picks import learns_for
 from ..learn.registry import Registry
 
@@ -27,6 +27,11 @@ ENGINE_NAMES = {"spot": "Spot AI", "futures": "Futures AI"}
 MONTHS = (1, 3, 6, 12, 24, 36)
 KEEP_RUNS = 20
 DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+TF_ORDER = ("1m", "5m", "15m", "30m", "1h", "4h", "1d")
+
+
+def _tf_order(tf: str) -> int:
+    return TF_ORDER.index(tf) if tf in TF_ORDER else len(TF_ORDER)
 
 
 def _e(x) -> str:
@@ -93,7 +98,7 @@ def add_backtest_routes(app, *, settings, page, guard, auth, paths, csrf, jobs):
         except (OSError, ValueError):
             return None
 
-    def _result(rep: dict) -> str:
+    def _result(rep: dict, token: str = "", run_name: str = "", market: str = "spot") -> str:
         fmt = "%Y-%m-%d"
         made = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(rep.get("made", 0)))
         head = (f'<div class="card"><h3>Result: {_e(rep.get("engine", ""))}, '
@@ -103,8 +108,8 @@ def add_backtest_routes(app, *, settings, page, guard, auth, paths, csrf, jobs):
                 'Out of the period only trades that opened inside it count; after fees, slippage and (Futures) '
                 'funding. Fewer than 30 trades proves little either way.</p></div>')
 
-        def line(name, m, extra=""):
-            return (f'<tr><td>{name}</td><td>{m.get("trades", 0)}</td><td>{m.get("win_rate", 0):.0%}</td>'
+        def line(name, m, extra="", tick=""):
+            return (f'<tr><td>{tick}</td><td>{name}</td><td>{m.get("trades", 0)}</td><td>{m.get("win_rate", 0):.0%}</td>'
                     f'<td>{_r(m.get("expectancy_r"))}</td><td>{m.get("total_r", 0):+.1f}R</td>'
                     f'<td>{m.get("profit_factor", 0):.2f}</td><td>{m.get("max_drawdown_r", 0):.1f}R</td>'
                     f'<td>{m.get("t_stat", 0):.2f}</td><td class="small">{extra}</td></tr>')
@@ -113,7 +118,7 @@ def add_backtest_routes(app, *, settings, page, guard, auth, paths, csrf, jobs):
         for r in sorted(rep["strategies"], key=lambda r: -(r.get("total_r") or 0)):
             name = f'<a href="/strategies/{urllib.parse.quote(r["id"])}">{_e(r["id"])}</a>'
             if r.get("error"):
-                rows.append(f'<tr><td>{name}</td><td colspan="8" class="bad small">could not run: {_e(r["error"])}</td></tr>')
+                rows.append(f'<tr><td></td><td>{name}</td><td colspan="8" class="bad small">could not run: {_e(r["error"])}</td></tr>')
                 continue
             pairs = r.get("by_pair") or {}
             detail = ""
@@ -124,12 +129,27 @@ def add_backtest_routes(app, *, settings, page, guard, auth, paths, csrf, jobs):
                 detail = f'<details><summary>by pair</summary><ul>{inner}</ul></details>'
             if r.get("no_data"):
                 detail += f'<span class="muted">no candles for {len(r["no_data"])} pair/timeframe</span>'
+            tick = (f'<input type="checkbox" name="ids" value="{_e(r["id"])}" aria-label="add {_e(r["id"])}">'
+                    if run_name and r.get("trades") else "")
             rows.append(line(name + f' <span class="small muted">{_e(", ".join(r.get("timeframes") or []))}</span>',
-                             r, detail))
+                             r, detail, tick))
         rows.append(line("<b>All together</b>", rep["total"]))
-        table = ('<table><tr><th>Strategy</th><th>Trades</th><th>Win</th><th>Per trade</th><th>Total</th>'
+        table = ('<table><tr><th></th><th>Strategy</th><th>Trades</th><th>Win</th><th>Per trade</th><th>Total</th>'
                  '<th>Profit factor</th><th>Worst drop</th><th>t</th><th></th></tr>' + "".join(rows) + '</table>')
-        return head + table
+        if not run_name:
+            return head + table
+        have = [tf for tf, cur in picks.load(picks.picks_path(paths.registry, market)).items() if (cur or {}).get("results")]
+        name = ENGINE_NAMES.get(market, "")
+        lists = (f"{name} has WIN strategies on {', '.join(sorted(have, key=_tf_order))}"
+                 if have else f"{name} has no WIN strategies on any timeframe yet")
+        return (head + f'<form method="post" action="/backtest/add-win">{csrf(token)}'
+                f'<input type="hidden" name="run" value="{_e(run_name)}"><input type="hidden" name="engine" value="{market}">'
+                + table + '<div class="card"><p><button>Add the ticked ones to the WIN strategies</button></p>'
+                f'<p class="small muted">Each ticked strategy becomes a {name} WIN strategy on its own timeframe, '
+                'with this result saved next to it, and starts paper trading on the next scan. Only timeframes '
+                f'that already have WIN strategies take one: {_e(lists)}. The WIN strategies already there stay, '
+                'and the other engine is not changed. Fewer than 30 trades proves little; you can remove one again '
+                'with the tick boxes on the Trading page.</p></div></form>')
 
     @app.get("/backtest")
     def backtest_page(request: Request, ids: str = "", msg: str = "", run: str = ""):
@@ -157,7 +177,7 @@ def add_backtest_routes(app, *, settings, page, guard, auth, paths, csrf, jobs):
         shown = os.path.join(runs_dir, os.path.basename(run)) if run else (runs[0] if runs else "")
         rep = _load(shown) if shown and shown in runs else None
         if rep:
-            parts.append(_result(rep))
+            parts.append(_result(rep, token, os.path.basename(shown), eng))
             if len(runs) > 1:
                 links = " · ".join(f'<a href="/backtest?run={urllib.parse.quote(os.path.basename(p))}">'
                                    f'{_e(os.path.basename(p)[len(eng) + 1:-5])}</a>' for p in runs[:KEEP_RUNS])
@@ -264,3 +284,55 @@ def add_backtest_routes(app, *, settings, page, guard, auth, paths, csrf, jobs):
                     [step], meta={"kind": "backtest", "market": eng})
         return back(f"Backtesting {len(ids)} strategies on {len(pairs)} pairs ({when}). The result appears below "
                     "when it is done.")
+
+    @app.post("/backtest/add-win")
+    async def backtest_add_win(request: Request):
+        """Add the strategies ticked on a Backtest result to this engine's WIN strategies, on their
+        timeframes that already have some (``learn win-add``, a background job like the other picks)."""
+        form = await request.form()
+        user, token, redirect = guard(request)
+        if redirect:
+            return redirect
+        if not auth.check_csrf(token, form.get("csrf", "")):
+            return PlainTextResponse("bad form token; reload the page", status_code=403)
+        eng = str(form.get("engine", ""))
+        if eng not in ENGINE_NAMES:
+            eng = _engine()
+        name = ENGINE_NAMES[eng]
+        run = os.path.basename(str(form.get("run", "")))
+        path = os.path.join(runs_dir, run)
+
+        def back(msg: str):
+            q = {"msg": msg}
+            if run:
+                q["run"] = run
+            return RedirectResponse("/backtest?" + urllib.parse.urlencode(q), status_code=303)
+
+        rep = _load(path) if path in _runs(eng) else None
+        if not rep or rep.get("market", "spot") != eng:
+            return back(f"That backtest result isn't one of {name}'s; run it again.")
+        ids = list(dict.fromkeys(str(i) for i in form.getlist("ids")))
+        rows = {r["id"]: r for r in rep.get("strategies", []) if not r.get("error")}
+        ids = [i for i in ids if i in rows]
+        if not ids:
+            return back("Tick at least one strategy in the result.")
+        if any(j["status"] in ("queued", "running") and j.get("meta", {}).get("kind") == "pick" for j in jobs.list()):
+            return back("A WIN pick is already running; try again when it ends.")
+        saved = picks.load(picks.picks_path(paths.registry, eng))
+        reg = Registry(paths.registry)
+        ok, refused = [], []
+        for i in ids:
+            for tf in rows[i].get("timeframes") or []:
+                why = picks.can_add(reg.entries.get(i), tf, saved, eng)
+                if not why and picks.tf_result(rows[i], tf) is None:
+                    why = f"no trades on {tf} in this backtest"
+                (refused if why else ok).append(f"{i} {tf}" + (f" ({why})" if why else ""))
+        if not ok:
+            return back("Nothing added: " + "; ".join(refused) + ".")
+        jobs.submit(f"{name}: add {len(ok)} backtested strategies to the WIN strategies",
+                    [["learn", "win-add", "--report", path, "--ids", ",".join(ids), "--market", eng, "--by", user]],
+                    meta={"kind": "pick", "by": user, "market": eng})
+        msg = (f"Adding to {name}'s WIN strategies: {', '.join(ok)}. They paper trade from the next scan.")
+        if refused:
+            msg += " Not added: " + "; ".join(refused) + "."
+        return back(msg)
